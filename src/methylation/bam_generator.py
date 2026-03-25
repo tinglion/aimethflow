@@ -50,6 +50,14 @@ def check_and_build_index(reference_genome):
             return False
     return True
 
+def gen_bam_file_name(fastq_file, output_dir=None):
+    if output_dir:
+        base_name = os.path.basename(os.path.splitext(os.path.splitext(fastq_file)[0])[0])
+        bam_file = os.path.join(output_dir, f"{base_name}.bam")
+    else:
+        base_name = os.path.splitext(os.path.splitext(fastq_file)[0])[0]
+        bam_file = f"{base_name}.bam"
+    return bam_file
 
 def process_single_file(fastq_file, reference_genome, output_dir=None, threads=1):
     """
@@ -64,12 +72,7 @@ def process_single_file(fastq_file, reference_genome, output_dir=None, threads=1
         str: 生成的BAM文件路径，如果失败则返回None
     """
     # 生成BAM文件名
-    if output_dir:
-        base_name = os.path.basename(os.path.splitext(os.path.splitext(fastq_file)[0])[0])
-        bam_file = os.path.join(output_dir, f"{base_name}.bam")
-    else:
-        base_name = os.path.splitext(os.path.splitext(fastq_file)[0])[0]
-        bam_file = f"{base_name}.bam"
+    bam_file = gen_bam_file_name(fastq_file, output_dir=output_dir)
     
     # 检查BAM文件是否已经存在
     if os.path.exists(bam_file):
@@ -87,7 +90,8 @@ def process_single_file(fastq_file, reference_genome, output_dir=None, threads=1
     
     # 使用bwa mem进行比对
     print("正在使用bwa mem进行比对...")
-    sam_file = bam_file.replace(".bam", ".sam")
+    # sam_file = bam_file.replace(".bam", ".sam")
+    sam_file = "/tmp/a1.sam"
     align_cmd = f"bwa mem -M -t {threads} {reference_genome} {fastq_file} > {sam_file}"
     print(f"执行命令: {align_cmd}")
     try:

@@ -19,6 +19,8 @@ import argparse
 import os
 import time
 
+from utils.logger import logger
+
 
 def load_methylation_data(file_path):
     """
@@ -40,7 +42,26 @@ def load_methylation_data(file_path):
             if len(parts) >= 4:
                 chrom = parts[0]
                 pos = int(parts[1])
-                meth_level = float(parts[3])
+                # 处理不同格式的文件
+                if len(parts) == 4:
+                    # 4列格式：chrom, start, end, methylation_percentage
+                    meth_level = float(parts[3]) / 100  # 转换为0-1范围
+                elif len(parts) == 6:
+                    # 6列格式：chrom, start, end, methylation_percentage, meth_count, unmeth_count
+                    try:
+                        meth_count = int(parts[4])
+                        unmeth_count = int(parts[5])
+                        total_count = meth_count + unmeth_count
+                        if total_count > 0:
+                            meth_level = meth_count / total_count
+                        else:
+                            meth_level = 0.0
+                    except ValueError:
+                        # 如果解析失败，尝试使用第4列作为甲基化水平
+                        meth_level = float(parts[3]) / 100
+                else:
+                    # 其他格式，使用第4列作为甲基化水平
+                    meth_level = float(parts[3])
                 data[(chrom, pos)] = meth_level
     
     return data
@@ -62,6 +83,7 @@ def analyze_diff_methylation(sample1_data, sample2_data, threshold=0.2):
     
     # 获取所有共同的位点
     common_sites = set(sample1_data.keys()) & set(sample2_data.keys())
+    logger.info(f"共同的位点数量: {len(common_sites)}")
     
     for site in common_sites:
         meth1 = sample1_data[site]

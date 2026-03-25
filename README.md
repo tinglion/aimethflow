@@ -15,6 +15,8 @@
 
 ## 环境配置
 
+https://genome.ucsc.edu/cgi-bin/hgTables
+
 ### 重要说明
 本项目**仅支持在Linux环境或Windows Subsystem for Linux (WSL)**中运行，因为生物信息学工具（如samtools、Bismark等）在Windows原生环境中可能不可用。
 
@@ -57,8 +59,8 @@ pip install -e .
 
 ```bash
 # 安装Bismark及其依赖 bioconda
-conda install  bismark bowtie2 samtools
-conda install -y -c bioconda bwa=0.7.17 methyldackel=1.0.0
+conda install  bismark bowtie2 samtools bedtools
+conda install -y -c bioconda bwa=0.7.17 methyldackel
 ```
 
 ### 4. 参考基因组准备（仅需 1 次）
@@ -177,7 +179,120 @@ fq-dump "F:\meth\OC_plasma\B10001.R1.fq.gz" --start 5 --count 3
 - **methylSig**: 用于差异甲基化位点和区域的统计分析
 - **edgeR**: 用于差异表达分析，也可用于差异甲基化分析
 
-### 6. 结果可视化
+### 6. 甲基化数据过滤
+
+为了降低 100% 位点的占比，聚焦于有生物学意义的位点，我们提供了 `filter_methylation.py` 脚本，实现以下三个过滤步骤：
+
+#### 6.1 过滤步骤
+
+1. **过滤重复序列**：去除 PCR 偏倚的极端位点
+2. **过滤极端深度位点**：保留 5~50× 的正常深度位点
+3. **聚焦功能区域**：只保留基因启动子/UTR 等有意义的位点
+
+#### 6.2 使用方法
+
+##### 1. 生成甲基化数据
+
+```bash
+# 生成基本甲基化数据
+MethylDackel extract /data/meth/bwa/hg38.fa /mnt/f/meth/OC_plasma/B10300.R1.bam -o temp/a.txt -d 5 -p 10 -q 20
+
+# 生成带计数信息的数据（用于深度过滤）
+MethylDackel extract /data/meth/bwa/hg38.fa /mnt/f/meth/OC_plasma/B10300.R1.bam -o temp/a.txt -d 5 -p 10 -q 20 --counts
+```
+
+##### 2. 下载必要的参考文件
+
+```bash
+# 下载重复序列BED文件
+wget -O hg38.repeat.bed https://hgdownload.soe.ucsc.edu/goldenPath/hg38/database/rmsk.txt.gz \
+  | gunzip -c | awk '{print $6"\t"$7"\t"$8}'
+
+# 下载启动子区域BED文件 https://genome.ucsc.edu/cgi-bin/hgTables
+
+```
+
+##### 3. 运行过滤脚本
+
+```bash
+python src/methylation/filter_methylation.py temp/a.txt_CpG.counts.bedGraph \
+  --repeat_bed /mnt/f/meth/hg38.repeat.bed \
+  --promoter_bed /mnt/f/meth/hg38_upstream_2k_st.bed.gz \
+  --depth_min 5 \
+  --depth_max 50
+```
+
+#### 6.3 输出结果
+
+脚本会在指定的输出目录（默认为 temp）中生成以下文件：
+
+- `cpg_sites.bed`：所有 CpG 位点的 BED 格式文件
+- `cpg_non_repeat.bed`：过滤重复序列后的 CpG 位点
+- `meth_ratio_filtered.txt`：过滤重复序列后的甲基化比例
+- `meth_ratio_depth_filtered.txt`：过滤极端深度后的甲基化比例
+- `cpg_promoter.bed`：启动子区域的 CpG 位点
+- `meth_ratio_promoter.txt`：启动子区域的甲基化比例
+
+#### 6.4 统计信息
+
+脚本会输出每个过滤步骤后的 100% 位点占比，帮助您评估过滤效果：
+
+```
+=== 步骤1：过滤重复序列 ===
+100%位点数量：X
+总位点数：Y
+100%位点占比：Z.XX%
+
+=== 步骤2：过滤极端深度位点 ===
+100%位点数量：X
+总位点数：Y
+100%位点占比：Z.XX%
+
+=== 步骤3：聚焦功能区域 ===
+100%位点数量：X
+总位点数：Y
+100%位点占比：Z.XX%
+
+=== 步骤4：过滤到候选区域 ===
+100%位点数量：X
+总位点数：Y
+100%位点占比：Z.XX%
+```
+
+### 7. 候选区域分析
+
+#### 7.1 候选区域来源
+
+候选区域来自于tissue样本的分析结果，保存在 `data/OC_tissue_88_regions.hg38.txt` 文件中。这些区域是通过对tissue样本的甲基化数据进行分析后得到的，包含88个可能与疾病相关的区域。
+
+#### 7.2 候选区域格式
+
+候选区域文件采用BED格式，包含三列：
+
+```
+chr1    1162653    1165224
+chr1    3732717    3733120
+...
+```
+
+其中：
+- 第一列：染色体名称
+- 第二列：区域起始位置
+- 第三列：区域结束位置
+
+#### 7.3 候选区域分析流程
+
+在 `run_analysis.py` 流程中，候选区域分析是作为过滤步骤的一部分执行的：
+
+1. 首先对甲基化数据进行常规过滤（重复序列过滤、深度过滤、功能区域过滤）
+2. 然后将过滤后的数据进一步过滤到候选区域中
+3. 最终使用候选区域过滤的结果进行后续分析
+
+#### 7.4 结果说明
+
+候选区域分析的结果会保存在临时目录中，文件名以 `candidate_` 开头。这些结果包含了在候选区域内的甲基化位点信息，可以用于进一步的分析和研究。
+
+### 8. 结果可视化
 
 #### 可视化工具
 
@@ -185,7 +300,7 @@ fq-dump "F:\meth\OC_plasma\B10001.R1.fq.gz" --start 5 --count 3
 - **methylKit**: 提供甲基化数据的可视化功能
 - **ggplot2**: R包，用于创建自定义的可视化图表
 
-### 7. 下游分析
+### 9. 下游分析
 
 #### 功能分析
 
@@ -193,7 +308,7 @@ fq-dump "F:\meth\OC_plasma\B10001.R1.fq.gz" --start 5 --count 3
 - **KEGG通路分析**: 分析差异甲基化基因富集的通路
 - **基因注释**: 将甲基化位点与基因关联起来
 
-### 8. 脚本工具开发
+### 10. 脚本工具开发
 
 本项目已开发和集成了以下脚本工具，以支持甲基化分析的各个环节。
 
@@ -360,6 +475,13 @@ random_seed = 42            # 随机种子，确保结果可重复
 min_quality = 20            # 最小甲基化质量分数
 min_depth = 10              # 最小覆盖深度
 
+# 甲基化数据过滤配置
+[filtering]
+repeat_bed = "/mnt/f/meth/hg38.repeat.bed"  # 重复序列BED文件路径
+promoter_bed = "/mnt/f/meth/hg38_upstream_2k_st.bed.gz"  # 启动子区域BED文件路径
+min_depth = 5               # 最小深度
+max_depth = 50              # 最大深度
+
 # 差异甲基化分析配置
 [diff_methylation]
 threshold = 0.2             # 甲基化差异阈值
@@ -390,9 +512,14 @@ console_output = true       # 是否输出到控制台
    - `sample_size`：设置FastQ文件分析时的随机抽样大小，默认1000条序列
    - `random_seed`：设置随机种子，确保抽样结果可重复
 4. **甲基化提取配置**：设置提取甲基化信息时的质量控制参数。
-5. **差异甲基化分析配置**：设置差异分析的阈值和统计参数。
-6. **可视化配置**：设置结果可视化的图表参数。
-7. **日志配置**：设置日志的级别和格式。
+5. **甲基化数据过滤配置**：
+   - `repeat_bed`：重复序列BED文件路径，用于过滤重复序列区域的CpG位点
+   - `promoter_bed`：启动子区域BED文件路径，用于聚焦功能区域的CpG位点
+   - `min_depth`：最小深度，用于过滤低深度位点
+   - `max_depth`：最大深度，用于过滤高深度位点
+6. **差异甲基化分析配置**：设置差异分析的阈值和统计参数。
+7. **可视化配置**：设置结果可视化的图表参数。
+8. **日志配置**：设置日志的级别和格式。
 
 ### 随机抽样说明
 

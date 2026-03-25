@@ -45,3 +45,8 @@ pytest_cache/
 # Database
 *.db
 *.sqlite3
+
+# custom
+data/
+result/
+docs

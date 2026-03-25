@@ -40,6 +40,11 @@ def extract_methylation(input_file, output_file, reference_genome=None, threads=
     if reference_genome is None:
         reference_genome = config.get("extraction", {}).get("reference_genome")
     try:
+        # 检查输出文件是否已经存在
+        if os.path.exists(output_file):
+            logger.info(f"输出文件 {output_file} 已经存在，跳过提取步骤")
+            return
+
         # 检查输入文件是否存在
         if not os.path.exists(input_file):
             logger.error(f"错误: 输入文件 '{input_file}' 不存在")
@@ -60,35 +65,39 @@ def extract_methylation(input_file, output_file, reference_genome=None, threads=
         logger.info(f"使用参考基因组: {reference_genome}")
         start_time = time.time()
 
-        # 使用samtools和methyldackel提取甲基化信息
-        # 首先使用samtools对BAM文件进行索引
-        logger.info("正在为BAM文件创建索引...")
-        index_cmd = f"samtools index {input_file}"
-        logger.info(f"执行命令: {index_cmd}")
-        subprocess.run(index_cmd, shell=True, check=True)
+        # 检查BAM索引文件是否存在
+        index_file = f"{input_file}.bai"
+        if not os.path.exists(index_file):
+            # 使用samtools对BAM文件进行索引
+            logger.info("正在为BAM文件创建索引...")
+            index_cmd = f"samtools index {input_file}"
+            logger.info(f"执行命令: {index_cmd}")
+            subprocess.run(index_cmd, shell=True, check=True)
+        else:
+            logger.info("BAM索引文件已经存在，跳过索引步骤")
 
-        # 使用methyldackel提取甲基化信息
-        logger.info("正在使用MethylDackel提取甲基化信息...")  
+        # 检查MethylDackel中间文件是否存在
+        cpg_file = f"{output_file}_CpG.bedGraph"
+        if not os.path.exists(cpg_file):
+            # 使用methyldackel提取甲基化信息
+            logger.info("正在使用MethylDackel提取甲基化信息...")  
 
-        # 0.6.1
-        methyldackel_cmd = f"MethylDackel extract {reference_genome} {input_file} -c CHG -c CHH -o {output_file} -@ {threads}"
-        # 1.0.0
-        # methyldackel_cmd = f"MethylDackel extract --CHG --CHH --genome {reference_genome} -o {output_file} {input_file}"
-        
-        logger.info(f"执行命令: {methyldackel_cmd}")
-        subprocess.run(methyldackel_cmd, shell=True, check=True)
+            # 0.6.1 -c CG -c CHG -c CHH
+            methyldackel_cmd = f"MethylDackel extract {reference_genome} {input_file}  -o {output_file} -@ {threads}"
+            # 1.0.0
+            # methyldackel_cmd = f"MethylDackel extract --CHG --CHH --genome {reference_genome} -o {output_file} {input_file}"
+            
+            logger.info(f"执行命令: {methyldackel_cmd}")
+            subprocess.run(methyldackel_cmd, shell=True, check=True)
+        else:
+            logger.info(f"MethylDackel中间文件 {cpg_file} 已经存在，跳过提取步骤")
 
-        # 查找MethylDackel生成的实际文件
-        # MethylDackel会生成多个文件，我们需要找到包含CpG信息的文件
-        cpg_file = f"{output_file}_CpG.counts.bedGraph"
+        # 直接使用MethylDackel生成的文件，不进行格式转换
         if os.path.exists(cpg_file):
             logger.info(f"找到MethylDackel输出文件: {cpg_file}")
-            # 转换MethylDackel输出格式为我们需要的格式
-            logger.info("正在转换输出格式...")
-            convert_output(cpg_file, backup=True)
-            # 将转换后的文件重命名为期望的输出文件名
-            os.rename(cpg_file, output_file)
-            logger.info(f"已将文件重命名为: {output_file}")
+            # 复制文件到输出路径
+            shutil.copy2(cpg_file, output_file)
+            logger.info(f"已将MethylDackel输出文件复制到: {output_file}")
 
         logger.info(f"甲基化信息提取完成 time={time.time() - start_time:.2f}")
 
@@ -96,17 +105,23 @@ def extract_methylation(input_file, output_file, reference_genome=None, threads=
         logger.error(f"错误: {str(e)}")
         sys.exit(1)
 
-
-def convert_output(input_file, backup=False):
+# bedGraph format
+# 1 The chromosome/contig/scaffold name
+# 2 The start coordinate
+# 3 The end coordinate
+# 4 The methylation percentage rounded to an integer
+# 5 The number of alignments/pairs reporting methylated bases
+# 6 The number of alignments/pairs reporting unmethylated bases
+def convert_output(input_file, output_file, backup=False):
     """
     转换MethylDackel输出格式为标准格式
 
     Args:
         input_file: MethylDackel输出文件路径
+        output_file: 输出文件路径
         backup: 是否备份原文件，默认为False
     """
-    temp_file = input_file + ".tmp"
-    with open(input_file, "r", encoding="utf-8") as infile, open(temp_file, "w", encoding="utf-8") as outfile:
+    with open(input_file, "r", encoding="utf-8") as infile, open(output_file, "w", encoding="utf-8") as outfile:
         # 写入表头
         outfile.write("# 染色体\t位置\t链\t甲基化水平\t甲基化计数\t非甲基化计数\n")
         
@@ -125,10 +140,39 @@ def convert_output(input_file, backup=False):
                     # 检查是否为bedGraph格式（4列）
                     if len(parts) == 4:
                         # bedGraph格式: chrom, start, end, value
-                        # 这里假设value是甲基化计数
-                        meth_count = int(parts[3])
-                        # 非甲基化计数设为0（根据实际情况调整）
-                        unmeth_count = 0
+                        value = float(parts[3])
+                        
+                        # 根据值的范围判断它是甲基化计数还是甲基化水平
+                        if value > 1:
+                            # 如果值大于1，假设它是甲基化计数
+                            # 这里我们需要知道总覆盖度才能计算甲基化水平
+                            # 由于bedGraph格式只包含甲基化计数，我们假设非甲基化计数为0
+                            # 这会导致甲基化水平为1，但这是由于数据格式的限制
+                            meth_count = int(value)
+                            unmeth_count = 0
+                        else:
+                            # 如果值在0-1之间，假设它是甲基化水平
+                            meth_level = value
+                            # 根据甲基化水平估算甲基化计数和非甲基化计数
+                            # 假设总覆盖度为20
+                            total_coverage = 20
+                            meth_count = int(meth_level * total_coverage)
+                            unmeth_count = total_coverage - meth_count
+                    elif len(parts) == 6:
+                        # MethylDackel 6列格式:
+                        # 1 The chromosome/contig/scaffold name
+                        # 2 The start coordinate
+                        # 3 The end coordinate
+                        # 4 The methylation percentage rounded to an integer
+                        # 5 The number of alignments/pairs reporting methylated bases
+                        # 6 The number of alignments/pairs reporting unmethylated bases
+                        chrom = parts[0]
+                        pos = parts[1]  # 使用起始位置作为位置
+                        # 链信息在这个格式中不存在，使用默认值 '+'
+                        strand = '+'
+                        # 甲基化计数和非甲基化计数
+                        meth_count = int(parts[4])
+                        unmeth_count = int(parts[5])
                     else:
                         # 原始格式: chrom, pos, strand, meth_count, unmeth_count
                         meth_count = int(parts[3])
@@ -154,9 +198,6 @@ def convert_output(input_file, backup=False):
         backup_file = input_file + ".bak"
         os.rename(input_file, backup_file)
         logger.info(f"已备份原文件到: {backup_file}")
-    
-    # 替换原文件
-    os.replace(temp_file, input_file)
 
 
 def align_fastq(fastq_files, output_bam, reference_genome):

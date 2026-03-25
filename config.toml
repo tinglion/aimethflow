@@ -61,6 +61,17 @@ dpi = 300
 # 字体大小
 font_size = 12
 
+# 甲基化数据过滤配置
+[filtering]
+# 重复序列BED文件路径
+repeat_bed = "/mnt/f/meth/hg38.repeat.bed"
+# 启动子区域BED文件路径
+promoter_bed = "/mnt/f/meth/hg38_upstream_2k_st.bed.gz"
+# 最小深度
+min_depth = 5
+# 最大深度
+max_depth = 50
+
 # 日志配置
 [logging]
 # 日志级别: DEBUG, INFO, WARNING, ERROR, CRITICAL

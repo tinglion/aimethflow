@@ -41,6 +41,9 @@ from methylation.methylation_extractor import extract_methylation
 from methylation.bam_generator import generate_bam
 from methylation.diff_methylation import run_diff_analysis
 from methylation.methylation_visualizer import visualize_methylation
+from methylation.filter_methylation import filter_methylation
+from methylation.candidate_regions import filter_to_candidate_regions
+from methylation.sample_grouping import group_methylation_files_v1, group_methylation_files_v2
 
 # 加载配置文件
 config = load_config()
@@ -198,13 +201,14 @@ def get_fastq_stats(fastq_file, sample_size=None, random_seed=None):
     return stats
 
 
-def extract_methylation_info(temp_dir, fastq_files):
+def extract_methylation_info(temp_dir, fastq_files, group_method="v2"):
     """
     提取甲基化信息（真实提取）
 
     Args:
         temp_dir: 临时目录
         fastq_files: FastQ文件列表
+        group_method: 分组方法，可选值："v1"（基于索引）或 "v2"（基于Excel文件）
 
     Returns:
         tuple: (sample1_methylation, sample2_methylation) 文件路径
@@ -217,10 +221,10 @@ def extract_methylation_info(temp_dir, fastq_files):
     # 为每个文件生成BAM文件（源文件名后缀改为.bam）
     logger.info("开始为每个FastQ文件生成BAM文件")
     all_bam_files = []
-    
+
     # 从配置文件中读取线程数，默认为4
     threads = config.get("extraction", {}).get("threads", 4)
-    
+
     # 为所有文件生成BAM文件
     if fastq_files:
         logger.info(f"为 {len(fastq_files)} 个文件生成BAM文件")
@@ -231,8 +235,8 @@ def extract_methylation_info(temp_dir, fastq_files):
     if all_bam_files:
         logger.info(f"为 {len(all_bam_files)} 个BAM文件提取甲基化信息")
         for i, bam_file in enumerate(all_bam_files):
-            # 为每个BAM文件生成单独的甲基化输出文件
-            individual_output = os.path.join(temp_dir, f"methylation_{i+1}.txt")
+            # 为每个BAM文件生成单独的甲基化输出文件，使用同文件名
+            individual_output = bam_file.replace(".bam", ".txt")
             logger.info(f"为BAM文件 {bam_file} 提取甲基化信息")
             extract_methylation(bam_file, individual_output, reference_genome=reference_genome)
             # 验证提取结果
@@ -243,9 +247,18 @@ def extract_methylation_info(temp_dir, fastq_files):
     sample1_methylation = os.path.join(temp_dir, "sample1_methylation.txt")
     sample2_methylation = os.path.join(temp_dir, "sample2_methylation.txt")
 
-    # 将甲基化文件分为两组（样本1和样本2），使用mod 2均匀分组
-    sample1_methylation_files = [f for i, f in enumerate(all_methylation_files) if i % 2 == 0]
-    sample2_methylation_files = [f for i, f in enumerate(all_methylation_files) if i % 2 == 1]
+    # 根据分组方法选择使用哪个分组函数
+    if group_method == "v2":
+        logger.info("使用基于Excel文件的分组方法（v2版本）")
+        sample1_methylation_files, sample2_methylation_files = group_methylation_files_v2(
+            all_methylation_files, fastq_files
+        )
+    else:
+        logger.info("使用基于索引的分组方法（v1版本）")
+        sample1_methylation_files, sample2_methylation_files = group_methylation_files_v1(
+            all_methylation_files
+        )
+    logger.info(f"分组完成\n样本1: {sample1_methylation_files}\n样本2: {sample2_methylation_files}")
 
     # 合并样本1的所有甲基化信息
     if sample1_methylation_files:
@@ -270,35 +283,37 @@ def validate_methylation_output(output_file):
         output_file: 甲基化提取输出文件路径
     """
     logger.info(f"验证甲基化提取结果: {output_file}")
-    
+
     try:
         # 检查文件是否存在
         if not os.path.exists(output_file):
             logger.error(f"错误: 输出文件 {output_file} 不存在")
             return False
-        
+
         # 检查文件大小
         file_size = os.path.getsize(output_file)
         if file_size == 0:
             logger.error(f"错误: 输出文件 {output_file} 为空")
             return False
-        
+
         # 检查文件格式
         with open(output_file, "r", encoding="utf-8") as f:
             # 检查表头
             header = f.readline()
             if not header.startswith("# 染色体\t位置\t链\t甲基化水平\t甲基化计数\t非甲基化计数"):
                 logger.warning(f"警告: 输出文件 {output_file} 表头格式可能不正确")
-            
+
             # 检查数据行
             line_count = 0
             for line in f:
                 if not line.startswith("#"):
                     parts = line.strip().split()
                     if len(parts) != 6:
-                        logger.warning(f"警告: 输出文件 {output_file} 第 {line_count+2} 行格式不正确")
+                        logger.warning(
+                            f"警告: 输出文件 {output_file} 第 {line_count+2} 行格式不正确"
+                        )
                     line_count += 1
-        
+
         logger.info(f"验证完成: {output_file} 包含 {line_count} 个甲基化位点")
         return True
     except Exception as e:
@@ -339,12 +354,12 @@ def merge_methylation_files(input_files, output_file):
         output_file: 输出文件路径
     """
     logger.info(f"合并 {len(input_files)} 个甲基化文件到 {output_file}")
-    
+
     # 打开输出文件
     with open(output_file, "w", encoding="utf-8") as outfile:
         # 写入表头
         outfile.write("# 染色体\t位置\t链\t甲基化水平\t甲基化计数\t非甲基化计数\n")
-        
+
         # 遍历所有输入文件
         for input_file in input_files:
             logger.info(f"处理文件: {input_file}")
@@ -358,8 +373,97 @@ def merge_methylation_files(input_files, output_file):
                         continue
                     # 写入数据行
                     outfile.write(line)
-    
+
     logger.info(f"合并完成: {output_file}")
+
+
+def filter_methylation_data(methylation_file, temp_dir):
+    """
+    过滤甲基化数据
+
+    Args:
+        methylation_file: 甲基化文件路径
+        temp_dir: 临时目录
+
+    Returns:
+        str: 过滤后的甲基化文件路径
+    """
+    logger.info(f"开始过滤甲基化数据: {methylation_file}")
+
+    # 从配置文件中读取过滤相关配置
+    repeat_bed = config.get("filtering", {}).get("repeat_bed")
+    promoter_bed = config.get("filtering", {}).get("promoter_bed")
+    depth_min = config.get("filtering", {}).get("min_depth", 5)
+    depth_max = config.get("filtering", {}).get("max_depth", 50)
+
+    # 调用过滤函数
+    try:
+        # 构建过滤后的输出文件路径
+        base_name = os.path.basename(methylation_file)
+        filtered_file = os.path.join(temp_dir, f"filtered_{base_name}")
+        if os.path.exists(methylation_file):
+            # 进行常规过滤
+            filter_methylation(
+                input_file=methylation_file,
+                output_file=filtered_file,
+                output_dir=temp_dir,
+                repeat_bed=repeat_bed,
+                promoter_bed=promoter_bed,
+                depth_min=depth_min,
+                depth_max=depth_max
+            )
+            logger.info(f"成功过滤甲基化数据: {filtered_file}")
+            return filtered_file
+        else:
+            logger.warning(f"未找到对应的 counts 文件，跳过过滤步骤: {methylation_file}")
+            return methylation_file
+    except Exception as e:
+        error_msg = f"过滤甲基化数据时出错: {str(e)}"
+        logger.error(error_msg)
+        return methylation_file
+
+
+def filter_to_candidate_regions_wrapper(methylation_file, temp_dir):
+    """
+    过滤甲基化数据到候选区域
+
+    Args:
+        methylation_file: 甲基化文件路径
+        temp_dir: 临时目录
+
+    Returns:
+        str: 过滤到候选区域后的甲基化文件路径
+    """
+    logger.info(f"开始过滤甲基化数据到候选区域: {methylation_file}")
+    
+    # 候选区域文件路径
+    candidate_regions = "data/OC_tissue_88_regions.hg38.txt"
+
+    try:
+        # 构建过滤后的输出文件路径
+        base_name = os.path.basename(methylation_file)
+        candidate_output = os.path.join(temp_dir, f"candidate_{base_name}")
+        
+        if os.path.exists(methylation_file) and os.path.exists(candidate_regions):
+            if filter_to_candidate_regions(
+                input_file=methylation_file,
+                output_file=candidate_output,
+                candidate_regions=candidate_regions,
+                output_dir=temp_dir
+            ):
+                logger.info(f"成功过滤到候选区域: {candidate_output}")
+                return candidate_output
+            else:
+                logger.warning("过滤到候选区域失败，使用原始文件")
+                return methylation_file
+        else:
+            if not os.path.exists(candidate_regions):
+                logger.warning(f"候选区域文件 {candidate_regions} 不存在，跳过过滤到候选区域步骤")
+            return methylation_file
+    except Exception as e:
+        error_msg = f"过滤到候选区域时出错: {str(e)}"
+        logger.error(error_msg)
+        return methylation_file
 
 
 def perform_diff_analysis(sample1_methylation, sample2_methylation, result_dir):
@@ -434,6 +538,12 @@ def main():
     parser.add_argument("--skip-extraction", action="store_true", help="跳过甲基化信息提取")
     parser.add_argument("--skip-diff", action="store_true", help="跳过差异甲基化分析")
     parser.add_argument("--skip-visualization", action="store_true", help="跳过结果可视化")
+    parser.add_argument(
+        "--group-method",
+        choices=["v1", "v2"],
+        default="v2",
+        help="分组方法: v1（基于索引）或 v2（基于Excel文件）",
+    )
 
     args = parser.parse_args()
 
@@ -468,21 +578,54 @@ def main():
     sample2_methylation = None
     if not args.skip_extraction:
         print("\n2. 提取甲基化信息...")
-        sample1_methylation, sample2_methylation = extract_methylation_info(temp_dir, fastq_files)
+        sample1_methylation, sample2_methylation = extract_methylation_info(
+            temp_dir, fastq_files, group_method=args.group_method
+        )
     else:
         logger.info("2. 跳过甲基化信息提取")
 
+    # 2.5 过滤甲基化数据
+    filtered_sample1 = None
+    filtered_sample2 = None
+    if sample1_methylation or sample2_methylation:
+        print("\n2.5 过滤甲基化数据...")
+        if sample1_methylation:
+            filtered_sample1 = filter_methylation_data(sample1_methylation, temp_dir)
+        if sample2_methylation:
+            filtered_sample2 = filter_methylation_data(sample2_methylation, temp_dir)
+    else:
+        logger.info("2.5 跳过甲基化数据过滤")
+
+    # 2.6 过滤到候选区域
+    candidate_sample1 = None
+    candidate_sample2 = None
+    if filtered_sample1 or filtered_sample2:
+        print("\n2.6 过滤到候选区域...")
+        if filtered_sample1:
+            candidate_sample1 = filter_to_candidate_regions_wrapper(filtered_sample1, temp_dir)
+        if filtered_sample2:
+            candidate_sample2 = filter_to_candidate_regions_wrapper(filtered_sample2, temp_dir)
+    else:
+        logger.info("2.6 跳过过滤到候选区域步骤")
+
     # 3. 进行差异甲基化分析
-    if not args.skip_diff and sample1_methylation and sample2_methylation:
+    if not args.skip_diff and candidate_sample1 and candidate_sample2:
         print("\n3. 进行差异甲基化分析...")
-        perform_diff_analysis(sample1_methylation, sample2_methylation, result_dir)
+        perform_diff_analysis(candidate_sample1, candidate_sample2, result_dir)
     else:
         logger.info("3. 跳过差异甲基化分析")
 
     # 4. 可视化结果
-    if not args.skip_visualization and sample1_methylation:
+    if not args.skip_visualization and (candidate_sample1 or filtered_sample1 or sample1_methylation):
         print("\n4. 可视化结果...")
-        visualize_results(sample1_methylation, result_dir)
+        # 使用候选区域的样本数据进行可视化，如果没有则使用过滤数据，如果没有过滤数据则使用原始数据
+        if candidate_sample1:
+            visualization_sample = candidate_sample1
+        elif filtered_sample1:
+            visualization_sample = filtered_sample1
+        else:
+            visualization_sample = sample1_methylation
+        visualize_results(visualization_sample, result_dir)
     else:
         logger.info("4. 跳过结果可视化")
 
