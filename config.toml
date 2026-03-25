@@ -11,6 +11,8 @@ root_dir = "F:\\meth"
 tissue_dir = "F:\\meth\\OC_tissue"
 # 血浆样本数据目录
 plasma_dir = "F:\\meth\\OC_plasma"
+# 样本信息Excel文件路径
+sample_info_excel = "data/按分期处理_卵巢癌fq编号与样本信息对应表.xlsx"
 
 # 目录配置
 [directories]

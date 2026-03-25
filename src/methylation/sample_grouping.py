@@ -8,6 +8,10 @@ sample_grouping.py - 样本分组模块
 import pandas as pd
 import os
 from utils.logger import logger
+from utils.config import load_config
+
+# 加载配置文件
+config = load_config()
 
 
 def group_methylation_files_v1(methylation_files):
@@ -36,8 +40,8 @@ def group_methylation_files_v2(methylation_files, fastq_files):
     Returns:
         tuple: (benign_methylation_files, malignant_methylation_files)
     """
-    # 读取Excel文件
-    excel_file = "data/卵巢癌fq编号与样本信息对应表.xlsx"
+    # 从配置文件中读取Excel文件路径
+    excel_file = config.get("data", {}).get("sample_info_excel", "data/按分期处理_卵巢癌fq编号与样本信息对应表.xlsx")
     if not os.path.exists(excel_file):
         logger.error(f"错误: 文件 {excel_file} 不存在")
         # 如果Excel文件不存在，回退到v1版本
@@ -82,19 +86,22 @@ def group_methylation_files_v2(methylation_files, fastq_files):
         return group_methylation_files_v1(methylation_files)
 
 
-def parse_sample_info(excel_file="data/卵巢癌fq编号与样本信息对应表.xlsx"):
+def parse_sample_info(excel_file=None):
     """
     解析Excel文件中的样本信息，支持多个sheet
 
     Args:
-        excel_file: Excel文件路径
+        excel_file: Excel文件路径，如果为None则从配置文件中读取
 
     Returns:
         dict: 包含良性和恶性样本分组的字典
     """
     try:
+        # 如果未提供Excel文件路径，从配置文件中读取
+        if excel_file is None:
+            excel_file = config.get("data", {}).get("sample_info_excel", "data/按分期处理_卵巢癌fq编号与样本信息对应表.xlsx")
+        
         # 获取Excel文件的所有sheet名称
-        excel_file = "data/卵巢癌fq编号与样本信息对应表.xlsx"
         xl = pd.ExcelFile(excel_file)
         sheet_names = xl.sheet_names
         logger.info(f"Excel文件包含以下sheet: {sheet_names}")
@@ -148,4 +155,6 @@ def parse_sample_info(excel_file="data/卵巢癌fq编号与样本信息对应表
 
 
 if __name__ == "__main__":
-    print(parse_sample_info())
+    # 从配置文件中读取Excel文件路径
+    excel_file = config.get("data", {}).get("sample_info_excel", "data/按分期处理_卵巢癌fq编号与样本信息对应表.xlsx")
+    print(parse_sample_info(excel_file))
