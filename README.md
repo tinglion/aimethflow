@@ -538,13 +538,90 @@ console_output = true       # 是否输出到控制台
 
 ## 完整分析流程
 
-使用 `run-analysis` 命令可以执行完整的甲基化分析流程：
+### 1. 详细流程步骤
+
+| 步骤序号 | 英文名                 | 中文名         | 命令行参数                                 | 功能说明                                                           | 输入说明                         | 输出说明                 | 命名规则                                                                 | 是否忽略 | 代码位置                          |
+| -------- | ---------------------- | -------------- | ------------------------------------------ | ------------------------------------------------------------------ | -------------------------------- | ------------------------ | ---------------------------------------------------------------------- | -------- | --------------------------------- |
+| 1        | Initialization         | 初始化与配置   | --config, --verbose                        | 加载配置文件，设置日志系统，解析命令行参数                         | 配置文件（可选）                 | 日志文件                 | 日志文件：`logs/analysis_YYYYMMDD_HHMMSS.log`                          | 是       | src/scripts/run_analysis.py:78-128  |
+| 2        | File Detection         | 文件检测与准备 | N/A                                        | 智能检测输入文件类型（FastQ、BAM、甲基化数据），创建临时和结果目录 | FastQ/BAM/甲基化数据文件         | 临时目录、结果目录       | 临时目录：`temp/YYYYMMDD_HHMMSS/`，结果目录：`result/YYYYMMDD_HHMMSS/` | 是       | src/scripts/run_analysis.py:187-216 |
+| 3        | Quality Analysis       | 质量分析       | --skip-quality                             | 分析FastQ文件质量，生成质量统计信息                                | FastQ文件                        | 质量统计信息             | 质量统计信息：输出到日志文件中                                         | 是       | src/scripts/run_analysis.py:218-223 |
+| 4        | Preprocessing          | 数据预处理     | --skip-preprocessing                       | 使用TrimGalore进行接头去除和质量修剪                               | FastQ文件                        | 预处理后的FastQ文件      | 单端：`*_trimmed.fq.gz`，双端：`*_val_1.fq.gz`/`*_val_2.fq.gz`         | 是       | src/scripts/run_analysis.py:225-234 |
+| 5        | Alignment              | 甲基化序列比对 | --skip-alignment                           | 使用Bismark进行甲基化序列比对                                      | 预处理后的FastQ文件              | BAM文件                  | `*_trimmed_bismark_bt2.bam` 或 `*_val_1_bismark_bt2.bam`              | 是       | src/scripts/run_analysis.py:236-244 |
+| 6        | Deduplication          | PCR重复去除    | --skip-deduplication                       | 使用deduplicate_bismark去除PCR重复                                 | BAM文件                          | 去重后的BAM文件          | `*.deduplicated.bam`                                                 | 是       | src/scripts/run_analysis.py:246-252 |
+| 7        | Target Extraction      | 靶向区域提取   | --skip-target-extraction                   | 使用bedtools提取与探针区域有交集的Reads                            | 去重后的BAM文件，探针区域BED文件 | 靶向区域BAM文件          | `*.targeted.sorted.bam` 和 `*.targeted.sorted.bam.bai`                 | 是       | src/scripts/run_analysis.py:254-260 |
+| 8        | Methylation Extraction | 甲基化信息提取 | --skip-extraction                          | 从BAM文件中提取甲基化信息，支持样本分组                            | BAM文件                          | 甲基化数据文件           | 单个：`*.txt`，合并：`sample1_methylation.txt`/`sample2_methylation.txt` | 否       | src/scripts/run_analysis.py:262-301 |
+| 9        | Data Filtering         | 数据过滤       | --skip-filtering, --skip-candidate-regions | 过滤重复序列、极端深度位点，聚焦功能区域和候选区域                 | 甲基化数据文件                   | 过滤后的甲基化数据文件   | 过滤：`filtered_*.txt`，候选：`candidate_filtered_*.txt`               | 否       | src/scripts/run_analysis.py:303-313 |
+| 10       | Differential Analysis  | 差异甲基化分析 | --skip-diff                                | 比较两组样本的甲基化差异                                           | 两组样本的甲基化数据文件         | 差异甲基化分析结果       | `diff_methylation.txt`                                               | 否       | src/scripts/run_analysis.py:327-332 |
+| 11       | Visualization          | 结果可视化     | --skip-visualization                       | 生成密度图、散点图和热图                                           | 甲基化数据文件                   | 可视化图表文件           | `density_plot.png`、`scatter_plot.png`、`heatmap_plot.png`            | 否       | src/scripts/run_analysis.py:334-348 |
+| 12       | Report Generation      | 分析报告生成   | --skip-report                              | 生成JSON和HTML格式的分析报告                                       | 分析结果文件                     | JSON和HTML格式的分析报告 | `analysis_report.json` 和 `analysis_report.html`                      | 否       | src/scripts/run_analysis.py:350-362 |
+| 13       | Cleanup                | 清理           | --clean-temp                               | 自动清理临时文件                                                   | 临时目录                         | 清理后的目录结构         | 临时目录被删除                                                           | 是       | src/scripts/run_analysis.py:364-374 |
+
+
+### 2. 使用方法
 
 ```bash
-run-analysis
+# 基本用法
+run-analysis [选项] <文件/文件夹...>
+
+# 示例：分析多个FastQ文件
+run-analysis F:\meth\OC_plasma\sample1.fq.gz F:\meth\OC_plasma\sample2.fq.gz
+
+# 示例：分析包含FastQ文件的文件夹
+run-analysis F:\meth\OC_plasma
+
+# 示例：使用BAM文件作为输入（跳过FastQ处理和比对步骤）
+run-analysis --skip-preprocessing --skip-alignment sample1.bam sample2.bam
+
+# 示例：使用甲基化数据文件作为输入（跳过前面的所有步骤）
+run-analysis --skip-preprocessing --skip-alignment --skip-extraction sample1_methylation.txt sample2_methylation.txt
+
+# 示例：跳过特定步骤
+run-analysis --skip-quality --skip-visualization F:\meth\OC_plasma
+
+# 示例：使用自定义配置文件
+run-analysis --config custom_config.toml F:\meth\OC_plasma
+
+# 示例：启用详细输出并清理临时文件
+run-analysis --verbose --clean-temp F:\meth\OC_plasma
 ```
 
-该命令会按照配置文件中的设置，执行数据质量控制、预处理、甲基化提取、差异分析和可视化等步骤。
+### 3. 命令行选项详细说明
+
+| 选项                     | 类型   | 默认值 | 说明                                           |
+| ------------------------ | ------ | ------ | ---------------------------------------------- |
+| --skip-quality           | 标志   | False  | 跳过FastQ文件质量分析                          |
+| --skip-preprocessing     | 标志   | False  | 跳过数据预处理                                 |
+| --skip-alignment         | 标志   | False  | 跳过序列比对                                   |
+| --skip-deduplication     | 标志   | False  | 跳过PCR重复去除                                |
+| --skip-target-extraction | 标志   | False  | 跳过靶向区域提取                               |
+| --skip-extraction        | 标志   | False  | 跳过甲基化信息提取                             |
+| --skip-filtering         | 标志   | False  | 跳过甲基化数据过滤                             |
+| --skip-candidate-regions | 标志   | False  | 跳过候选区域过滤                               |
+| --skip-diff              | 标志   | False  | 跳过差异甲基化分析                             |
+| --skip-visualization     | 标志   | False  | 跳过结果可视化                                 |
+| --skip-report            | 标志   | False  | 跳过报告生成                                   |
+| --clean-temp             | 标志   | False  | 分析完成后清理临时文件                         |
+| --config                 | 字符串 | None   | 使用指定的配置文件                             |
+| --verbose                | 标志   | False  | 启用详细输出                                   |
+| --group-method           | 选择   | v2     | 分组方法：v1（基于索引）或 v2（基于Excel文件） |
+
+### 5. 从BAM文件反推panel.bed
+
+如果您没有探针区域文件，可以从BAM文件反推生成panel.bed文件：
+
+```bash
+# 从BAM文件生成panel.bed
+bedtools genomecov -ibam /mnt/f/meth/OC_plasma/B10308.R1.bam -bg | awk 'BEGIN{OFS="\t"} $4>10' | bedtools merge -d 100 | awk 'length($1)<6' > panel.bed
+```
+
+该命令的原理是：
+1. 使用bedtools genomecov计算基因组覆盖率
+2. 过滤覆盖深度大于10的区域
+3. 使用bedtools merge合并相邻的区域（距离小于100bp）
+4. 过滤染色体名称长度小于6的区域（去除非标准染色体）
+5. 将结果保存为panel.bed文件
+
+生成的panel.bed文件可以用于靶向区域提取步骤。
 
 ## 注意事项
 
