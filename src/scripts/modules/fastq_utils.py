@@ -137,105 +137,151 @@ def get_fastq_stats(fastq_file, sample_size=None, random_seed=None, config=None)
     return stats
 
 
-def preprocess_fastq(fastq_files, temp_dir):
+def find_r2_for_r1(r1_file):
     """
-    数据预处理（质量控制和接头去除）
+    根据R1文件路径找到对应的R2文件，兼容 .R1. 和 _R1 两种命名方式。
+
+    Returns:
+        str or None: R2文件路径，如果未找到返回None
+    """
+    for r1_pat, r2_pat in [(".R1.", ".R2."), ("_R1.", "_R2."), ("_R1_", "_R2_"),
+                            (".r1.", ".r2."), ("_r1.", "_r2.")]:
+        if r1_pat in r1_file:
+            r2_file = r1_file.replace(r1_pat, r2_pat)
+            if os.path.exists(r2_file):
+                return r2_file
+    return None
+
+
+def is_r1_file(fastq_file):
+    """判断该文件是否是R1文件（避免重复处理R2）。"""
+    for pat in [".R1.", "_R1.", "_R1_", ".r1.", "_r1."]:
+        if pat in fastq_file:
+            return True
+    return False
+
+
+def preprocess_fastq(fastq_files, temp_dir, plasma=False, config=None):
+    """
+    数据预处理（质量控制和接头去除）。
+    使用 fastp 替代 TrimGalore，支持血浆模式的 UMI 提取。
 
     Args:
         fastq_files: FastQ文件列表
         temp_dir: 临时目录
+        plasma: 是否启用血浆模式（UMI提取 + 5'端低复杂度切除 + 3'端poly-C切除）
+        config: 配置对象
 
     Returns:
-        list: 预处理后的FastQ文件列表
+        list: 预处理后的FastQ文件列表（R1在前，R2在后，配对顺序）
     """
-    logger.info("开始数据预处理")
+    logger.info(f"开始数据预处理 ({'血浆模式' if plasma else '标准模式'})")
     processed_files = []
 
-    for fastq_file in fastq_files:
-        logger.info(f"处理文件: {fastq_file}")
+    # 读取血浆配置
+    plasma_cfg = (config or {}).get("plasma", {})
+    trim_front1 = plasma_cfg.get("trim_front1", 12)
+    trim_front2 = plasma_cfg.get("trim_front2", 12)
+    trim_tail2 = plasma_cfg.get("trim_tail2", 5)
+    min_length = plasma_cfg.get("min_length", 35)
+    min_quality = plasma_cfg.get("min_quality", 20)
+    umi_length = plasma_cfg.get("umi_length", 6)
 
-        # 检查是否是双端测序文件
-        is_paired = False
-        if "_R1" in fastq_file and os.path.exists(fastq_file.replace("_R1", "_R2")):
-            is_paired = True
-            r1_file = fastq_file
-            r2_file = fastq_file.replace("_R1", "_R2")
-            output_prefix = os.path.join(temp_dir, os.path.basename(fastq_file).replace("_R1", ""))
+    # 找出所有R1文件（避免重复处理R2）
+    r1_files = [f for f in fastq_files if is_r1_file(f)]
+    # 补充没有R1/R2标记的文件（单端）
+    unpaired_files = [f for f in fastq_files if not is_r1_file(f)
+                      and not any(p in f for p in [".R2.", "_R2.", "_R2_", ".r2.", "_r2."])]
 
-            # 运行TrimGalore进行双端处理
-            cmd = [
-                "trim_galore",
-                "--paired",
-                "--quality",
-                "20",
-                "--phred33",
-                "--illumina",
-                "--length",
-                "35",
-                "--clip_R1",
-                "5",
-                "--clip_R2",
-                "5",
-                r1_file,
-                r2_file,
-                "--output_dir",
-                temp_dir,
-            ]
-
-            try:
-                subprocess.run(cmd, check=True, capture_output=True, text=True)
-                processed_r1 = os.path.join(
-                    temp_dir,
-                    os.path.basename(r1_file)
-                    .replace(".fq.gz", "_val_1.fq.gz")
-                    .replace(".fastq.gz", "_val_1.fq.gz"),
-                )
-                processed_r2 = os.path.join(
-                    temp_dir,
-                    os.path.basename(r2_file)
-                    .replace(".fq.gz", "_val_2.fq.gz")
-                    .replace(".fastq.gz", "_val_2.fq.gz"),
-                )
-                if os.path.exists(processed_r1) and os.path.exists(processed_r2):
-                    processed_files.extend([processed_r1, processed_r2])
-                    logger.info(f"双端文件处理完成: {processed_r1}, {processed_r2}")
-                else:
-                    logger.error(f"双端文件处理失败: {fastq_file}")
-            except subprocess.CalledProcessError as e:
-                logger.error(f"运行TrimGalore失败: {e.stderr}")
+    for r1_file in r1_files:
+        r2_file = find_r2_for_r1(r1_file)
+        sample_name = os.path.basename(r1_file)
+        # 移除所有常见后缀得到样本名
+        for pat in [".R1.fq.gz", ".R1.fastq.gz", "_R1.fq.gz", "_R1.fastq.gz",
+                    ".r1.fq.gz", ".r1.fastq.gz"]:
+            if sample_name.endswith(pat):
+                sample_name = sample_name[:-len(pat)]
+                break
         else:
-            # 单端处理
-            output_prefix = os.path.join(temp_dir, os.path.basename(fastq_file))
-            cmd = [
-                "trim_galore",
-                "--quality",
-                "20",
-                "--phred33",
-                "--illumina",
-                "--length",
-                "35",
-                "--clip_R1",
-                "5",
-                fastq_file,
-                "--output_dir",
-                temp_dir,
-            ]
+            sample_name = sample_name.split(".")[0]
 
+        out_r1 = os.path.join(temp_dir, f"{sample_name}.clean.R1.fq.gz")
+        out_r2 = os.path.join(temp_dir, f"{sample_name}.clean.R2.fq.gz")
+        json_report = os.path.join(temp_dir, f"{sample_name}.fastp.json")
+        html_report = os.path.join(temp_dir, f"{sample_name}.fastp.html")
+
+        if r2_file:
+            cmd = [
+                "fastp",
+                "-i", r1_file, "-I", r2_file,
+                "-o", out_r1, "-O", out_r2,
+                "-q", str(min_quality),
+                "--length_required", str(min_length),
+                "--json", json_report,
+                "--html", html_report,
+                "--thread", "8",
+            ]
+            if plasma:
+                # 血浆模式：UMI提取（R2 5'端） + 5'端低复杂度寡核苷酸切除 + R2 3'端poly-C切除
+                cmd += [
+                    "--umi", "--umi_loc", "read2",
+                    "--umi_len", str(umi_length),
+                    "--umi_prefix", "UMI",
+                    "--trim_front1", str(trim_front1),
+                    "--trim_front2", str(trim_front2),
+                    "--trim_tail2", str(trim_tail2),
+                ]
+            try:
+                result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+                logger.info(f"fastp双端处理完成: {sample_name}")
+                if os.path.exists(out_r1) and os.path.exists(out_r2):
+                    processed_files.extend([out_r1, out_r2])
+                else:
+                    logger.error(f"fastp未生成预期输出文件: {sample_name}")
+            except subprocess.CalledProcessError as e:
+                logger.error(f"fastp处理失败 ({sample_name}): {e.stderr}")
+        else:
+            # 单端
+            cmd = [
+                "fastp",
+                "-i", r1_file,
+                "-o", out_r1,
+                "-q", str(min_quality),
+                "--length_required", str(min_length),
+                "--json", json_report,
+                "--html", html_report,
+                "--thread", "8",
+            ]
+            if plasma:
+                cmd += [
+                    "--trim_front1", str(trim_front1),
+                ]
             try:
                 subprocess.run(cmd, check=True, capture_output=True, text=True)
-                processed_file = os.path.join(
-                    temp_dir,
-                    os.path.basename(fastq_file)
-                    .replace(".fq.gz", "_trimmed.fq.gz")
-                    .replace(".fastq.gz", "_trimmed.fq.gz"),
-                )
-                if os.path.exists(processed_file):
-                    processed_files.append(processed_file)
-                    logger.info(f"单端文件处理完成: {processed_file}")
+                logger.info(f"fastp单端处理完成: {sample_name}")
+                if os.path.exists(out_r1):
+                    processed_files.append(out_r1)
                 else:
-                    logger.error(f"单端文件处理失败: {fastq_file}")
+                    logger.error(f"fastp未生成预期输出文件: {sample_name}")
             except subprocess.CalledProcessError as e:
-                logger.error(f"运行TrimGalore失败: {e.stderr}")
+                logger.error(f"fastp处理失败 ({sample_name}): {e.stderr}")
+
+    for fastq_file in unpaired_files:
+        sample_name = os.path.basename(fastq_file).split(".")[0]
+        out_r1 = os.path.join(temp_dir, f"{sample_name}.clean.fq.gz")
+        json_report = os.path.join(temp_dir, f"{sample_name}.fastp.json")
+        html_report = os.path.join(temp_dir, f"{sample_name}.fastp.html")
+        cmd = [
+            "fastp", "-i", fastq_file, "-o", out_r1,
+            "-q", str(min_quality), "--length_required", str(min_length),
+            "--json", json_report, "--html", html_report, "--thread", "8",
+        ]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+            if os.path.exists(out_r1):
+                processed_files.append(out_r1)
+        except subprocess.CalledProcessError as e:
+            logger.error(f"fastp处理失败 ({fastq_file}): {e.stderr}")
 
     logger.info(f"数据预处理完成，处理了 {len(processed_files)} 个文件")
     return processed_files

@@ -5,7 +5,8 @@ modules包初始化文件
 
 from .file_utils import detect_file_type, find_files
 from .fastq_utils import analyze_quality, get_fastq_stats, preprocess_fastq
-from .alignment_utils import align_methylation, deduplicate_bam, extract_target_regions
+from .alignment_utils import (align_methylation, deduplicate_bam, extract_target_regions,
+                              check_mbias, extract_methylation_methyldackel)
 from .methylation_utils import (
     extract_methylation_info,
     validate_methylation_output,
@@ -27,6 +28,8 @@ __all__ = [
     "align_methylation",
     "deduplicate_bam",
     "extract_target_regions",
+    "check_mbias",
+    "extract_methylation_methyldackel",
     "extract_methylation_info",
     "validate_methylation_output",
     "generate_mock_methylation_data",

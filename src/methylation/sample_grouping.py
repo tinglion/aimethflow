@@ -66,14 +66,26 @@ def group_methylation_files_v2(methylation_files, fastq_files):
         malignant_methylation_files = []
 
         logger.info(f"开始根据Excel文件分组 {len(methylation_files)} 个甲基化文件 ")
-        # logger.info(f"{methylation_files}\n{benign_fq}\n{malignant_fq}")
         for i, methylation_file in enumerate(methylation_files):
-            # 提取FQ文件名（不包含路径）
-            fastq_basename = os.path.basename(methylation_file).replace(".txt", "") + ".fq.gz"
-            # 检查是否在良性或恶性样本中
-            if fastq_basename in benign_fq:
+            # 提取样本ID（去掉路径、后缀及 _CpG / _CHG 等 MethylDackel 后缀）
+            sample_id = os.path.basename(methylation_file)
+            for ext in [".txt", ".bedGraph", ".cov", ".gz"]:
+                sample_id = sample_id.replace(ext, "")
+            # 先按 . 取第一段，再按 _ 取第一段，得到纯样本ID如 B10002
+            sample_id = sample_id.split(".")[0].split("_")[0]
+
+            def _in_set(sample_id, fq_set):
+                """检查样本ID是否对应fq_set中任何一个文件（兼容 B10002.R1.fq.gz 等命名）。"""
+                for r1 in fq_set:
+                    r1_base = os.path.splitext(os.path.splitext(r1)[0])[0]  # 去除双后缀
+                    r1_sample = r1_base.split(".")[0].split("_")[0]
+                    if r1_sample == sample_id:
+                        return True
+                return False
+
+            if _in_set(sample_id, benign_fq):
                 benign_methylation_files.append(methylation_file)
-            elif fastq_basename in malignant_fq:
+            elif _in_set(sample_id, malignant_fq):
                 malignant_methylation_files.append(methylation_file)
 
         logger.info(
@@ -157,6 +169,84 @@ def parse_sample_info(excel_file=None):
     except Exception as e:
         logger.error(f"解析Excel文件时出错: {str(e)}")
         return None
+
+
+def resolve_patient_files(csv_path, excel_file=None, data_dir=None):
+    """
+    从患者ID CSV 解析对应的 R1/R2 FastQ 文件绝对路径。
+
+    Args:
+        csv_path:   患者ID列表文件（每行一个ID，无表头），如 data/patient3.csv
+        excel_file: Excel文件路径（含 fq_R1/fq_R2 列），None 时从配置读取
+        data_dir:   FastQ 文件所在目录，None 时从配置读取（plasma_dir）
+
+    Returns:
+        list: FastQ 文件路径列表（R1、R2 交替排列）
+    """
+    # 读取患者 ID 列表（去空行/空白）
+    with open(csv_path, encoding="utf-8") as f:
+        patient_ids = [line.strip() for line in f if line.strip()]
+    logger.info(f"从 {csv_path} 读取到 {len(patient_ids)} 个患者ID")
+
+    # Excel 文件路径
+    if excel_file is None:
+        excel_file = config.get("data", {}).get(
+            "sample_info_excel", "data/按分期处理_卵巢癌fq编号与样本信息对应表.xlsx"
+        )
+
+    # FastQ 数据目录
+    if data_dir is None:
+        data_dir = config.get("data", {}).get("plasma_dir", "")
+
+    # 从 Excel 所有 sheet 构建 patient_id → {R1, R2} 映射
+    # patient_id = fq_R1 文件名第一个 "." 之前的部分（如 B10186.R1.fq.gz → B10186）
+    xl = pd.ExcelFile(excel_file)
+    pid_to_files = {}
+    for sheet_name in xl.sheet_names:
+        df = pd.read_excel(excel_file, sheet_name=sheet_name)
+        if "fq_R1" not in df.columns:
+            continue
+        for _, row in df.iterrows():
+            r1 = str(row["fq_R1"]).strip() if pd.notna(row.get("fq_R1")) else ""
+            r2 = str(row.get("fq_R2", "")).strip() if pd.notna(row.get("fq_R2")) else ""
+            if not r1 or r1 == "nan":
+                continue
+            pid = r1.split(".")[0]
+            if pid not in pid_to_files:
+                pid_to_files[pid] = {"R1": r1, "R2": r2}
+
+    logger.info(f"从Excel解析到 {len(pid_to_files)} 个样本映射")
+
+    # 按患者ID列表顺序解析文件路径
+    fastq_files = []
+    missing = []
+    for pid in patient_ids:
+        if pid not in pid_to_files:
+            logger.warning(f"  患者ID {pid} 在Excel中未找到")
+            missing.append(pid)
+            continue
+        r1_name = pid_to_files[pid]["R1"]
+        r2_name = pid_to_files[pid]["R2"]
+        r1_path = os.path.join(data_dir, r1_name)
+        r2_path = os.path.join(data_dir, r2_name) if r2_name else ""
+        if not os.path.exists(r1_path):
+            logger.warning(f"  R1 文件不存在: {r1_path}")
+            missing.append(pid)
+            continue
+        if r2_name and not os.path.exists(r2_path):
+            logger.warning(f"  R2 文件不存在: {r2_path}")
+            missing.append(pid)
+            continue
+        fastq_files.append(r1_path)
+        if r2_name:
+            fastq_files.append(r2_path)
+
+    found = len(patient_ids) - len(missing)
+    logger.info(f"解析完成: {found}/{len(patient_ids)} 个患者ID找到对应文件")
+    if missing:
+        logger.warning(f"  缺失/未找到的患者ID: {missing}")
+
+    return fastq_files
 
 
 if __name__ == "__main__":

@@ -79,6 +79,41 @@ min_depth = 5
 # 最大深度
 max_depth = 50
 
+# 血浆cfDNA靶向甲基化分析配置
+[plasma]
+# 比对工具: "bismark"（精准，慢，首次验证/需要OT-OB方向性报告时用）
+#            "bwameth"（快3-5倍，推荐100+样本批量分析）
+aligner = "bwameth"
+# UMI设置（R2 5'端6N）
+umi_length = 6
+umi_location = "read2"
+# Trimming参数
+trim_front1 = 12        # R1 5'端切除碱基数（低复杂度寡核苷酸）
+trim_front2 = 12        # R2 5'端切除碱基数（UMI提取后的寡核苷酸）
+trim_tail2 = 5          # R2 3'端切除碱基数（poly-C偏差，根据M-bias图调整）
+min_length = 35         # 过滤后最短read长度
+min_quality = 20        # 最低碱基质量Q值
+# 比对参数
+non_directional = false # 单链建库方向性（待M-bias确认后调整）
+# 比对质量过滤
+min_mapq = 40
+# 区域覆盖深度过滤
+min_cpg_per_region = 3
+min_reads_per_region = 5
+# 甲基化read阈值（策略B，与tissue统一）
+methylated_read_threshold = 0.60
+low_confidence_threshold = 0.40
+# 差异分析阈值
+diff_p_value = 0.05
+diff_delta_beta = 0.10
+
+# 工具路径配置
+[tools]
+# conda meth 环境的 bin 目录（非交互式bash中PATH不含conda env，需显式指定）
+conda_env_bin = "/mnt/e/programs/ubuntu/miniconda3/envs/meth/bin"
+# umi_tools 备用路径（如果meth env中没有，回退到base env）
+umi_tools_fallback = "/mnt/e/programs/ubuntu/miniconda3/bin/umi_tools"
+
 # 日志配置
 [logging]
 # 日志级别: DEBUG, INFO, WARNING, ERROR, CRITICAL

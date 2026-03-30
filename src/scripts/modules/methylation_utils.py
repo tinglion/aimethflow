@@ -11,34 +11,34 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def extract_methylation_info(temp_dir, fastq_files, group_method="v2", config=None):
+def extract_methylation_info(temp_dir, fastq_files, group_method="v2", config=None, bam_files=None):
     """
-    提取甲基化信息（真实提取）
+    提取甲基化信息。
 
     Args:
         temp_dir: 临时目录
-        fastq_files: FastQ文件列表
-        group_method: 分组方法，可选值："v1"（基于索引）或 "v2"（基于Excel文件）
+        fastq_files: FastQ文件列表（当 bam_files 为 None 时，用于生成BAM）
+        group_method: 分组方法，"v1"（索引）或 "v2"（Excel）
         config: 配置对象
+        bam_files: 预计算的BAM文件列表（血浆模式下由比对→去重→on-target步骤生成）。
+                   提供此参数时跳过内部BAM生成（避免使用普通bwa mem进行bs-seq比对）。
 
     Returns:
         tuple: (sample1_methylation, sample2_methylation) 文件路径
     """
     logger.info("开始提取甲基化信息")
 
-    # 从配置文件中读取参考基因组路径
     reference_genome = config.get("extraction", {}).get("reference_genome")
-
-    # 为每个文件生成BAM文件（源文件名后缀改为.bam）
-    logger.info("开始为每个FastQ文件生成BAM文件")
-    all_bam_files = []
-
-    # 从配置文件中读取线程数，默认为4
     threads = config.get("extraction", {}).get("threads", 4)
 
-    # 为所有文件生成BAM文件
-    if fastq_files:
-        logger.info(f"为 {len(fastq_files)} 个文件生成BAM文件")
+    all_bam_files = []
+    if bam_files:
+        # 使用外部提供的BAM（血浆模式：已经过bismark比对+umi去重+on-target过滤）
+        logger.info(f"使用预计算的BAM文件（共{len(bam_files)}个），跳过内部比对步骤")
+        all_bam_files = bam_files
+    elif fastq_files:
+        # 回退：从FastQ重新生成BAM（仅用于非甲基化测序数据或测试）
+        logger.warning("未提供预计算BAM，将使用 bwa mem 生成BAM（注意：此方式不适用于BS-seq数据！）")
         from methylation.bam_generator import generate_bam
         all_bam_files = generate_bam(fastq_files, reference_genome, threads=threads)
 
