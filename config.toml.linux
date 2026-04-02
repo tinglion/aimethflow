@@ -1,0 +1,141 @@
+# 甲基化分析项目配置文件
+# 项目名称
+name = "甲基化分析项目"
+version = "1.0.0"
+
+# 数据目录配置
+[data]
+# 根数据目录
+root_dir = "F:\\meth"
+# 组织样本数据目录
+tissue_dir = "F:\\meth\\OC_tissue"
+# 血浆样本数据目录
+plasma_dir = "F:\\meth\\OC_plasma"
+# 样本信息Excel文件路径
+# sample_info_excel = "data/按分期处理_卵巢癌fq编号与样本信息对应表.xlsx"
+sample_info_excel = "data/卵巢癌fq编号与样本信息对应表.xlsx"
+# 探针区域文件路径
+probe_panel_bed = "data/panel_B10308.bed"
+# 候选区域文件路径
+candidate_regions = "data/OC_tissue_88_regions.hg38.txt"
+
+# 目录配置
+[directories]
+# 临时文件目录
+temp_dir = "temp"
+# 结果文件目录
+result_dir = "result"
+# 日志文件目录
+log_dir = "logs"
+
+# FastQ分析配置
+[fastq]
+# 每处理多少条序列显示进度
+progress_interval = 1000000
+# 抽样大小
+sample_size = 1000
+# 随机种子
+random_seed = 42
+
+# 甲基化提取配置
+[extraction]
+# 最小甲基化质量分数
+min_quality = 20
+# 最小覆盖深度
+min_depth = 10
+# 参考基因组路径
+reference_genome = "/data/meth/bwa/hg38.fa"
+
+# 差异甲基化分析配置
+[diff_methylation]
+# 甲基化差异阈值
+threshold = 0.2
+# 统计显著性水平
+p_value = 0.05
+# 最小覆盖深度
+min_depth = 20
+
+# 可视化配置
+[visualization]
+# 图表类型: density, scatter, heatmap
+plot_types = ["density", "scatter", "heatmap"]
+# 图表宽度
+fig_width = 12
+# 图表高度
+fig_height = 8
+# DPI
+dpi = 300
+# 字体大小
+font_size = 12
+
+# 甲基化数据过滤配置
+[filtering]
+# 重复序列BED文件路径
+repeat_bed = "/mnt/f/meth/hg38.repeat.bed"
+# 启动子区域BED文件路径
+promoter_bed = "/mnt/f/meth/hg38_upstream_2k_st.bed.gz"
+# 最小深度
+min_depth = 5
+# 最大深度
+max_depth = 50
+
+# 血浆cfDNA靶向甲基化分析配置
+[plasma]
+# 比对工具: "bismark"（精准，慢，首次验证/需要OT-OB方向性报告时用）
+#            "bwameth"（快3-5倍，推荐100+样本批量分析）
+aligner = "bwameth"
+# UMI设置（R2 5'端6N）
+umi_length = 6
+umi_location = "read2"
+# Trimming参数
+trim_front1 = 12        # R1 5'端切除碱基数（低复杂度寡核苷酸）
+trim_front2 = 12        # R2 5'端切除碱基数（UMI提取后的寡核苷酸）
+trim_tail2 = 5          # R2 3'端切除碱基数（poly-C偏差，根据M-bias图调整）
+min_length = 35         # 过滤后最短read长度
+min_quality = 20        # 最低碱基质量Q值
+# 比对参数
+non_directional = false # 单链建库方向性（待M-bias确认后调整）
+# 比对质量过滤
+min_mapq = 40
+# 区域覆盖深度过滤
+min_cpg_per_region = 3
+min_reads_per_region = 5
+# 甲基化read阈值（策略B，与tissue统一）
+methylated_read_threshold = 0.60
+low_confidence_threshold = 0.40
+# 差异分析阈值
+diff_p_value = 0.05
+diff_delta_beta = 0.10
+
+# 并行线程/进程配置（所有步骤的多线程数均在此统一管理）
+[threads]
+# fastp 质控线程数
+fastp = 8
+# bwameth/bwa-mem 比对线程数
+bwameth = 8
+# samtools sort 线程数（-@ 参数，实际用线程 = sort_threads + 1）
+samtools_sort = 4
+# samtools sort 每线程内存限制
+samtools_sort_mem = "8G"
+# MethylDackel 线程数（mbias / extract）
+methyldackel = 4
+# umi_tools dedup 不支持多线程，此配置预留
+umi_tools = 1
+
+# 工具路径配置
+[tools]
+# conda meth 环境的 bin 目录（非交互式bash中PATH不含conda env，需显式指定）
+conda_env_bin = "/mnt/e/programs/ubuntu/miniconda3/envs/meth/bin"
+# umi_tools 备用路径（如果meth env中没有，回退到base env）
+umi_tools_fallback = "/mnt/e/programs/ubuntu/miniconda3/bin/umi_tools"
+
+# 日志配置
+[logging]
+# 日志级别: DEBUG, INFO, WARNING, ERROR, CRITICAL
+level = "INFO"
+# 日志格式
+format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+# 是否保存到文件
+save_to_file = true
+# 是否输出到控制台
+console_output = true

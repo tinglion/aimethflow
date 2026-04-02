@@ -7,11 +7,29 @@ sample_grouping.py - 样本分组模块
 
 import pandas as pd
 import os
+import re
 from utils.logger import logger
 from utils.config import load_config
 
 # 加载配置文件
 config = load_config()
+
+
+def _to_posix_path(path):
+    """
+    将 Windows 路径（如 F:\\meth\\OC_plasma）转换为 WSL 可用的 POSIX 路径
+    （/mnt/f/meth/OC_plasma）。非 Windows 路径原样返回。
+    """
+    if not path:
+        return path
+    # 匹配 X:\ 或 X:/ 开头的 Windows 绝对路径
+    m = re.match(r"^([A-Za-z]):[/\\](.*)", path)
+    if m:
+        drive = m.group(1).lower()
+        rest  = m.group(2).replace("\\", "/")
+        return f"/mnt/{drive}/{rest}"
+    # 已是 POSIX 路径，只做反斜杠替换
+    return path.replace("\\", "/")
 
 
 def group_methylation_files_v1(methylation_files):
@@ -194,10 +212,10 @@ def resolve_patient_files(csv_path, excel_file=None, data_dir=None):
             "sample_info_excel", "data/按分期处理_卵巢癌fq编号与样本信息对应表.xlsx"
         )
 
-    # FastQ 数据目录
+    # FastQ 数据目录（自动将 Windows 路径转换为 WSL POSIX 路径）
     if data_dir is None:
         data_dir = config.get("data", {}).get("plasma_dir", "")
-
+    data_dir = _to_posix_path(data_dir)
     # 从 Excel 所有 sheet 构建 patient_id → {R1, R2} 映射
     # patient_id = fq_R1 文件名第一个 "." 之前的部分（如 B10186.R1.fq.gz → B10186）
     xl = pd.ExcelFile(excel_file)

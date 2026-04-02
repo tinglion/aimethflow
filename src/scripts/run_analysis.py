@@ -45,7 +45,6 @@ run_analysis.py - 执行完整的甲基化分析流程
 """
 
 import os
-import sys
 import time
 import argparse
 import logging
@@ -87,6 +86,7 @@ from scripts.modules import (
     visualize_results,
     generate_report,
 )
+from methylation.sample_grouping import resolve_patient_files
 
 # 加载配置文件
 config = load_config()
@@ -259,6 +259,18 @@ def main():
 
     # ── 模式开关 ──
     parser.add_argument(
+        "--patient-csv", metavar="CSV",
+        help="患者ID列表文件（每行一个ID），从Excel自动查找对应R1/R2文件，与 files 互斥",
+    )
+    parser.add_argument(
+        "--data-dir", metavar="DIR",
+        help="FastQ数据目录，与 --patient-csv 配合使用，默认读取 config.toml [data] plasma_dir",
+    )
+    parser.add_argument(
+        "--temp-dir", metavar="DIR",
+        help="临时文件存放目录（覆盖 config.toml [directories] temp_dir），例如 /mnt/g/temp",
+    )
+    parser.add_argument(
         "--plasma", action="store_true", default=True,
         help="启用血浆cfDNA模式（默认已开启）",
     )
@@ -296,6 +308,12 @@ def main():
         from utils.config import load_config as _load_cfg
         config = _load_cfg(args.config)
 
+    # ── --temp-dir 覆盖临时目录 ──
+    if args.temp_dir:
+        config["directories"]["temp_dir"] = args.temp_dir
+        os.makedirs(args.temp_dir, exist_ok=True)
+        logger.info(f"临时目录已覆盖为: {args.temp_dir}")
+
     # ── 详细输出 ──
     if args.verbose:
         logger.setLevel(logging.DEBUG)
@@ -310,11 +328,9 @@ def main():
 
     # ── 确定工作目录 ──
     if args.workdir:
-        # 恢复模式：使用已有目录
         workdir = args.workdir
-        if not os.path.isdir(workdir):
-            logger.error(f"指定的 workdir 不存在: {workdir}")
-            return
+        # 目录不存在则创建（首次 preprocess 即可指定 --workdir）
+        os.makedirs(workdir, exist_ok=True)
         # 复用 workdir 的时间戳，使 result_dir 与 workdir 对应同一次运行
         timestamp = os.path.basename(os.path.normpath(workdir))
         output_dirs = get_output_dirs(config, timestamp=timestamp)
@@ -332,8 +348,18 @@ def main():
     # ── 加载状态（分步恢复） ──
     state = _load_state(workdir)
 
-    # ── 查找输入文件（优先从状态恢复，其次从命令行） ──
-    if args.files:
+    # ── 查找输入文件（优先 --patient-csv，其次 files 参数，最后从状态恢复） ──
+    if getattr(args, "patient_csv", None):
+        # 从患者ID CSV + Excel 自动解析文件列表
+        data_dir = getattr(args, "data_dir", None)
+        fastq_files = resolve_patient_files(args.patient_csv, data_dir=data_dir)
+        bam_files_input = []
+        methylation_files_input = []
+        if not fastq_files:
+            logger.error(f"--patient-csv 未解析到任何文件，请检查 {args.patient_csv} 及数据目录")
+            return
+        _save_state(workdir, {"fastq_files": fastq_files})
+    elif args.files:
         found_files = find_files(args.files)
         fastq_files = found_files["fastq"]
         bam_files_input = found_files["bam"]
@@ -457,7 +483,7 @@ def main():
             reference_genome = config.get("extraction", {}).get("reference_genome")
             if reference_genome and os.path.exists(reference_genome):
                 logger.info("━━ 步骤 7.5: M-bias检查 ━━")
-                check_mbias(mbias_input, workdir, reference_genome)
+                check_mbias(mbias_input, workdir, reference_genome, config=config)
                 _save_state(workdir, {"mbias_done": True,
                                       "completed_steps": state.get("completed_steps", []) + ["mbias"]})
                 logger.info("  → M-bias SVG 已保存至 workdir，请检查 R2 3'端曲线")

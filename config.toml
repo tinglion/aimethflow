@@ -107,6 +107,21 @@ low_confidence_threshold = 0.40
 diff_p_value = 0.05
 diff_delta_beta = 0.10
 
+# 并行线程/进程配置（所有步骤的多线程数均在此统一管理）
+[threads]
+# fastp 质控线程数
+fastp = 8
+# bwameth/bwa-mem 比对线程数
+bwameth = 8
+# samtools sort 线程数（-@ 参数，实际用线程 = sort_threads + 1）
+samtools_sort = 4
+# samtools sort 每线程内存限制
+samtools_sort_mem = "8G"
+# MethylDackel 线程数（mbias / extract）
+methyldackel = 4
+# umi_tools dedup 不支持多线程，此配置预留
+umi_tools = 1
+
 # 工具路径配置
 [tools]
 # conda meth 环境的 bin 目录（非交互式bash中PATH不含conda env，需显式指定）

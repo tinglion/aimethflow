@@ -92,7 +92,7 @@ def _align_bismark_pair(r1_file, r2_file, sample_base, temp_dir, config, non_dir
         cmd.append("--non_directional")
 
     try:
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
         # 在 temp_dir 找 bismark 输出的 BAM
         for fname in sorted(os.listdir(temp_dir)):
             if sample_base in fname and fname.endswith(".bam") and "bismark_bt2" in fname and "sorted" not in fname and "temp" not in fname:
@@ -120,7 +120,7 @@ def _align_bismark_pair(r1_file, r2_file, sample_base, temp_dir, config, non_dir
 # bwameth 比对（快速模式，推荐批量）
 # ──────────────────────────────────────────────
 
-def _align_bwameth_pair(r1_file, r2_file, sample_base, temp_dir, config, non_directional=False):
+def _align_bwameth_pair(r1_file, r2_file, sample_base, temp_dir, config, non_directional=False):  # noqa: ARG001
     """
     bwameth 双端比对（BWA-MEM + C→T转换）。
     速度：~40-60min / 30M pairs（8核），比 bismark 快 3-5 倍。
@@ -132,12 +132,18 @@ def _align_bwameth_pair(r1_file, r2_file, sample_base, temp_dir, config, non_dir
     reference_genome = config.get("extraction", {}).get("reference_genome", "")
     sorted_bam = os.path.join(temp_dir, f"{sample_base}.bwameth_pe.sorted.bam")
 
+    # 线程数从 config [threads] 读取
+    threads_cfg = config.get("threads", {})
+    bwameth_t   = str(threads_cfg.get("bwameth", 8))
+    sort_t      = str(threads_cfg.get("samtools_sort", 4))
+    sort_mem    = str(threads_cfg.get("samtools_sort_mem", "8G"))
+
     # 幂等检查：已存在则跳过
     if os.path.exists(sorted_bam) and os.path.exists(sorted_bam + ".bai"):
         logger.info(f"bwameth BAM已存在，跳过: {sorted_bam}")
         return sorted_bam
 
-    cmd_align   = ["bwameth.py", "--reference", reference_genome, "-t", "8",
+    cmd_align   = ["bwameth.py", "--reference", reference_genome, "-t", bwameth_t,
                     r1_file, r2_file]
     unsorted_bam = sorted_bam.replace(".sorted.bam", ".unsorted.bam")
 
@@ -163,18 +169,18 @@ def _align_bwameth_pair(r1_file, r2_file, sample_base, temp_dir, config, non_dir
         # 步骤 2：从文件排序（无管道，bwameth 已退出，彻底消除死锁）
         logger.info(f"  [2/2] samtools sort 排序中...")
         subprocess.run(
-            ["samtools", "sort", "-@", "4", "-m", "8G", "-o", sorted_bam, unsorted_bam],
+            ["samtools", "sort", "-@", sort_t, "-m", sort_mem, "-o", sorted_bam, unsorted_bam],
             check=True, capture_output=True
         )
-        _rm(unsorted_bam)  # 排序完成后删除未排序中间 BAM
+        _rm(unsorted_bam)
 
         subprocess.run(["samtools", "index", sorted_bam], check=True, capture_output=True)
-        _rm(align_log)  # 比对成功后删除日志
+        _rm(align_log)
         logger.info(f"bwameth比对+排序完成: {sorted_bam}")
         return sorted_bam
     except Exception as e:
         logger.error(f"bwameth比对失败 ({r1_file}): {e}")
-        _rm(unsorted_bam)  # 清理可能残留的中间文件
+        _rm(unsorted_bam)
         return None
 
 
@@ -338,17 +344,19 @@ def extract_target_regions(bam_files, temp_dir, config):
 # M-bias 检查
 # ──────────────────────────────────────────────
 
-def check_mbias(bam_files, temp_dir, reference_genome):
+def check_mbias(bam_files, temp_dir, reference_genome, config=None):
     """
     MethylDackel mbias：检查 reads 各位置甲基化率是否存在系统偏差。
     生成 SVG 图像，供分析人员判断是否需要调整 config.toml trim_tail2 参数。
     """
     logger.info("开始M-bias检查")
+    n_threads = str((config or {}).get("threads", {}).get("methyldackel", 4))
     report_files = []
     for bam_file in bam_files:
         sample_name = os.path.basename(bam_file).split(".")[0]
         output_prefix = os.path.join(temp_dir, f"{sample_name}.mbias")
-        cmd = ["MethylDackel", "mbias", reference_genome, bam_file, output_prefix]
+        cmd = ["MethylDackel", "mbias", "--nOT", "0,0,0,0", "-@", n_threads,
+               reference_genome, bam_file, output_prefix]
         try:
             subprocess.run(cmd, check=True, capture_output=True, text=True)
             svg_file = f"{output_prefix}_OT.svg"
@@ -391,6 +399,7 @@ def extract_methylation_methyldackel(bam_files, temp_dir, config):
         return []
 
     result_files = []
+    n_threads = str(config.get("threads", {}).get("methyldackel", 4))
     for bam_file in bam_files:
         sample_name = os.path.basename(bam_file).split(".")[0]
         output_prefix = os.path.join(temp_dir, sample_name)
@@ -406,6 +415,7 @@ def extract_methylation_methyldackel(bam_files, temp_dir, config):
             "MethylDackel", "extract",
             "--minDepth", "1",
             "--mergeContext",
+            "-@", n_threads,
             reference_genome, bam_file,
             "-o", output_prefix,
         ]

@@ -165,6 +165,7 @@ def preprocess_fastq(fastq_files, temp_dir, plasma=False, config=None):
     """
     数据预处理（质量控制和接头去除）。
     使用 fastp 替代 TrimGalore，支持血浆模式的 UMI 提取。
+    幂等：若输出 .clean.R1.fq.gz 已存在则跳过该样本。
 
     Args:
         fastq_files: FastQ文件列表
@@ -182,10 +183,13 @@ def preprocess_fastq(fastq_files, temp_dir, plasma=False, config=None):
     plasma_cfg = (config or {}).get("plasma", {})
     trim_front1 = plasma_cfg.get("trim_front1", 12)
     trim_front2 = plasma_cfg.get("trim_front2", 12)
-    trim_tail2 = plasma_cfg.get("trim_tail2", 5)
-    min_length = plasma_cfg.get("min_length", 35)
+    trim_tail2  = plasma_cfg.get("trim_tail2", 5)
+    min_length  = plasma_cfg.get("min_length", 35)
     min_quality = plasma_cfg.get("min_quality", 20)
-    umi_length = plasma_cfg.get("umi_length", 6)
+    umi_length  = plasma_cfg.get("umi_length", 6)
+
+    # 线程数从 config [threads] 读取
+    n_threads = str((config or {}).get("threads", {}).get("fastp", 8))
 
     # 找出所有R1文件（避免重复处理R2）
     r1_files = [f for f in fastq_files if is_r1_file(f)]
@@ -210,6 +214,16 @@ def preprocess_fastq(fastq_files, temp_dir, plasma=False, config=None):
         json_report = os.path.join(temp_dir, f"{sample_name}.fastp.json")
         html_report = os.path.join(temp_dir, f"{sample_name}.fastp.html")
 
+        # ── 幂等检查：输出文件已存在则跳过 ──
+        if r2_file and os.path.exists(out_r1) and os.path.exists(out_r2):
+            logger.info(f"fastp输出已存在，跳过: {sample_name}")
+            processed_files.extend([out_r1, out_r2])
+            continue
+        if not r2_file and os.path.exists(out_r1):
+            logger.info(f"fastp输出已存在，跳过: {sample_name}")
+            processed_files.append(out_r1)
+            continue
+
         if r2_file:
             cmd = [
                 "fastp",
@@ -219,10 +233,9 @@ def preprocess_fastq(fastq_files, temp_dir, plasma=False, config=None):
                 "--length_required", str(min_length),
                 "--json", json_report,
                 "--html", html_report,
-                "--thread", "8",
+                "--thread", n_threads,
             ]
             if plasma:
-                # 血浆模式：UMI提取（R2 5'端） + 5'端低复杂度寡核苷酸切除 + R2 3'端poly-C切除
                 cmd += [
                     "--umi", "--umi_loc", "read2",
                     "--umi_len", str(umi_length),
@@ -232,7 +245,7 @@ def preprocess_fastq(fastq_files, temp_dir, plasma=False, config=None):
                     "--trim_tail2", str(trim_tail2),
                 ]
             try:
-                result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+                subprocess.run(cmd, check=True, capture_output=True, text=True)
                 logger.info(f"fastp双端处理完成: {sample_name}")
                 if os.path.exists(out_r1) and os.path.exists(out_r2):
                     processed_files.extend([out_r1, out_r2])
@@ -250,12 +263,10 @@ def preprocess_fastq(fastq_files, temp_dir, plasma=False, config=None):
                 "--length_required", str(min_length),
                 "--json", json_report,
                 "--html", html_report,
-                "--thread", "8",
+                "--thread", n_threads,
             ]
             if plasma:
-                cmd += [
-                    "--trim_front1", str(trim_front1),
-                ]
+                cmd += ["--trim_front1", str(trim_front1)]
             try:
                 subprocess.run(cmd, check=True, capture_output=True, text=True)
                 logger.info(f"fastp单端处理完成: {sample_name}")
@@ -271,10 +282,14 @@ def preprocess_fastq(fastq_files, temp_dir, plasma=False, config=None):
         out_r1 = os.path.join(temp_dir, f"{sample_name}.clean.fq.gz")
         json_report = os.path.join(temp_dir, f"{sample_name}.fastp.json")
         html_report = os.path.join(temp_dir, f"{sample_name}.fastp.html")
+        if os.path.exists(out_r1):
+            logger.info(f"fastp输出已存在，跳过: {sample_name}")
+            processed_files.append(out_r1)
+            continue
         cmd = [
             "fastp", "-i", fastq_file, "-o", out_r1,
             "-q", str(min_quality), "--length_required", str(min_length),
-            "--json", json_report, "--html", html_report, "--thread", "8",
+            "--json", json_report, "--html", html_report, "--thread", n_threads,
         ]
         try:
             subprocess.run(cmd, check=True, capture_output=True, text=True)
