@@ -51,3 +51,4 @@ data/
 result/
 docs
 .claude
+config.toml

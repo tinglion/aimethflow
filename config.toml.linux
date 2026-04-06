@@ -6,13 +6,12 @@ version = "1.0.0"
 # 数据目录配置
 [data]
 # 根数据目录
-root_dir = "F:\\meth"
+root_dir = "/data/sting"
 # 组织样本数据目录
-tissue_dir = "F:\\meth\\OC_tissue"
+tissue_dir = "/data/sting/OC_tissue"
 # 血浆样本数据目录
-plasma_dir = "F:\\meth\\OC_plasma"
+plasma_dir = "/data/sting/OC_plasma"
 # 样本信息Excel文件路径
-# sample_info_excel = "data/按分期处理_卵巢癌fq编号与样本信息对应表.xlsx"
 sample_info_excel = "data/卵巢癌fq编号与样本信息对应表.xlsx"
 # 探针区域文件路径
 probe_panel_bed = "data/panel_B10308.bed"
@@ -44,7 +43,7 @@ min_quality = 20
 # 最小覆盖深度
 min_depth = 10
 # 参考基因组路径
-reference_genome = "/data/meth/bwa/hg38.fa"
+reference_genome = "/data/sting/meth/hg38.fa"
 
 # 差异甲基化分析配置
 [diff_methylation]
@@ -129,9 +128,10 @@ umi_tools = 1
 # 工具路径配置
 [tools]
 # conda meth 环境的 bin 目录（非交互式bash中PATH不含conda env，需显式指定）
-conda_env_bin = "/mnt/e/programs/ubuntu/miniconda3/envs/meth/bin"
+conda_env_bin = "/data/deploy/miniconda3/envs/meth/bin"
 # umi_tools 备用路径（如果meth env中没有，回退到base env）
-umi_tools_fallback = "/mnt/e/programs/ubuntu/miniconda3/bin/umi_tools"
+umi_tools_fallback = "/data/deploy/miniconda3/bin/umi_tools"
+
 
 # 中间文件清理策略（各步骤完成后是否删除上一步产物）
 # 默认全部保留，节省重跑成本；磁盘紧张时可按需开启

@@ -6,11 +6,11 @@ version = "1.0.0"
 # 数据目录配置
 [data]
 # 根数据目录
-root_dir = "F:\\meth"
+root_dir = "/mnt/f/meth"
 # 组织样本数据目录
-tissue_dir = "F:\\meth\\OC_tissue"
+tissue_dir = "/mnt/f/meth/OC_tissue"
 # 血浆样本数据目录
-plasma_dir = "F:\\meth\\OC_plasma"
+plasma_dir = "/mnt/f/meth/OC_plasma"
 # 样本信息Excel文件路径
 # sample_info_excel = "data/按分期处理_卵巢癌fq编号与样本信息对应表.xlsx"
 sample_info_excel = "data/卵巢癌fq编号与样本信息对应表.xlsx"
