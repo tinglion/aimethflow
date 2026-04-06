@@ -12,7 +12,7 @@ tissue_dir = "/data/sting/OC_tissue"
 # 血浆样本数据目录
 plasma_dir = "/data/sting/OC_plasma"
 # 样本信息Excel文件路径
-sample_info_excel = "data/卵巢癌fq编号与样本信息对应表.xlsx"
+sample_info_excel = "data/按分期处理_卵巢癌fq编号与样本信息对应表v3.xlsx"
 # 探针区域文件路径
 probe_panel_bed = "data/panel_B10308.bed"
 # 候选区域文件路径

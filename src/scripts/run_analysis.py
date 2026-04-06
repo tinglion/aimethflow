@@ -186,6 +186,7 @@ PIPELINE_STEPS = [
     ("report",          "12",  "生成分析报告"),
     ("feature_select",  "14",  "特征选择 (LASSO + RF)"),
     ("classify",        "15",  "诊断分类器 (LR / SVM / RF  LOO-CV)"),
+    ("subtype_classify","16",  "亚型分类器 (恶性+交界性 多分类 LOO-CV)"),
 ]
 STEP_KEYS = [s[0] for s in PIPELINE_STEPS]
 _STATE_FILE = "pipeline_state.json"
@@ -675,6 +676,17 @@ def main():
                          "请先完成 extract 步骤（或确保 pipeline_state.json 中有分组信息）")
             if single_step:
                 return
+
+    # =========================================================
+    # 步骤 16: subtype_classify
+    # =========================================================
+    if _should_run("subtype_classify", False):
+        logger.info("━━ 步骤 16: 亚型分类器 LOO-CV ━━")
+        from scripts.modules.subtype_utils import run_subtype_classifier
+        sub_results, _ = run_subtype_classifier(workdir, result_dir, config)
+        _save_state(workdir, {"completed_steps": state.get("completed_steps", []) + ["subtype_classify"]})
+        if sub_results:
+            logger.info(f"  → 亚型分类结果已保存至 {result_dir}")
 
     # ── 完成提示 ──
     if single_step:

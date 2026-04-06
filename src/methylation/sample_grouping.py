@@ -147,27 +147,35 @@ def parse_sample_info(excel_file=None):
 
         # 遍历所有sheet
         for sheet_name in sheet_names:
-            # 读取当前sheet
             df = pd.read_excel(excel_file, sheet_name=sheet_name)
             logger.info(f"处理sheet: {sheet_name}, 包含 {len(df)} 行数据")
 
-            # 清理分类列中的空白字符
-            if "分类" in df.columns:
-                df["分类"] = df["分类"].str.strip()
+            if "分类" not in df.columns:
+                logger.warning(f"sheet {sheet_name} 中没有 '分类' 列，跳过")
+                continue
 
-                # 根据分类进行分组
-                benign_samples = df[df["分类"] == "良性"]
-                malignant_samples = df[df["分类"] == "恶性"]
+            # 清理字符串列中的空白字符
+            df["分类"] = df["分类"].astype(str).str.strip()
+            if "亚型" in df.columns:
+                df["亚型"] = df["亚型"].astype(str).str.strip()
 
-                # 提取FQ文件名并添加到对应列表
-                if "fq_R1" in df.columns:
-                    all_benign_R1.extend(benign_samples["fq_R1"].tolist())
-                    all_malignant_R1.extend(malignant_samples["fq_R1"].tolist())
-                if "fq_R2" in df.columns:
-                    all_benign_R2.extend(benign_samples["fq_R2"].tolist())
-                    all_malignant_R2.extend(malignant_samples["fq_R2"].tolist())
-            else:
-                logger.warning(f"sheet {sheet_name} 中没有 '分类' 列")
+            # 明确排除"交界性"（仅保留"良性"和"恶性"用于分类器）
+            borderline = df[df["分类"] == "交界性"]
+            if not borderline.empty:
+                logger.info(f"  排除交界性样本 {len(borderline)} 个（不参与分类器训练）")
+
+            benign_samples    = df[df["分类"] == "良性"]
+            malignant_samples = df[df["分类"] == "恶性"]
+
+            logger.info(f"  良性: {len(benign_samples)}  恶性: {len(malignant_samples)}  "
+                        f"交界性: {len(borderline)}")
+
+            if "fq_R1" in df.columns:
+                all_benign_R1.extend(benign_samples["fq_R1"].dropna().tolist())
+                all_malignant_R1.extend(malignant_samples["fq_R1"].dropna().tolist())
+            if "fq_R2" in df.columns:
+                all_benign_R2.extend(benign_samples["fq_R2"].dropna().tolist())
+                all_malignant_R2.extend(malignant_samples["fq_R2"].dropna().tolist())
 
         # 去重，避免重复的样本
         all_benign_R1 = list(set(all_benign_R1))
@@ -224,27 +232,40 @@ def resolve_patient_files(csv_path, excel_file=None, data_dir=None):
         df = pd.read_excel(excel_file, sheet_name=sheet_name)
         if "fq_R1" not in df.columns:
             continue
+        if "分类" in df.columns:
+            df["分类"] = df["分类"].astype(str).str.strip()
+        if "亚型" in df.columns:
+            df["亚型"] = df["亚型"].astype(str).str.strip()
         for _, row in df.iterrows():
             r1 = str(row["fq_R1"]).strip() if pd.notna(row.get("fq_R1")) else ""
             r2 = str(row.get("fq_R2", "")).strip() if pd.notna(row.get("fq_R2")) else ""
             if not r1 or r1 == "nan":
                 continue
             pid = r1.split(".")[0]
+            category = str(row.get("分类", "")).strip() if "分类" in df.columns else ""
+            subtype  = str(row.get("亚型",  "")).strip() if "亚型"  in df.columns else ""
             if pid not in pid_to_files:
-                pid_to_files[pid] = {"R1": r1, "R2": r2}
+                pid_to_files[pid] = {"R1": r1, "R2": r2,
+                                     "分类": category, "亚型": subtype}
 
     logger.info(f"从Excel解析到 {len(pid_to_files)} 个样本映射")
 
     # 按患者ID列表顺序解析文件路径
     fastq_files = []
     missing = []
+    skipped_borderline = []
     for pid in patient_ids:
         if pid not in pid_to_files:
             logger.warning(f"  患者ID {pid} 在Excel中未找到")
             missing.append(pid)
             continue
-        r1_name = pid_to_files[pid]["R1"]
-        r2_name = pid_to_files[pid]["R2"]
+        info = pid_to_files[pid]
+        # 跳过交界性样本（不参与比对及后续分析）
+        if info.get("分类") == "交界性":
+            skipped_borderline.append(pid)
+            continue
+        r1_name = info["R1"]
+        r2_name = info["R2"]
         r1_path = os.path.join(data_dir, r1_name)
         r2_path = os.path.join(data_dir, r2_name) if r2_name else ""
         if not os.path.exists(r1_path):
@@ -259,8 +280,10 @@ def resolve_patient_files(csv_path, excel_file=None, data_dir=None):
         if r2_name:
             fastq_files.append(r2_path)
 
-    found = len(patient_ids) - len(missing)
+    found = len(patient_ids) - len(missing) - len(skipped_borderline)
     logger.info(f"解析完成: {found}/{len(patient_ids)} 个患者ID找到对应文件")
+    if skipped_borderline:
+        logger.info(f"  跳过交界性样本 ({len(skipped_borderline)} 个): {skipped_borderline}")
     if missing:
         logger.warning(f"  缺失/未找到的患者ID: {missing}")
 
