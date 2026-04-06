@@ -5,7 +5,8 @@ numpy==1.26.2
 toml==0.10.2
 pandas==2.2.0
 seaborn==0.13.0
-pysam==0.22.0
+scikit-learn>=1.3.0
+pysam==0.22.0         # Linux/WSL only（Windows 不支持）
 openpyxl
 
 # 生物信息学工具（通过conda安装）

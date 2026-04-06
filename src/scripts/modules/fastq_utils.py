@@ -6,13 +6,11 @@ fastq_utils.py - FastQ文件处理模块
 """
 
 import os
-import logging
 import subprocess
 import random
 import gzip
 from Bio import SeqIO
-
-logger = logging.getLogger(__name__)
+from utils.logger import logger
 
 
 def analyze_quality(fastq_files):
@@ -235,6 +233,7 @@ def preprocess_fastq(fastq_files, temp_dir, plasma=False, config=None):
                 "--html", html_report,
                 "--thread", n_threads,
             ]
+            logger.info(f"正在处理双端样本({n_threads}): {sample_name} (R1: {r1_file}, R2: {r2_file})")
             if plasma:
                 cmd += [
                     "--umi", "--umi_loc", "read2",

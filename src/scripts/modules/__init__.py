@@ -18,6 +18,8 @@ from .methylation_utils import (
     visualize_results
 )
 from .report_utils import generate_report
+from .feature_utils import build_feature_matrix, select_features
+from .classifier_utils import run_classifiers
 
 __all__ = [
     "detect_file_type",
@@ -38,5 +40,8 @@ __all__ = [
     "filter_to_candidate_regions_wrapper",
     "perform_diff_analysis",
     "visualize_results",
-    "generate_report"
+    "generate_report",
+    "build_feature_matrix",
+    "select_features",
+    "run_classifiers",
 ]

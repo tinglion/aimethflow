@@ -43,7 +43,8 @@ conda install -y -c bioconda -c conda-forge \
     numpy=1.26.2 \
     matplotlib=3.8.2 \
     seaborn=0.13.0 \
-    biopython=1.84
+    biopython=1.84 \
+    umi_tools=1.1.6
    #  methyldackel=0.6.2 \
    #  gnu-parallel=20230422 \
 
@@ -59,8 +60,7 @@ pip install -e .
 
 ```bash
 # 安装Bismark及其依赖 bioconda
-conda install  bismark bowtie2 samtools bedtools
-conda install -y -c bioconda bwa=0.7.17 methyldackel
+conda install -y -c bioconda bwa=0.7.17 methyldackel bismark bowtie2 samtools bedtools
 ```
 
 ### 4. 参考基因组准备（仅需 1 次）

@@ -12,7 +12,9 @@ alignment_utils.py - 序列比对模块
 """
 
 import os
+import shutil
 import subprocess
+import traceback
 
 from utils.logger import logger
 
@@ -25,6 +27,25 @@ def _rm(path):
             logger.debug(f"  [清理] 删除中间文件: {path}")
     except OSError as e:
         logger.warning(f"  [清理] 删除失败: {path} — {e}")
+
+
+def _resolve_tool(name, config):
+    """
+    解析工具可执行文件的绝对路径。
+    优先顺序：
+      1. config [tools] conda_env_bin/{name}（直接给出绝对路径，最可靠）
+      2. shutil.which(name)（已在 PATH 中）
+      3. 原样返回 name（让 subprocess 自己报错）
+    """
+    conda_bin = (config or {}).get("tools", {}).get("conda_env_bin", "")
+    if conda_bin:
+        candidate = os.path.join(conda_bin, name)
+        if os.path.exists(candidate):
+            return candidate
+    found = shutil.which(name)
+    if found:
+        return found
+    return name
 
 
 # ──────────────────────────────────────────────
@@ -84,7 +105,7 @@ def _align_bismark_pair(r1_file, r2_file, sample_base, temp_dir, config, non_dir
     """
     bismark_index = os.path.dirname(config.get("extraction", {}).get("reference_genome", ""))
     cmd = [
-        "bismark", "--bowtie2", "--bam", "--multicore", "4",
+        _resolve_tool("bismark", config), "--bowtie2", "--bam", "--multicore", "4",
         bismark_index, "-1", r1_file, "-2", r2_file,
         "--output_dir", temp_dir,
     ]
@@ -98,9 +119,9 @@ def _align_bismark_pair(r1_file, r2_file, sample_base, temp_dir, config, non_dir
             if sample_base in fname and fname.endswith(".bam") and "bismark_bt2" in fname and "sorted" not in fname and "temp" not in fname:
                 bam_path = os.path.join(temp_dir, fname)
                 sorted_bam = bam_path.replace(".bam", ".sorted.bam")
-                subprocess.run(["samtools", "sort", "-o", sorted_bam, bam_path],
+                subprocess.run([_resolve_tool("samtools", config), "sort", "-o", sorted_bam, bam_path],
                                 check=True, capture_output=True)
-                subprocess.run(["samtools", "index", sorted_bam],
+                subprocess.run([_resolve_tool("samtools", config), "index", sorted_bam],
                                 check=True, capture_output=True)
                 logger.info(f"bismark比对+排序完成: {sorted_bam}")
                 _rm(bam_path)  # 删除未排序中间 BAM
@@ -152,9 +173,11 @@ def _align_bwameth_pair(r1_file, r2_file, sample_base, temp_dir, config, non_dir
         # 步骤 1：bwameth → samtools view（流式 SAM→BAM 转换）
         # stderr 写到文件，避免 PIPE 缓冲满后 bwameth 阻塞 stdout，造成死锁
         cmd_view   = ["samtools", "view", "-bS", "-o", unsorted_bam, "-"]
-        logger.info(f"  [1/2] bwameth 比对中（输出至未排序 BAM）...")
+        logger.info(f"  [1/2] bwameth 比对中（输出至未排序 BAM）")
         with open(align_log, "w") as f_log:
+            logger.info(f"    bwameth 命令: {' '.join(cmd_align)}")
             proc_align = subprocess.Popen(cmd_align, stdout=subprocess.PIPE, stderr=f_log)
+            logger.info(f"    samtools view 命令: {' '.join(cmd_view)}")
             proc_view  = subprocess.Popen(cmd_view, stdin=proc_align.stdout,
                                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             proc_align.stdout.close()
@@ -180,6 +203,7 @@ def _align_bwameth_pair(r1_file, r2_file, sample_base, temp_dir, config, non_dir
         return sorted_bam
     except Exception as e:
         logger.error(f"bwameth比对失败 ({r1_file}): {e}")
+        traceback.print_exc()
         _rm(unsorted_bam)
         return None
 
@@ -240,13 +264,14 @@ def align_methylation(fastq_files, temp_dir, config, plasma=False):
 # 去重
 # ──────────────────────────────────────────────
 
-def deduplicate_bam(bam_files, temp_dir, plasma=False):
+def deduplicate_bam(bam_files, temp_dir, plasma=False, config=None):
     """
     PCR 重复去除。
     血浆模式：umi_tools dedup（UMI感知，避免误删cfDNA真实片段）。
     标准模式：deduplicate_bismark（坐标去重）。
     """
     logger.info(f"开始PCR重复去除 ({'umi_tools血浆模式' if plasma else 'bismark标准模式'})")
+    delete_prev = (config or {}).get("cleanup", {}).get("delete_after_dedup", False)
     deduplicated_files = []
 
     for bam_file in bam_files:
@@ -264,9 +289,9 @@ def deduplicate_bam(bam_files, temp_dir, plasma=False):
                                 check=True, capture_output=True)
                 deduplicated_files.append(dedup_bam)
                 logger.info(f"umi_tools去重完成: {dedup_bam}")
-                # 删除已消费的 sorted BAM（align 步骤输出，dedup 后不再需要）
-                _rm(bam_file)
-                _rm(bam_file + ".bai")
+                if delete_prev:
+                    _rm(bam_file)
+                    _rm(bam_file + ".bai")
             except subprocess.CalledProcessError as e:
                 logger.error(f"umi_tools dedup失败: {e.stderr[-300:]}")
                 logger.warning("回退到 deduplicate_bismark（不推荐用于血浆数据）")
@@ -304,6 +329,7 @@ def extract_target_regions(bam_files, temp_dir, config):
     """bedtools intersect：只保留 panel.bed 覆盖区域的 reads。"""
     logger.info("开始靶向区域提取")
     target_files = []
+    delete_prev = (config or {}).get("cleanup", {}).get("delete_after_target", False)
 
     probe_panel = config.get("data", {}).get("probe_panel_bed")
     if not probe_panel or not os.path.exists(probe_panel):
@@ -329,8 +355,9 @@ def extract_target_regions(bam_files, temp_dir, config):
                 target_files.append(sorted_file)
                 logger.info(f"靶向区域提取完成: {sorted_file}")
                 _rm(output_file)       # 删除未排序中间 targeted.bam
-                _rm(bam_file)          # 删除已消费的 dedup BAM（target 后不再需要）
-                _rm(bam_file + ".bai")
+                if delete_prev:
+                    _rm(bam_file)
+                    _rm(bam_file + ".bai")
             else:
                 logger.error(f"靶向区域提取失败: {bam_file}")
         except subprocess.CalledProcessError as e:
@@ -400,6 +427,10 @@ def extract_methylation_methyldackel(bam_files, temp_dir, config):
 
     result_files = []
     n_threads = str(config.get("threads", {}).get("methyldackel", 4))
+    plasma_cfg = config.get("plasma", {})
+    nOT = plasma_cfg.get("nOT", "0,0,0,0")
+    nOB = plasma_cfg.get("nOB", "0,0,0,0")
+    logger.info(f"  M-bias校正参数: --nOT {nOT}  --nOB {nOB}")
     for bam_file in bam_files:
         sample_name = os.path.basename(bam_file).split(".")[0]
         output_prefix = os.path.join(temp_dir, sample_name)
@@ -412,9 +443,11 @@ def extract_methylation_methyldackel(bam_files, temp_dir, config):
             continue
 
         cmd = [
-            "MethylDackel", "extract",
+            _resolve_tool("MethylDackel", config), "extract",
             "--minDepth", "1",
             "--mergeContext",
+            "--nOT", nOT,
+            "--nOB", nOB,
             "-@", n_threads,
             reference_genome, bam_file,
             "-o", output_prefix,

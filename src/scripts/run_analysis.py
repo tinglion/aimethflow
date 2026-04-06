@@ -22,8 +22,10 @@ run_analysis.py - 执行完整的甲基化分析流程
   python src/scripts/run_analysis.py --plasma --step extract   --workdir temp/20240101_120000
   python src/scripts/run_analysis.py --plasma --step filter    --workdir temp/20240101_120000
   python src/scripts/run_analysis.py --plasma --step diff      --workdir temp/20240101_120000
-  python src/scripts/run_analysis.py --plasma --step visualize --workdir temp/20240101_120000
-  python src/scripts/run_analysis.py --plasma --step report    --workdir temp/20240101_120000
+  python src/scripts/run_analysis.py --plasma --step visualize       --workdir temp/20240101_120000
+  python src/scripts/run_analysis.py --plasma --step report          --workdir temp/20240101_120000
+  python src/scripts/run_analysis.py --plasma --step feature_select  --workdir temp/20240101_120000
+  python src/scripts/run_analysis.py --plasma --step classify        --workdir temp/20240101_120000
 
   # 查看步骤定义和当前状态
   python src/scripts/run_analysis.py --list-steps
@@ -39,8 +41,10 @@ run_analysis.py - 执行完整的甲基化分析流程
   extract     8   甲基化信息提取（bismark_methylation_extractor）
   filter      9   甲基化数据过滤 + 候选区域过滤
   diff        10  差异甲基化分析
-  visualize   11  可视化图表生成（密度图/散点图/热图）
-  report      12  生成分析报告
+  visualize      11  可视化图表生成（密度图/散点图/热图）
+  report         12  生成分析报告
+  feature_select 14  特征选择（LASSO + 随机森林）
+  classify       15  诊断分类器（LR / SVM / RF LOO-CV）
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
@@ -178,8 +182,10 @@ PIPELINE_STEPS = [
     ("extract",    "8",   "甲基化信息提取"),
     ("filter",     "9",   "甲基化数据过滤 + 候选区域"),
     ("diff",       "10",  "差异甲基化分析"),
-    ("visualize",  "11",  "可视化图表生成"),
-    ("report",     "12",  "生成分析报告"),
+    ("visualize",       "11",  "可视化图表生成"),
+    ("report",          "12",  "生成分析报告"),
+    ("feature_select",  "14",  "特征选择 (LASSO + RF)"),
+    ("classify",        "15",  "诊断分类器 (LR / SVM / RF  LOO-CV)"),
 ]
 STEP_KEYS = [s[0] for s in PIPELINE_STEPS]
 _STATE_FILE = "pipeline_state.json"
@@ -445,7 +451,7 @@ def main():
     # =========================================================
     if _should_run("dedup", args.skip_deduplication) and bam_files:
         logger.info("━━ 步骤 6: UMI去重 ━━")
-        deduplicated_files = deduplicate_bam(bam_files, workdir, plasma=args.plasma)
+        deduplicated_files = deduplicate_bam(bam_files, workdir, plasma=args.plasma, config=config)
         if deduplicated_files:
             _save_state(workdir, {"deduplicated_files": deduplicated_files,
                                   "completed_steps": state.get("completed_steps", []) + ["dedup"]})
@@ -630,6 +636,42 @@ def main():
                         benign_samples=benign_samples,
                         malignant_samples=malignant_samples)
         _save_state(workdir, {"completed_steps": state.get("completed_steps", []) + ["report"]})
+
+    # =========================================================
+    # 步骤 14: feature_select
+    # =========================================================
+    if _should_run("feature_select", False):
+        if benign_samples and malignant_samples:
+            logger.info("━━ 步骤 14: 特征选择 (LASSO + RF) ━━")
+            from scripts.modules.feature_utils import select_features
+            panel_features, importance_df = select_features(
+                workdir, result_dir, config, benign_samples, malignant_samples
+            )
+            _save_state(workdir, {"completed_steps": state.get("completed_steps", []) + ["feature_select"]})
+            logger.info(f"  → 入选特征: {len(panel_features)} 个，结果保存在 {result_dir}")
+        else:
+            logger.error("feature_select 需要 benign_samples 和 malignant_samples，"
+                         "请先完成 extract 步骤（或确保 pipeline_state.json 中有分组信息）")
+            if single_step:
+                return
+
+    # =========================================================
+    # 步骤 15: classify
+    # =========================================================
+    if _should_run("classify", False):
+        if benign_samples and malignant_samples:
+            logger.info("━━ 步骤 15: 诊断分类器 LOO-CV ━━")
+            from scripts.modules.classifier_utils import run_classifiers
+            clf_results, summary_df = run_classifiers(
+                workdir, result_dir, config, benign_samples, malignant_samples
+            )
+            _save_state(workdir, {"completed_steps": state.get("completed_steps", []) + ["classify"]})
+            logger.info(f"  → 分类器结果已保存至 {result_dir}")
+        else:
+            logger.error("classify 需要 benign_samples 和 malignant_samples，"
+                         "请先完成 extract 步骤（或确保 pipeline_state.json 中有分组信息）")
+            if single_step:
+                return
 
     # ── 完成提示 ──
     if single_step:

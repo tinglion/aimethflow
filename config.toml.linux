@@ -95,6 +95,10 @@ min_length = 35         # 过滤后最短read长度
 min_quality = 20        # 最低碱基质量Q值
 # 比对参数
 non_directional = false # 单链建库方向性（待M-bias确认后调整）
+# MethylDackel extract 位置偏差校正（根据 M-bias 图调整，格式: "R1_5',R1_3',R2_5',R2_3'"）
+# 0,0,0,0 = 不截；建议先看 mbias SVG 再填写
+nOT = "0,0,0,0"        # OT链（M-bias建议: 0,0,0,111 → 先保持0，确认SVG后再调整）
+nOB = "0,0,0,0"        # OB链（M-bias建议: 0,0,17,0  → 先保持0，确认SVG后再调整）
 # 比对质量过滤
 min_mapq = 40
 # 区域覆盖深度过滤
@@ -110,15 +114,15 @@ diff_delta_beta = 0.10
 # 并行线程/进程配置（所有步骤的多线程数均在此统一管理）
 [threads]
 # fastp 质控线程数
-fastp = 8
+fastp = 16
 # bwameth/bwa-mem 比对线程数
-bwameth = 8
+bwameth = 100
 # samtools sort 线程数（-@ 参数，实际用线程 = sort_threads + 1）
-samtools_sort = 4
+samtools_sort = 16
 # samtools sort 每线程内存限制
-samtools_sort_mem = "8G"
+samtools_sort_mem = "16G"
 # MethylDackel 线程数（mbias / extract）
-methyldackel = 4
+methyldackel = 32
 # umi_tools dedup 不支持多线程，此配置预留
 umi_tools = 1
 
@@ -128,6 +132,31 @@ umi_tools = 1
 conda_env_bin = "/mnt/e/programs/ubuntu/miniconda3/envs/meth/bin"
 # umi_tools 备用路径（如果meth env中没有，回退到base env）
 umi_tools_fallback = "/mnt/e/programs/ubuntu/miniconda3/bin/umi_tools"
+
+# 中间文件清理策略（各步骤完成后是否删除上一步产物）
+# 默认全部保留，节省重跑成本；磁盘紧张时可按需开启
+[cleanup]
+# dedup 完成后，删除 align 生成的排序 BAM（*.bwameth_pe.sorted.bam）
+delete_after_dedup = false
+# target 完成后，删除 dedup 生成的 BAM（*.dedup.bam）
+delete_after_target = false
+
+# 机器学习分类器配置（Step 14 特征选择 + Step 15 诊断分类）
+[ml]
+# 特征选择模式: "union"（LASSO和RF并集，默认）/ "lasso" / "rf"
+feature_selection_mode = "union"
+# 最低覆盖率阈值：DMC位点在 ≥ 此比例的样本中有覆盖才保留（0~1）
+min_feature_coverage = 0.5
+# LASSO (L1 logistic) 交叉验证折数
+lasso_cv_folds = 5
+# 随机森林树数量（特征选择 + 分类均使用）
+rf_n_estimators = 500
+# RF 最小特征重要性阈值（0 = 保留所有重要性 > 0 的特征）
+rf_min_importance = 0.0
+# 逻辑回归正则化参数 C（越大越弱正则化）
+lr_C = 1.0
+# SVM 正则化参数 C
+svm_C = 1.0
 
 # 日志配置
 [logging]
