@@ -45,13 +45,15 @@ def build_feature_matrix(workdir, result_dir, benign_samples, malignant_samples,
     ml_cfg = (config or {}).get("ml", {})
     min_coverage = ml_cfg.get("min_feature_coverage", 0.5)
 
-    # 1. 读取 DMC 位点
+    # 1. 读取 DMC 位点（自动跳过非数据行，兼容有/无表头）
     diff_file = os.path.join(result_dir, "diff_methylation.txt")
     if not os.path.exists(diff_file):
         raise FileNotFoundError(f"差异甲基化文件不存在: {diff_file}")
 
     diff_df = pd.read_csv(diff_file, sep="\t", header=None,
                           names=["chrom", "pos", "meth1", "meth2", "diff"])
+    # 过滤掉 pos 列无法解析为整数的行（表头行、注释行等）
+    diff_df = diff_df[pd.to_numeric(diff_df["pos"], errors="coerce").notna()].copy()
     diff_df["pos"] = diff_df["pos"].astype(int)
     feature_names = [f"{row.chrom}:{row.pos}" for _, row in diff_df.iterrows()]
     n_features = len(feature_names)
@@ -83,11 +85,14 @@ def build_feature_matrix(workdir, result_dir, benign_samples, malignant_samples,
         bg = pd.read_csv(bedgraph, sep="\t", header=None,
                          names=["chrom", "start", "end", "meth_pct",
                                 "meth_count", "unmeth_count"])
+        # 过滤无效行（表头、空行等导致 start 非数值）
+        bg = bg[pd.to_numeric(bg["start"], errors="coerce").notna()].copy()
+        bg["start"] = bg["start"].astype(int)
 
         # 构建 (chrom, start) → meth_pct 字典，只保留 DMC 位置
         bg_dict = {}
         for _, row in bg.iterrows():
-            key = (row["chrom"], int(row["start"]))
+            key = (row["chrom"], row["start"])
             if key in pos_index:
                 bg_dict[key] = row["meth_pct"]
 

@@ -70,9 +70,9 @@ font_size = 12
 # 甲基化数据过滤配置
 [filtering]
 # 重复序列BED文件路径
-repeat_bed = "/mnt/f/meth/hg38.repeat.bed"
+repeat_bed = "/data/sting/meth/hg38.repeat.bed"
 # 启动子区域BED文件路径
-promoter_bed = "/mnt/f/meth/hg38_upstream_2k_st.bed.gz"
+promoter_bed = "/data/sting/meth/hg38_upstream_2k_st.bed.gz"
 # 最小深度
 min_depth = 5
 # 最大深度
@@ -96,7 +96,7 @@ min_quality = 20        # 最低碱基质量Q值
 non_directional = false # 单链建库方向性（待M-bias确认后调整）
 # MethylDackel extract 位置偏差校正（根据 M-bias 图调整，格式: "R1_5',R1_3',R2_5',R2_3'"）
 # 0,0,0,0 = 不截；建议先看 mbias SVG 再填写
-nOT = "0,0,0,0"        # OT链（M-bias建议: 0,0,0,111 → 先保持0，确认SVG后再调整）
+nOT = "0,0,0,0"        # OT链（M-bias建议: 0,0,0,111 → 先保持0，确认SVG后再调整）# X轴最大值 - 111
 nOB = "0,0,0,0"        # OB链（M-bias建议: 0,0,17,0  → 先保持0，确认SVG后再调整）
 # 比对质量过滤
 min_mapq = 40

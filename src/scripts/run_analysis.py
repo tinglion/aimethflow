@@ -355,8 +355,10 @@ def main():
     state = _load_state(workdir)
 
     # ── 查找输入文件（优先 --patient-csv，其次 files 参数，最后从状态恢复） ──
+    # 只有 preprocess / align 步骤（或全流程模式）才真正需要 fastq 文件
+    _STEPS_NEED_FASTQ = {"preprocess", "align"}
+
     if getattr(args, "patient_csv", None):
-        # 从患者ID CSV + Excel 自动解析文件列表
         data_dir = getattr(args, "data_dir", None)
         fastq_files = resolve_patient_files(args.patient_csv, data_dir=data_dir)
         bam_files_input = []
@@ -370,7 +372,6 @@ def main():
         fastq_files = found_files["fastq"]
         bam_files_input = found_files["bam"]
         methylation_files_input = found_files["methylation"]
-        # 更新状态中的原始输入列表
         if fastq_files:
             state["fastq_files"] = fastq_files
         _save_state(workdir, {"fastq_files": fastq_files})
@@ -378,11 +379,13 @@ def main():
         fastq_files = state.get("fastq_files", [])
         bam_files_input = []
         methylation_files_input = []
-        if not fastq_files:
+        # 只在需要 fastq 的步骤（或全流程起跑）时报错
+        if not fastq_files and (not single_step or single_step in _STEPS_NEED_FASTQ):
             logger.error("未提供输入文件，且 workdir 中也无已记录的 fastq_files")
             return
 
-    logger.info(f"输入 FastQ 文件 ({len(fastq_files)} 个): {fastq_files}")
+    if fastq_files:
+        logger.info(f"输入 FastQ 文件 ({len(fastq_files)} 个): {fastq_files}")
 
     # ── 从状态恢复各步骤输出 ──
     processed_files       = state.get("processed_files", fastq_files)
