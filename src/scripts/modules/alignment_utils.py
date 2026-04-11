@@ -280,6 +280,10 @@ def deduplicate_bam(bam_files, temp_dir, plasma=False, config=None):
             dedup_bam = bam_file.replace(".sorted.bam", ".dedup.bam")
             if dedup_bam == bam_file:
                 dedup_bam = bam_file.replace(".bam", ".dedup.bam")
+            if os.path.exists(dedup_bam) and os.path.exists(dedup_bam + ".bai"):
+                logger.info(f"dedup BAM已存在，跳过: {dedup_bam}")
+                deduplicated_files.append(dedup_bam)
+                continue
             stats_file = dedup_bam.replace(".bam", ".stats")
             cmd = ["umi_tools", "dedup", "--paired",
                    "--stdin", bam_file, "--stdout", dedup_bam, "--log", stats_file]
@@ -307,10 +311,14 @@ def _deduplicate_bismark(bam_files, temp_dir):
     """内部函数：deduplicate_bismark 坐标去重（组织模式）。"""
     result = []
     for bam_file in bam_files:
+        dedup_file = bam_file.replace(".bam", ".deduplicated.bam")
+        if os.path.exists(dedup_file):
+            logger.info(f"deduplicate_bismark BAM已存在，跳过: {dedup_file}")
+            result.append(dedup_file)
+            continue
         cmd = ["deduplicate_bismark", "--bam", bam_file, "--output_dir", temp_dir]
         try:
             subprocess.run(cmd, check=True, capture_output=True, text=True)
-            dedup_file = bam_file.replace(".bam", ".deduplicated.bam")
             if os.path.exists(dedup_file):
                 result.append(dedup_file)
                 logger.info(f"deduplicate_bismark去重完成: {dedup_file}")

@@ -241,31 +241,13 @@ def run_subtype_classifier(workdir, result_dir, config):
 
     X_all, feature_names = _apply_panel_filter(X_all, feature_names, result_dir)
 
-    import re
+    import re  # noqa: F401 (re 已在模块顶层可用，此处保留以防直接调用)
 
-    def _extract_num(s):
-        """提取 ID 中最后一个大写字母后的数字尾缀，如 B10002→10002, P10011→10011, 20240723I-P10245→10245。"""
-        m = re.search(r'[A-Z](\d+)$', s)
-        return m.group(1) if m else None
-
-    # 预建数字 → subtype 的快速索引
-    num_to_subtype = {}
-    for key, subtype in subtype_map.items():
-        num = _extract_num(key)
-        if num:
-            num_to_subtype[num] = subtype
-
-    # 3. 筛选有亚型标签的样本
-    def _lookup_subtype(sid):
-        if sid in subtype_map:
-            return subtype_map[sid]
-        num = _extract_num(sid)
-        return num_to_subtype.get(num) if num else None
-
+    # 3. 筛选有亚型标签的样本（精确匹配 sample_id）
     indices, labels, sample_ids = [], [], []
     missing = []
     for i, sid in enumerate(all_sample_ids):
-        subtype = _lookup_subtype(sid)
+        subtype = subtype_map.get(sid)
         if subtype is not None:
             if subtype in SUBTYPE_CLASSES:
                 indices.append(i)
