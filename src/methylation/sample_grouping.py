@@ -47,13 +47,13 @@ def group_methylation_files_v1(methylation_files):
     return sample1_methylation_files, sample2_methylation_files
 
 
-def group_methylation_files_v2(methylation_files, fastq_files):
+def group_methylation_files_v2(methylation_files, category="plasma"):
     """
     将甲基化文件分为两组（样本1和样本2），根据Excel文件中的良/恶性进行分组（v2版本）
 
     Args:
         methylation_files: 甲基化文件列表
-        fastq_files: FastQ文件列表
+        category: 样本类别，"plasma" 或 "tissue"
 
     Returns:
         tuple: (benign_methylation_files, malignant_methylation_files)
@@ -69,7 +69,7 @@ def group_methylation_files_v2(methylation_files, fastq_files):
 
     try:
         # 使用parse_sample_info函数解析Excel文件
-        sample_info = parse_sample_info(excel_file)
+        sample_info = parse_sample_info(excel_file, category)
         if not sample_info:
             logger.error("解析Excel文件失败，回退到v1版本")
             return group_methylation_files_v1(methylation_files)
@@ -107,22 +107,25 @@ def group_methylation_files_v2(methylation_files, fastq_files):
                 malignant_methylation_files.append(methylation_file)
 
         logger.info(
-            f"根据Excel文件分组结果: 良性 {len(benign_methylation_files)} 个文件, 恶性 {len(malignant_methylation_files)} 个文件"
+            f"根据{excel_file}分组结果: \n"
+            f"良性 {len(benign_methylation_files)} 个文件={benign_methylation_files}\n"
+            f"恶性 {len(malignant_methylation_files)} 个文件={malignant_methylation_files}"
         )
         return benign_methylation_files, malignant_methylation_files
 
     except Exception as e:
-        logger.error(f"根据Excel文件分组时出错: {str(e)}")
+        logger.error(f"根据{excel_file}分组时出错: {str(e)}")
         # 如果出错，回退到v1版本
         return group_methylation_files_v1(methylation_files)
 
 
-def parse_sample_info(excel_file=None):
+def parse_sample_info(excel_file=None, category="plasma"):
     """
     解析Excel文件中的样本信息，支持多个sheet
 
     Args:
         excel_file: Excel文件路径，如果为None则从配置文件中读取
+        category: 样本类别，"plasma" 或 "tissue"
 
     Returns:
         dict: 包含良性和恶性样本分组的字典
@@ -147,6 +150,10 @@ def parse_sample_info(excel_file=None):
 
         # 遍历所有sheet
         for sheet_name in sheet_names:
+            if category and sheet_name != category:
+                logger.info(f"跳过非{category}sheet: {sheet_name}")
+                continue
+            
             df = pd.read_excel(excel_file, sheet_name=sheet_name)
             logger.info(f"处理sheet: {sheet_name}, 包含 {len(df)} 行数据")
 

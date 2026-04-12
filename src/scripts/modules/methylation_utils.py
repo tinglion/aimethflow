@@ -65,7 +65,7 @@ def extract_methylation_info(temp_dir, fastq_files, group_method="v2", config=No
         logger.info("使用基于Excel文件的分组方法（v2版本）")
         from methylation.sample_grouping import group_methylation_files_v2
         sample1_methylation_files, sample2_methylation_files = group_methylation_files_v2(
-            all_methylation_files, fastq_files
+            all_methylation_files
         )
     else:
         logger.info("使用基于索引的分组方法（v1版本）")

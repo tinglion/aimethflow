@@ -517,7 +517,7 @@ def main():
                 meth_files = extract_methylation_methyldackel(bam_input, workdir, config)
                 if meth_files:
                     from methylation.sample_grouping import group_methylation_files_v2
-                    benign_files, malignant_files = group_methylation_files_v2(meth_files, fastq_files)
+                    benign_files, malignant_files = group_methylation_files_v2(meth_files, "plasma" if args.plasma else "tissue")
                     logger.info(f"  → 分组：良性 {len(benign_files)} 个，恶性 {len(malignant_files)} 个")
 
                     s1_path = os.path.join(workdir, "sample1_methylation.bedGraph")
