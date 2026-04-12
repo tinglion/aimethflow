@@ -846,16 +846,3 @@ lr_C = 1.0
 svm_C = 1.0
 ```
 
-**新增 Python 依赖**（已更新 `requirements.txt` / `pyproject.toml`）：
-
-```text
-scikit-learn>=1.3.0
-```
-
-安装：
-
-```bash
-pip install scikit-learn
-# 或
-conda install -n meth scikit-learn
-```

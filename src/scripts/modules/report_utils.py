@@ -11,8 +11,11 @@ report_utils.py - 报告生成模块
   6. 甲基化提取与候选区域
   7. 甲基化分布可视化
   8. 差异甲基化分析（DMC）
-  9. 结果解读与质量评价
- 10. 分析流程
+  9. 特征选择（LASSO + RF）[可选]
+ 10. 诊断分类器（LR / SVM / RF LOO-CV）[可选]
+ 11. 亚型分类器（多分类 LOO-CV）[可选]
+ 12. 结果解读与质量评价
+ 13. 分析流程
 """
 
 import os
@@ -22,6 +25,12 @@ import glob
 import base64
 import logging
 from datetime import datetime
+
+try:
+    import pandas as pd
+    _HAS_PANDAS = True
+except ImportError:
+    _HAS_PANDAS = False
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +178,138 @@ def _img_tag(b64, alt):
     if not b64:
         return f"<p style='color:#aaa;font-size:.85em'>{alt} 尚未生成，请先运行 --step visualize</p>"
     return f"<img src='{b64}' alt='{alt}' style='max-width:100%;border-radius:6px;margin-top:6px'/>"
+
+
+def _read_csv_safe(path):
+    """读取 CSV，返回 list[dict]；文件不存在或 pandas 不可用时返回 None。"""
+    if not _HAS_PANDAS or not path or not os.path.exists(path):
+        return None
+    try:
+        import pandas as pd
+        df = pd.read_csv(path)
+        return df.to_dict(orient="records")
+    except Exception:
+        return None
+
+
+def _build_classifier_section(result_dir):
+    """
+    读取 Step 14-16 输出文件，构建 HTML 片段和 JSON 数据。
+    所有三节均为可选：对应文件不存在时返回空字符串 / None。
+    返回 (sec8_html, sec9_html, sec10_html, clf_data_dict)
+    """
+    # ── 第 9 节：特征选择 ──
+    panel_path    = os.path.join(result_dir, "panel_cpg.csv")
+    feat_imp_path = os.path.join(result_dir, "feature_importance.csv")
+    feat_records  = _read_csv_safe(feat_imp_path)
+    panel_records = _read_csv_safe(panel_path)
+
+    if panel_records is not None and feat_records is not None:
+        n_panel   = len(panel_records)
+        n_total   = len(feat_records)
+        lasso_sel = sum(1 for r in feat_records if r.get("lasso_selected"))
+        rf_sel    = sum(1 for r in feat_records if r.get("rf_selected"))
+
+        sec9_html = f"""
+<div class="section">
+<h2>9. 特征选择（LASSO + RF）</h2>
+<table>
+  <tr><th>指标</th><th>数值</th></tr>
+  <tr><td>候选 DMC 总数</td><td>{n_total}</td></tr>
+  <tr><td>LASSO 选出</td><td>{lasso_sel} 个</td></tr>
+  <tr><td>RF 选出</td><td>{rf_sel} 个</td></tr>
+  <tr><td>最终入选（union）</td><td><strong>{n_panel} 个</strong></td></tr>
+</table>
+<p style="color:#666;font-size:.83em">方法：LASSO (LogisticRegressionCV, L1) ∪ Random Forest (Gini importance &gt; 0)；
+结果保存：<code>panel_cpg.csv</code>，<code>feature_importance.csv</code></p>
+</div>"""
+        sec9_data = {"n_total": n_total, "lasso_selected": lasso_sel,
+                     "rf_selected": rf_sel, "panel_size": n_panel}
+    else:
+        sec9_html = ""
+        sec9_data = None
+
+    # ── 第 10 节：诊断分类器 ──
+    clf_sum_path  = os.path.join(result_dir, "classifier_summary.csv")
+    roc_b64       = _embed_image_b64(os.path.join(result_dir, "roc_curve.png"))
+    cm_b64        = _embed_image_b64(os.path.join(result_dir, "confusion_matrix.png"))
+    clf_records   = _read_csv_safe(clf_sum_path)
+
+    if clf_records is not None:
+        clf_rows = ""
+        for r in clf_records:
+            clf_rows += (
+                f"<tr><td>{r.get('classifier','')}</td>"
+                f"<td>{r.get('auc', 0):.3f}</td>"
+                f"<td>{r.get('accuracy', 0):.3f}</td>"
+                f"<td>{r.get('sensitivity', 0):.3f}</td>"
+                f"<td>{r.get('specificity', 0):.3f}</td>"
+                f"<td>{r.get('n_features', '')}</td></tr>\n"
+            )
+        roc_note   = _img_tag(roc_b64,  "ROC 曲线")
+        cm_note    = _img_tag(cm_b64,   "混淆矩阵")
+        sec10_html = f"""
+<div class="section">
+<h2>10. 诊断分类器（LOO-CV，良性 vs 恶性）</h2>
+<table>
+  <tr><th>分类器</th><th>AUC</th><th>Accuracy</th><th>Sensitivity</th><th>Specificity</th><th>特征数</th></tr>
+  {clf_rows}
+</table>
+<div class="two-col" style="margin-top:14px">
+  <div><h3>ROC 曲线</h3>{roc_note}</div>
+  <div><h3>混淆矩阵</h3>{cm_note}</div>
+</div>
+<p style="color:#666;font-size:.83em">评估方式：LOO-CV（留一法交叉验证）；StandardScaler 在训练折内拟合防止数据泄漏；
+结果文件：<code>classifier_summary.csv</code>，<code>classifier_predictions.csv</code></p>
+</div>"""
+        sec10_data = clf_records
+    else:
+        sec10_html = ""
+        sec10_data = None
+
+    # ── 第 11 节：亚型分类器 ──
+    sub_sum_path = os.path.join(result_dir, "subtype_summary.csv")
+    sub_roc_b64  = _embed_image_b64(os.path.join(result_dir, "subtype_roc.png"))
+    rf_cm_b64    = _embed_image_b64(os.path.join(result_dir, "subtype_confusion_RF.png"))
+    svm_cm_b64   = _embed_image_b64(os.path.join(result_dir, "subtype_confusion_SVM.png"))
+    sub_records  = _read_csv_safe(sub_sum_path)
+
+    if sub_records is not None:
+        sub_rows = ""
+        for r in sub_records:
+            sub_rows += (
+                f"<tr><td>{r.get('classifier','')}</td>"
+                f"<td>{r.get('accuracy', 0):.3f}</td>"
+                f"<td>{r.get('n_samples', '')}</td>"
+                f"<td>{r.get('n_subtypes', '')}</td></tr>\n"
+            )
+        sec11_html = f"""
+<div class="section">
+<h2>11. 亚型分类器（LOO-CV，恶性+交界性多分类）</h2>
+<p style="color:#666;font-size:.85em">亚型类别：高级别浆液性癌 / 子宫内膜样癌 / 透明细胞癌 / 低级别浆液性癌 / 黏液性</p>
+<table>
+  <tr><th>分类器</th><th>Accuracy</th><th>样本数</th><th>亚型数</th></tr>
+  {sub_rows}
+</table>
+<div class="two-col" style="margin-top:14px">
+  <div><h3>RF 混淆矩阵</h3>{_img_tag(rf_cm_b64, 'RF 混淆矩阵')}</div>
+  <div><h3>SVM 混淆矩阵</h3>{_img_tag(svm_cm_b64, 'SVM 混淆矩阵')}</div>
+</div>
+<div style="margin-top:14px"><h3>OvR ROC 曲线</h3>{_img_tag(sub_roc_b64, '亚型 ROC')}</div>
+<p style="color:#666;font-size:.83em">策略：One-vs-Rest (OvR)；评估：LOO-CV；
+结果文件：<code>subtype_summary.csv</code>，<code>subtype_predictions.csv</code></p>
+</div>"""
+        sec11_data = sub_records
+    else:
+        sec11_html = ""
+        sec11_data = None
+
+    clf_data = {
+        "feature_selection": sec9_data,
+        "classifier":        sec10_data,
+        "subtype_classifier": sec11_data,
+    }
+    return sec9_html, sec10_html, sec11_html, clf_data
 
 
 # ─────────────────────────────────────────────
@@ -353,6 +494,9 @@ def generate_report(
     # ── 构建 HTML ── ──────────────────────────────────────────
 
     analysis_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # ── 可选的分类器节（Steps 14-16，文件不存在时返回空字符串） ──
+    sec9_html, sec10_html, sec11_html, clf_data = _build_classifier_section(result_dir)
 
     # 所有样本 QC 表格行
     qc_rows = ""
@@ -579,9 +723,15 @@ def generate_report(
 <p style="color:#666;font-size:.83em">红色 = {g1_label} 更高；蓝色 = {g2_label} 更高</p>
 </div>
 
+{sec9_html}
+
+{sec10_html}
+
+{sec11_html}
+
 <!-- 8. 结果解读 -->
 <div class="section">
-<h2>8. 结果解读与质量评价</h2>
+<h2>12. 结果解读与质量评价</h2>
 <div class="interp">
 {interp_html}
 </div>
@@ -589,7 +739,7 @@ def generate_report(
 
 <!-- 9. 分析流程 -->
 <div class="section">
-<h2>9. 分析流程</h2>
+<h2>13. 分析流程</h2>
 <div class="funnel">
   <div class="funnel-step">fastp QC<br/>UMI 提取</div><div class="funnel-arrow">→</div>
   <div class="funnel-step">bwameth<br/>比对</div><div class="funnel-arrow">→</div>
@@ -639,6 +789,7 @@ def generate_report(
             "n_dmc": n_dmc, "g1_higher": s1_higher, "g2_higher": s2_higher,
             "mean_diff": mean_diff, "max_diff": max_diff, "chrom_dist": chrom_dist,
         },
+        "ml": clf_data,
     }
     json_report = os.path.join(result_dir, "analysis_report.json")
     with open(json_report, "w", encoding="utf-8") as f:

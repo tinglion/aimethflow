@@ -49,7 +49,7 @@ conda install -y -c bioconda -c conda-forge \
    #  gnu-parallel=20230422 \
 
 # 安装项目及其依赖
-pip install -e .
+pip install -e . -i https://pypi.tuna.tsinghua.edu.cn/simple --retries 10 --timeout 30
 ```
 
 ### 2. 在Windows电脑上使用WSL

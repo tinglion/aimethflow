@@ -60,7 +60,7 @@ def group_methylation_files_v2(methylation_files, fastq_files):
     """
     # 从配置文件中读取Excel文件路径
     excel_file = config.get("data", {}).get(
-        "sample_info_excel", "data/按分期处理_卵巢癌fq编号与样本信息对应表.xlsx"
+        "sample_info_excel", "data/卵巢癌fq编号与样本信息对应表v3.xlsx"
     )
     if not os.path.exists(excel_file):
         logger.error(f"错误: 文件 {excel_file} 不存在")
@@ -131,7 +131,7 @@ def parse_sample_info(excel_file=None):
         # 如果未提供Excel文件路径，从配置文件中读取
         if excel_file is None:
             excel_file = config.get("data", {}).get(
-                "sample_info_excel", "data/按分期处理_卵巢癌fq编号与样本信息对应表.xlsx"
+                "sample_info_excel", "data/卵巢癌fq编号与样本信息对应表v3.xlsx"
             )
 
         # 获取Excel文件的所有sheet名称
@@ -188,7 +188,7 @@ def parse_sample_info(excel_file=None):
         malignant_fq = {"R1": all_malignant_R1, "R2": all_malignant_R2}
 
         logger.info(
-            f"解析完成，共获取 {len(all_benign_R1)} 个良性样本, {len(all_malignant_R1)} 个恶性样本"
+            f"解析{excel_file}完成，共获取 {len(all_benign_R1)} 个良性样本, {len(all_malignant_R1)} 个恶性样本"
         )
         return {"benign": benign_fq, "malignant": malignant_fq}
 

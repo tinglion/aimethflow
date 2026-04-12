@@ -183,10 +183,10 @@ PIPELINE_STEPS = [
     ("filter",     "9",   "甲基化数据过滤 + 候选区域"),
     ("diff",       "10",  "差异甲基化分析"),
     ("visualize",       "11",  "可视化图表生成"),
-    ("report",          "12",  "生成分析报告"),
     ("feature_select",  "14",  "特征选择 (LASSO + RF)"),
     ("classify",        "15",  "诊断分类器 (LR / SVM / RF  LOO-CV)"),
     ("subtype_classify","16",  "亚型分类器 (恶性+交界性 多分类 LOO-CV)"),
+    ("report",          "17",  "生成分析报告"),
 ]
 STEP_KEYS = [s[0] for s in PIPELINE_STEPS]
 _STATE_FILE = "pipeline_state.json"
@@ -630,18 +630,6 @@ def main():
         logger.info("11. 跳过可视化图表生成")
 
     # =========================================================
-    # 步骤 12: report
-    # =========================================================
-    if _should_run("report", args.skip_report):
-        logger.info("━━ 步骤 12: 生成分析报告 ━━")
-        generate_report(workdir, result_dir,
-                        sample1_methylation, sample2_methylation,
-                        candidate_sample1, candidate_sample2,
-                        benign_samples=benign_samples,
-                        malignant_samples=malignant_samples)
-        _save_state(workdir, {"completed_steps": state.get("completed_steps", []) + ["report"]})
-
-    # =========================================================
     # 步骤 14: feature_select
     # =========================================================
     if _should_run("feature_select", False):
@@ -687,6 +675,18 @@ def main():
         _save_state(workdir, {"completed_steps": state.get("completed_steps", []) + ["subtype_classify"]})
         if sub_results:
             logger.info(f"  → 亚型分类结果已保存至 {result_dir}")
+
+    # =========================================================
+    # 步骤 17: report（最后一步，汇总所有结果）
+    # =========================================================
+    if _should_run("report", args.skip_report):
+        logger.info("━━ 步骤 17: 生成分析报告 ━━")
+        generate_report(workdir, result_dir,
+                        sample1_methylation, sample2_methylation,
+                        candidate_sample1, candidate_sample2,
+                        benign_samples=benign_samples,
+                        malignant_samples=malignant_samples)
+        _save_state(workdir, {"completed_steps": state.get("completed_steps", []) + ["report"]})
 
     # ── 完成提示 ──
     if single_step:
