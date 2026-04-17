@@ -37,6 +37,15 @@ SUBTYPE_CLASSES = [
     "黏液性",
 ]
 
+# English labels used in plots (avoids CJK font dependency)
+SUBTYPE_EN = {
+    "高级别浆液性癌": "HGSC",
+    "子宫内膜样癌":   "Endometrioid",
+    "透明细胞癌":     "Clear cell",
+    "低级别浆液性癌": "LGSC",
+    "黏液性":         "Mucinous",
+}
+
 
 # ──────────────────────────────────────────────────────
 # 标签读取：从 Excel 构建 sample_id → 亚型 映射
@@ -140,25 +149,31 @@ def _impute(X):
 # 可视化
 # ──────────────────────────────────────────────────────
 
-def _save_confusion_plot(cm, classes, clf_name, result_dir):
+def _save_confusion_plot(cm, en_labels, clf_name, result_dir):
+    """
+    en_labels: list of English label strings (same order as cm axes).
+    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    plt.rcParams.update({"font.family": "sans-serif",
+                         "font.sans-serif": ["DejaVu Sans"]})
 
-    fig, ax = plt.subplots(figsize=(max(6, len(classes)), max(5, len(classes))))
-    im = ax.imshow(cm, interpolation="nearest", cmap="Blues")
-    ax.set_title(f"{clf_name} — 亚型混淆矩阵")
-    tick_labels = [c[:4] for c in classes]  # 缩短中文标签
-    ax.set_xticks(range(len(classes)))
-    ax.set_yticks(range(len(classes)))
-    ax.set_xticklabels(tick_labels, rotation=45, ha="right", fontsize=9)
-    ax.set_yticklabels(tick_labels, fontsize=9)
-    ax.set_xlabel("预测亚型")
-    ax.set_ylabel("真实亚型")
-    for i in range(len(classes)):
-        for j in range(len(classes)):
+    n = len(en_labels)
+    fig, ax = plt.subplots(figsize=(max(6, n), max(5, n)))
+    ax.imshow(cm, interpolation="nearest", cmap="Blues")
+    ax.set_title(f"{clf_name} - Subtype Confusion Matrix")
+    ax.set_xticks(range(n))
+    ax.set_yticks(range(n))
+    ax.set_xticklabels(en_labels, rotation=45, ha="right", fontsize=9)
+    ax.set_yticklabels(en_labels, fontsize=9)
+    ax.set_xlabel("Predicted")
+    ax.set_ylabel("True")
+    for i in range(n):
+        for j in range(n):
             ax.text(j, i, str(cm[i, j]), ha="center", va="center",
-                    color="white" if cm[i, j] > cm.max() / 2 else "black", fontsize=11)
+                    color="white" if cm[i, j] > cm.max() / 2 else "black",
+                    fontsize=11)
     fig.tight_layout()
     path = os.path.join(result_dir, f"subtype_confusion_{clf_name}.png")
     fig.savefig(path, dpi=150, bbox_inches="tight")
@@ -166,13 +181,19 @@ def _save_confusion_plot(cm, classes, clf_name, result_dir):
     logger.info(f"  混淆矩阵已保存: {path}")
 
 
-def _save_roc_plot(results, classes, result_dir):
+def _save_roc_plot(results, en_labels, result_dir):
+    """
+    en_labels: list of English label strings indexed by class integer.
+    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from sklearn.metrics import roc_curve, auc
     from sklearn.preprocessing import label_binarize
+    plt.rcParams.update({"font.family": "sans-serif",
+                         "font.sans-serif": ["DejaVu Sans"]})
 
+    n_classes = len(en_labels)
     fig, axes = plt.subplots(1, len(results), figsize=(6 * len(results), 5))
     if len(results) == 1:
         axes = [axes]
@@ -180,19 +201,21 @@ def _save_roc_plot(results, classes, result_dir):
     colors = plt.cm.tab10.colors
 
     for ax, (clf_name, res) in zip(axes, results.items()):
-        y_true_bin = label_binarize(res["y_true"], classes=list(range(len(classes))))
-        y_prob = res["y_prob"]  # (n_samples, n_classes)
-        for i, cls in enumerate(classes):
-            if y_true_bin.shape[1] <= i:
+        y_true_bin = label_binarize(res["y_true"], classes=list(range(n_classes)))
+        y_prob = res["y_prob"]
+        for i, lbl in enumerate(en_labels):
+            if i >= y_true_bin.shape[1] or i >= y_prob.shape[1]:
+                continue
+            if y_true_bin[:, i].sum() == 0:
                 continue
             fpr, tpr, _ = roc_curve(y_true_bin[:, i], y_prob[:, i])
             roc_auc = auc(fpr, tpr)
             ax.plot(fpr, tpr, color=colors[i % len(colors)], lw=2,
-                    label=f"{cls[:4]} (AUC={roc_auc:.2f})")
+                    label=f"{lbl} (AUC={roc_auc:.2f})")
         ax.plot([0, 1], [0, 1], "k--", lw=1, alpha=0.5)
         ax.set_title(f"{clf_name} OvR ROC")
-        ax.set_xlabel("FPR")
-        ax.set_ylabel("TPR")
+        ax.set_xlabel("False Positive Rate")
+        ax.set_ylabel("True Positive Rate")
         ax.legend(loc="lower right", fontsize=8)
         ax.grid(alpha=0.3)
 
@@ -304,6 +327,7 @@ def run_subtype_classifier(workdir, result_dir, config):
     # 5. LOO-CV
     loo = LeaveOneOut()
     results = {}
+    n_total_classes = len(classes)
 
     for clf_name, clf in classifiers.items():
         logger.info(f"  LOO-CV: {clf_name} ...")
@@ -318,11 +342,19 @@ def run_subtype_classifier(workdir, result_dir, config):
             X_test_sc = scaler.transform(X_test)
 
             clf.fit(X_train_sc, y_train)
-            prob = clf.predict_proba(X_test_sc)[0]   # shape: (n_classes,)
+
+            # predict_proba 只对训练集出现的类返回概率列；
+            # 当某 fold 训练集缺少某一亚型时列数 < n_total_classes，
+            # 需要按 clf.classes_ 将概率填入完整大小的向量。
+            prob_raw = clf.predict_proba(X_test_sc)[0]
+            prob_full = np.zeros(n_total_classes)
+            for j, cls_idx in enumerate(clf.classes_):
+                prob_full[int(cls_idx)] = prob_raw[j]
+
             pred = clf.predict(X_test_sc)[0]
 
             y_true_list.append(int(y_test[0]))
-            y_prob_list.append(prob)
+            y_prob_list.append(prob_full)
             y_pred_list.append(int(pred))
 
         y_true = np.array(y_true_list)
@@ -340,17 +372,19 @@ def run_subtype_classifier(workdir, result_dir, config):
             "confusion_matrix": cm,
         }
         logger.info(f"    {clf_name}: 准确率={acc:.3f}")
+        en_names = [SUBTYPE_EN.get(str(c), str(c)) for c in classes]
         logger.info("\n" + classification_report(
             y_true, y_pred,
             labels=list(range(len(classes))),
-            target_names=classes,
+            target_names=en_names,
             zero_division=0,
         ))
 
-    # 6. 可视化
+    # 6. 可视化 — build English label list once, pass to both plot functions
+    en_labels = [SUBTYPE_EN.get(str(c), str(c)) for c in classes]
     for clf_name, res in results.items():
-        _save_confusion_plot(res["confusion_matrix"], classes, clf_name, result_dir)
-    _save_roc_plot(results, classes, result_dir)
+        _save_confusion_plot(res["confusion_matrix"], en_labels, clf_name, result_dir)
+    _save_roc_plot(results, en_labels, result_dir)
 
     # 7. 逐样本预测结果
     rows = []

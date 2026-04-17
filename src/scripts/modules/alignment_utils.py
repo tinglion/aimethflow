@@ -345,6 +345,17 @@ def extract_target_regions(bam_files, temp_dir, config):
         return bam_files
 
     for bam_file in bam_files:
+        target_file_sorted = os.path.join(
+            temp_dir, os.path.basename(bam_file).replace(".bam", ".targeted.sorted.bam")
+        )
+        target_file_sorted_bai = os.path.join(
+            temp_dir, os.path.basename(bam_file).replace(".bam", ".targeted.sorted.bam.bai")
+        )
+        if os.path.exists(target_file_sorted) and os.path.exists(target_file_sorted_bai):
+            logger.info(f"靶向BAM已存在，跳过: {target_file_sorted}")
+            target_files.append(target_file_sorted)
+            continue
+        
         logger.info(f"处理文件: {bam_file}")
         output_file = os.path.join(
             temp_dir, os.path.basename(bam_file).replace(".bam", ".targeted.bam")
