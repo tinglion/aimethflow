@@ -59,11 +59,17 @@ cp .env.example .env
 # 2. 构建镜像（首次约 10–20 分钟，后续有缓存）
 docker compose --progress=plain build
 
-# 3a. 全流程分析
-docker compose --profile analysis run --rm analysis --steps 1-19
+# 3. 启动常驻容器
+docker compose up -d
+# 提交分析任务
+docker compose exec analysis \
+    python /app/src/scripts/run_analysis.py --steps 1-19
+# 进入容器 shell
+docker compose exec analysis bash
 
-# 3b. 分步执行（示例：只跑 preprocess）
-docker compose --profile analysis run --rm analysis --step preprocess /mnt/OC_plasma/
+# 一次性运行（用完即删）
+docker compose --profile run run --rm analysis-run \
+    python /app/src/scripts/run_analysis.py --steps 1-19
 
 # 4. 启动 JupyterLab 分步查看结果
 docker compose --profile jupyter up jupyter

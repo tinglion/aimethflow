@@ -20,12 +20,14 @@ RUN mamba install -n meth -y -c bioconda -c conda-forge \
         pysam=0.22.0 \
     && conda clean -afy
 
-# ── Python 依赖（pip）────────────────────────────────────────────────────────
-SHELL ["conda", "run", "-n", "meth", "/bin/bash", "-c"]
-COPY requirements.txt /tmp/
-RUN pip install --no-cache-dir \
+# ── Jupyter（conda-forge，避免 pip SSL 问题）──────────────────────────────────
+RUN mamba install -n meth -y -c conda-forge \
         jupyterlab ipykernel \
-    && pip install --no-cache-dir -r /tmp/requirements.txt
+    && conda clean -afy
+
+# ── Python 依赖（conda env 内的 pip）─────────────────────────────────────────
+COPY requirements.txt /tmp/
+RUN /opt/conda/envs/meth/bin/pip install --no-cache-dir -r /tmp/requirements.txt
 
 # ── 应用代码 ──────────────────────────────────────────────────────────────────
 WORKDIR /app
