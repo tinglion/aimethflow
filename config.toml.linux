@@ -1,6 +1,6 @@
-# 甲基化分析项目配置文件
+# AIMethFlow 配置文件
 # 项目名称
-name = "甲基化分析项目"
+name = "AIMethFlow"
 version = "1.0.0"
 
 # 数据目录配置

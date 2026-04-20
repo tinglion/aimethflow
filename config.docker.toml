@@ -1,6 +1,6 @@
 # Docker 容器专用配置（路径已改为容器内挂载路径）
 # 对应 docker-compose.yml 的 volume 映射
-name = "甲基化分析项目"
+name = "AIMethFlow"
 version = "1.0.0"
 
 [data]

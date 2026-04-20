@@ -3,9 +3,9 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "meth-analysis"
+name = "aimethflow"
 version = "1.0.0"
-description = "甲基化分析项目"
+description = "AIMethFlow — cfDNA targeted methylation analysis pipeline"
 readme = "README.md"
 requires-python = ">=3.10,<3.11"
 license = {text = "MIT"}

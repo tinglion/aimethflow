@@ -3,7 +3,7 @@ services:
   # 用法: docker compose --profile analysis run --rm analysis --steps 1-19
   analysis:
     build: .
-    image: meth-analysis:latest
+    image: aimethflow:latest
     profiles: ["analysis"]
     volumes:
       - ${DATA_DIR:?请在 .env 中设置 DATA_DIR}:/app/data:ro
@@ -22,7 +22,7 @@ services:
   #       浏览器打开 http://localhost:8888
   jupyter:
     build: .
-    image: meth-analysis:latest
+    image: aimethflow:latest
     profiles: ["jupyter"]
     ports:
       - "8888:8888"
