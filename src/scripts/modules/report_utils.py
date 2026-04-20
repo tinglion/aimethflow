@@ -11,10 +11,13 @@ Report structure:
   6.  Methylation Distribution Visualization
   7.  Differential Methylation Analysis (DMC)
   8.  Feature Selection (LASSO + RF) [optional]
-  9.  Diagnostic Classifiers (LR / SVM / RF / XGB / LGBM, LOO-CV) [optional]
-  10. Subtype Classifier (multi-class LOO-CV) [optional]
-  11. Results Interpretation & Quality Assessment
-  12. Analysis Pipeline
+  9.  Sample Quality & Outlier Detection [optional]
+  10. Diagnostic Classifiers (LR / SVM / RF / XGB / LGBM, LOO-CV) [optional]
+  11. Subtype Classifier (multi-class LOO-CV) [optional]
+  12. Feature Site Annotation (Ensembl + EWAS + CpG island) [optional]
+  13. Public Dataset Cross-validation (blood baseline + TCGA-OV) [optional]
+  14. Results Interpretation & Quality Assessment
+  15. Analysis Pipeline
 """
 
 import os
@@ -178,6 +181,697 @@ def _read_csv_safe(path):
         return None
 
 
+def _pagination_widget(tbl_id: str, ctrl_id: str, n_total: int, page_size: int = 20):
+    """Return (controls_html, js_html) for a paginated <table id=tbl_id>.
+
+    Each <tr> must carry a data-row='index' attribute (0-based).
+    The table must have a <tbody>.
+    """
+    n_pages = max(1, (n_total + page_size - 1) // page_size)
+    controls = f"""
+<div id="{ctrl_id}_bar" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:8px 0;font-size:.83em">
+  <button id="{ctrl_id}_prev"
+          style="padding:2px 10px;cursor:pointer;border:1px solid #ccc;background:#fff;border-radius:3px"
+          onclick="window.{ctrl_id}_show(window.{ctrl_id}_cur - 1)">&#8592; Prev</button>
+  <span id="{ctrl_id}_pages" style="display:inline-flex;flex-wrap:wrap;gap:2px"></span>
+  <button id="{ctrl_id}_next"
+          style="padding:2px 10px;cursor:pointer;border:1px solid #ccc;background:#fff;border-radius:3px"
+          onclick="window.{ctrl_id}_show(window.{ctrl_id}_cur + 1)">Next &#8594;</button>
+  <span id="{ctrl_id}_info" style="color:#666;margin-left:6px"></span>
+</div>"""
+    js = f"""
+<script>
+(function() {{
+  var PAGE  = {page_size};
+  var TOTAL = {n_total};
+  var PAGES = {n_pages};
+  var cur   = 0;
+  function show(p) {{
+    p = Math.max(0, Math.min(p, PAGES - 1));
+    cur = p;
+    window.{ctrl_id}_cur = cur;
+    var rows = document.querySelectorAll('#{tbl_id} tbody tr');
+    var start = cur * PAGE;
+    rows.forEach(function(tr) {{
+      var i = parseInt(tr.getAttribute('data-row'));
+      tr.style.display = (i >= start && i < start + PAGE) ? '' : 'none';
+    }});
+    var info = document.getElementById('{ctrl_id}_info');
+    if (info) info.textContent = 'Showing ' + (start+1) + '\u2013' + Math.min(start+PAGE, TOTAL) + ' of ' + TOTAL;
+    var prev = document.getElementById('{ctrl_id}_prev');
+    var next = document.getElementById('{ctrl_id}_next');
+    if (prev) prev.disabled = (cur === 0);
+    if (next) next.disabled = (cur === PAGES - 1);
+    document.querySelectorAll('.{ctrl_id}_pg').forEach(function(btn) {{
+      var active = parseInt(btn.getAttribute('data-p')) === cur;
+      btn.style.fontWeight  = active ? 'bold'    : 'normal';
+      btn.style.background  = active ? '#e3f0ff' : '#fff';
+      btn.style.borderColor = active ? '#1a6fbb' : '#ccc';
+    }});
+  }}
+  window.{ctrl_id}_show = show;
+  window.{ctrl_id}_cur  = 0;
+  document.addEventListener('DOMContentLoaded', function() {{
+    var pgArea = document.getElementById('{ctrl_id}_pages');
+    if (pgArea) {{
+      for (var p = 0; p < PAGES; p++) {{
+        (function(pp) {{
+          var b = document.createElement('button');
+          b.textContent = pp + 1;
+          b.setAttribute('data-p', pp);
+          b.className = '{ctrl_id}_pg';
+          b.style.cssText = 'margin:0 1px;padding:2px 7px;cursor:pointer;border:1px solid #ccc;background:#fff;border-radius:3px';
+          b.onclick = function() {{ show(pp); }};
+          pgArea.appendChild(b);
+        }})(p);
+      }}
+    }}
+    show(0);
+  }});
+}})();
+</script>"""
+    return controls, js
+
+
+def _build_outlier_section(result_dir):
+    """
+    Read outlier_report.csv and build the HTML section + JSON data.
+    Returns (html_str, data_dict). Both empty/None when file is absent.
+    The sample table uses JS pagination (PAGE_SIZE rows per page).
+    """
+    path = os.path.join(result_dir, "outlier_report.csv")
+    records = _read_csv_safe(path)
+    if records is None:
+        return "", None
+
+    PAGE_SIZE = 20
+    n_total   = len(records)
+    n_suspect = sum(1 for r in records if str(r.get("suspect", "")).lower() == "true")
+
+    # Build one <tr> per record; embed row index as data-row attribute for JS paging
+    rows_html = ""
+    for idx, r in enumerate(records):
+        is_suspect = str(r.get("suspect", "")).lower() == "true"
+        bg = "background:#fff3cd" if is_suspect else ""
+        badge = ("<span style='color:#c0392b;font-weight:bold'>&#9888; suspect</span>"
+                 if is_suspect else "<span style='color:#aaa'>ok</span>")
+        flag_cov = "&#10003;" if str(r.get("flag_coverage",  "")).lower() == "true" else "&mdash;"
+        flag_pca = "&#10003;" if str(r.get("flag_pca",       "")).lower() == "true" else "&mdash;"
+        flag_if  = "&#10003;" if str(r.get("flag_isolation", "")).lower() == "true" else "&mdash;"
+        try:
+            pca_z = f"{float(r.get('pca_z_score', '')):.2f}"
+        except (TypeError, ValueError):
+            pca_z = "&mdash;"
+        try:
+            nan_frac = f"{float(r.get('nan_frac', ''))*100:.1f}%"
+        except (TypeError, ValueError):
+            nan_frac = str(r.get("nan_frac", ""))
+        rows_html += (
+            f"<tr data-row='{idx}' style='{bg}'>"
+            f"<td>{r.get('sample_id','')}</td>"
+            f"<td>{r.get('group','')}</td>"
+            f"<td style='text-align:right'>{nan_frac}</td>"
+            f"<td style='text-align:center'>{flag_cov}</td>"
+            f"<td style='text-align:right'>{pca_z}</td>"
+            f"<td style='text-align:center'>{flag_pca}</td>"
+            f"<td style='text-align:center'>{flag_if}</td>"
+            f"<td style='text-align:center'>{r.get('n_flags',0)}</td>"
+            f"<td style='text-align:center'>{badge}</td>"
+            f"</tr>\n"
+        )
+
+    if n_suspect > 0:
+        suspect_note = (
+            f"<p style='color:#c0392b;font-size:.85em;margin-top:8px'>"
+            f"&#9888; <strong>{n_suspect}</strong> suspect sample(s) detected. "
+            f"After reviewing <code>outlier_report.csv</code>, add confirmed IDs to "
+            f"<code>config.toml</code> <code>[ml] exclude_samples = [...]</code> "
+            f"and re-run the <code>classify</code> step.</p>"
+        )
+    else:
+        suspect_note = ("<p style='color:#22863a;font-size:.85em;margin-top:8px'>"
+                        "&#10003; No suspect samples detected.</p>")
+
+    # Unique JS identifier so multiple reports on the same page don't conflict
+    tbl_id  = "outlier_tbl"
+    ctrl_id = "outlier_ctrl"
+    controls, js = _pagination_widget(tbl_id, ctrl_id, n_total, PAGE_SIZE)
+
+    html = f"""
+<div class="section">
+<h2>9. Sample Quality &amp; Outlier Detection</h2>
+<p style="color:#666;font-size:.85em">
+  Three complementary methods flag unusual samples (flagged by &ge;2 methods = suspect):
+  (1) <strong>Coverage</strong> &mdash; fraction of CpG sites with no read depth;
+  (2) <strong>PCA within-group distance z-score</strong>;
+  (3) <strong>Isolation Forest</strong> per-group anomaly score.
+  Suspect samples are not automatically removed; use <code>exclude_samples</code> in
+  <code>config.toml [ml]</code> to exclude confirmed outliers before re-running
+  <code>classify</code>.
+</p>
+<table>
+  <tr><th>Metric</th><th>Value</th></tr>
+  <tr><td>Total samples analysed</td><td>{n_total}</td></tr>
+  <tr><td>Suspect (&ge;2 flags)</td>
+      <td><strong style="color:{'#c0392b' if n_suspect else '#22863a'}">{n_suspect}</strong></td></tr>
+</table>
+{suspect_note}
+<details style="margin-top:12px" {'open' if n_suspect > 0 else ''}>
+  <summary style="cursor:pointer;color:#1a6fbb;font-size:.88em">
+    Show all {n_total} samples &mdash; paginated, {PAGE_SIZE} per page (yellow = suspect)
+  </summary>
+  <div style="overflow-x:auto;margin-top:8px">
+  {controls}
+  <table id="{tbl_id}" style="font-size:.82em">
+    <thead>
+      <tr>
+        <th>Sample</th><th>Group</th>
+        <th>NaN frac</th><th>Flag (cov)</th>
+        <th>PCA z</th><th>Flag (PCA)</th>
+        <th>Flag (IF)</th><th># Flags</th><th>Status</th>
+      </tr>
+    </thead>
+    <tbody>
+    {rows_html}
+    </tbody>
+  </table>
+  </div>
+</details>
+<p style="color:#666;font-size:.83em;margin-top:6px">
+  Full report: <code>outlier_report.csv</code> &nbsp;|&nbsp;
+  Thresholds: <code>outlier_coverage_min</code>, <code>outlier_pca_z</code> in
+  <code>config.toml [ml]</code>
+</p>
+{js}
+</div>"""
+
+    data = {
+        "n_samples": n_total,
+        "n_suspect": n_suspect,
+        "suspect_ids": [r.get("sample_id") for r in records
+                        if str(r.get("suspect","")).lower() == "true"],
+    }
+    return html, data
+
+
+def _build_annotation_section(result_dir):
+    """
+    Read panel_annotation.csv and build the feature annotation HTML section.
+    Returns (html_str, data_dict).  Both empty/None when file is absent.
+    Paginated table: PAGE_SIZE rows per page (same JS pattern as outlier section).
+    """
+    path    = os.path.join(result_dir, "panel_annotation.csv")
+    records = _read_csv_safe(path)
+    if records is None:
+        return "", None
+
+    PAGE_SIZE = 20
+    n_total   = len(records)
+
+    # ── Summary counts ────────────────────────────────────────────────────
+    def _cnt(col, val):
+        return sum(1 for r in records if str(r.get(col, "")).strip() == val)
+
+    n_promoter  = _cnt("region_type", "promoter")
+    n_gene_body = _cnt("region_type", "gene_body")
+    n_intergenic= _cnt("region_type", "intergenic")
+    n_island    = _cnt("cpg_context", "Island")
+    n_shore     = _cnt("cpg_context", "Shore")
+    n_shelf     = _cnt("cpg_context", "Shelf")
+    n_open_sea  = _cnt("cpg_context", "Open sea")
+    n_in_88     = sum(1 for r in records
+                      if str(r.get("in_88_regions","")).lower() == "true")
+    n_ewas      = sum(1 for r in records if int(r.get("ewas_n_hits", 0) or 0) > 0)
+    total_hits  = sum(int(r.get("ewas_n_hits", 0) or 0) for r in records)
+
+    # Sort by LOO-CV selection rate descending; NaN → treated as 0 (not in freq log)
+    def _sort_key(r):
+        try:
+            import math
+            v = float(r.get("selection_rate", 0) or 0)
+            return 0.0 if math.isnan(v) else -v
+        except (TypeError, ValueError):
+            return 0.0
+    records = sorted(records, key=_sort_key)
+
+    # ── Table rows ────────────────────────────────────────────────────────
+    region_colors = {
+        "promoter":   "#e8f5e9",
+        "gene_body":  "#e3f2fd",
+        "intergenic": "",
+    }
+    cpg_badges = {
+        "Island":   ("CpG island",  "#1b5e20", "#c8e6c9"),
+        "Shore":    ("Shore",        "#1a237e", "#c5cae9"),
+        "Shelf":    ("Shelf",        "#4a148c", "#e1bee7"),
+        "Open sea": ("Open sea",     "#555",    "#eeeeee"),
+        "N/A":      ("N/A",          "#555",    "#eeeeee"),
+    }
+    rows_html = ""
+    def _s(val, default=""):
+        """Convert a potentially NaN/float cell value to a clean string."""
+        v = str(val).strip() if val is not None else ""
+        return default if v.lower() in ("nan", "none", "") else v
+
+    for idx, r in enumerate(records):
+        in88   = _s(r.get("in_88_regions")).lower() == "true"
+        site   = _s(r.get("feature"))
+        ucsc   = _s(r.get("ucsc_url"))
+        site_link = (f"<a href='{ucsc}' target='_blank' "
+                     f"style='font-family:monospace;color:#1a6fbb'>{site}</a>"
+                     if ucsc else f"<code>{site}</code>")
+        marker = "&#9733;" if in88 else "&#9675;"   # ★ / ○
+        rate   = r.get("selection_rate", "")
+        try:
+            import math
+            v = float(r.get("selection_rate", ""))
+            rate = "&mdash;" if math.isnan(v) else f"{v*100:.1f}%"
+        except (TypeError, ValueError):
+            rate = "&mdash;"
+        gene     = _s(r.get("nearest_gene")) or "&mdash;"
+        dist     = r.get("distance_bp", "")
+        try:
+            dist = f"{int(float(dist))} bp" if float(dist) > 0 else "overlap"
+        except (TypeError, ValueError):
+            dist = "&mdash;"
+        rtype  = _s(r.get("region_type"))
+        bg     = region_colors.get(rtype, "")
+        cpg    = _s(r.get("cpg_context"), "N/A")
+        lbl, fc, bc = cpg_badges.get(cpg, cpg_badges["N/A"])
+        cpg_badge = (f"<span style='background:{bc};color:{fc};"
+                     f"padding:1px 5px;border-radius:3px;font-size:.8em'>{lbl}</span>")
+        n_hits = int(r.get("ewas_n_hits", 0) or 0)
+        traits = _s(r.get("ewas_traits"))
+        if n_hits > 0 and traits:
+            safe_traits = traits.replace("'", "&apos;")
+            ewas_cell = (f"<td style='text-align:center'>"
+                         f"<span title='{safe_traits}' "
+                         f"style='cursor:help;color:#c0392b;font-weight:bold'>"
+                         f"{n_hits} &#9432;</span></td>")
+        elif n_hits > 0:
+            ewas_cell = f"<td style='text-align:center'>{n_hits}</td>"
+        else:
+            ewas_cell = "<td style='text-align:center;color:#aaa'>&mdash;</td>"
+        biotype = _s(r.get("biotype"))
+        rows_html += (
+            f"<tr data-row='{idx}' style='background:{bg}'>"
+            f"<td style='font-size:.8em'>{site_link}</td>"
+            f"<td style='text-align:center'>{marker}</td>"
+            f"<td style='text-align:center'>{rate}</td>"
+            f"<td><strong>{gene}</strong>"
+            f"{'<br><span style=color:#888;font-size:.78em>' + biotype + '</span>' if biotype else ''}"
+            f"</td>"
+            f"<td style='text-align:right;font-size:.85em'>{dist}</td>"
+            f"<td style='font-size:.85em'>{rtype or '&mdash;'}</td>"
+            f"<td>{cpg_badge}</td>"
+            f"{ewas_cell}"
+            f"</tr>\n"
+        )
+
+    # ── Pagination JS (same pattern as outlier section) ───────────────────
+    TBL  = "annot_tbl"
+    CTRL = "annot_ctrl"
+    controls, js = _pagination_widget(TBL, CTRL, n_total, PAGE_SIZE)
+
+    html = f"""
+<div class="section">
+<h2>12. Feature Site Annotation</h2>
+<p style="color:#666;font-size:.85em">
+  Each panel CpG site is annotated with the nearest gene (Ensembl REST API),
+  CpG island context (UCSC hg38), and associations from the EWAS Catalog
+  (&plusmn;500 bp window).
+  &#9733; = within 88 candidate tissue regions; &#9675; = outside.
+  Hover over EWAS hit counts to see associated traits.
+  Coordinates are 0-based BED (MethylDackel); UCSC links use 1-based display.
+</p>
+<table style="margin-bottom:10px">
+  <tr>
+    <th colspan="2">Region type</th>
+    <th colspan="4">CpG island context</th>
+    <th colspan="2">EWAS evidence</th>
+  </tr>
+  <tr>
+    <td>Promoter</td><td><strong>{n_promoter}</strong></td>
+    <td>Island</td><td><strong>{n_island}</strong></td>
+    <td>Shore</td><td><strong>{n_shore}</strong></td>
+    <td>Sites with &ge;1 hit</td><td><strong style="color:#c0392b">{n_ewas}</strong></td>
+  </tr>
+  <tr>
+    <td>Gene body</td><td><strong>{n_gene_body}</strong></td>
+    <td>Shelf</td><td><strong>{n_shelf}</strong></td>
+    <td>Open sea</td><td><strong>{n_open_sea}</strong></td>
+    <td>Total EWAS hits</td><td><strong>{total_hits}</strong></td>
+  </tr>
+  <tr>
+    <td>Intergenic</td><td><strong>{n_intergenic}</strong></td>
+    <td colspan="4"></td>
+    <td>In 88 candidate regions</td><td><strong style="color:#1b5e20">{n_in_88}</strong></td>
+  </tr>
+</table>
+{controls}
+<div style="overflow-x:auto">
+<table id="{TBL}" style="font-size:.82em">
+  <thead>
+    <tr>
+      <th>Site (UCSC &rarr;)</th>
+      <th>88?</th>
+      <th>Sel. rate (%)</th>
+      <th>Nearest gene</th>
+      <th>Distance</th>
+      <th>Region</th>
+      <th>CpG context</th>
+      <th>EWAS hits</th>
+    </tr>
+  </thead>
+  <tbody>
+  {rows_html}
+  </tbody>
+</table>
+</div>
+<p style="color:#666;font-size:.83em;margin-top:6px">
+  Full table: <code>panel_annotation.csv</code> &nbsp;|&nbsp;
+  API responses cached in <code>annotation_cache.json</code> (re-runs are instant) &nbsp;|&nbsp;
+  Configurable in <code>config.toml [annotation]</code>
+</p>
+{js}
+</div>"""
+
+    data = {
+        "n_sites":        n_total,
+        "n_in_88":        n_in_88,
+        "n_promoter":     n_promoter,
+        "n_gene_body":    n_gene_body,
+        "n_intergenic":   n_intergenic,
+        "n_island":       n_island,
+        "n_with_ewas":    n_ewas,
+        "total_ewas_hits": total_hits,
+    }
+    return html, data
+
+
+def _build_external_validation_section(result_dir):
+    """
+    Read external_validation.csv (produced by external_validate.py) and build
+    the public-dataset cross-validation HTML section.
+    Returns (html_str, data_dict). Both empty/None when file is absent.
+    Joins selection_rate from panel_annotation.csv (if present).
+    Table is sortable by clicking column headers; default sort: selection_rate desc.
+    """
+    path    = os.path.join(result_dir, "external_validation.csv")
+    records = _read_csv_safe(path)
+    if records is None:
+        return "", None
+
+    # ── Join selection_rate from panel_annotation.csv ────────────────────────
+    annot_path = os.path.join(result_dir, "panel_annotation.csv")
+    annot_records = _read_csv_safe(annot_path)
+    sel_rate_map = {}
+    if annot_records:
+        import math
+        for ar in annot_records:
+            feat = ar.get("feature", "")
+            try:
+                v = float(ar.get("selection_rate", "") or "")
+                sel_rate_map[feat] = 0.0 if math.isnan(v) else v
+            except (TypeError, ValueError):
+                sel_rate_map[feat] = 0.0
+    for r in records:
+        r["selection_rate"] = sel_rate_map.get(r.get("feature", ""), None)
+
+    # ── Default sort: selection_rate descending (NaN → bottom) ───────────────
+    def _sort_key(r):
+        v = r.get("selection_rate")
+        if v is None:
+            return -1.0
+        try:
+            return -float(v)
+        except (TypeError, ValueError):
+            return -1.0
+    records = sorted(records, key=_sort_key)
+
+    n_total      = len(records)
+    n_matched    = sum(1 for r in records if str(r.get("probe_matched", "")).lower() == "true")
+    n_blood_pass = sum(1 for r in records
+                       if str(r.get("blood_pass",     "")).lower() == "true"
+                       and str(r.get("probe_matched", "")).lower() == "true")
+    n_blood_fail = sum(1 for r in records
+                       if str(r.get("blood_pass",     "")).lower() == "false"
+                       and str(r.get("probe_matched", "")).lower() == "true")
+    n_tcga = sum(1 for r in records
+                 if str(r.get("tcga_n_samples", "0")).strip() not in ("0", "nan", "", "None"))
+
+    def _fv(val, fmt=".3f"):
+        try:
+            return f"{float(val):{fmt}}"
+        except (TypeError, ValueError):
+            return "&mdash;"
+
+    PAGE_SIZE = 20
+    TBL  = "extval_tbl"
+    CTRL = "extval_ctrl"
+
+    # ── Table rows ─────────────────────────────────────────────────────────────
+    # Embed numeric sort keys as data-* for the JS sorter
+    rows_html = ""
+    for idx, r in enumerate(records):
+        matched = str(r.get("probe_matched", "")).lower() == "true"
+        bpass   = str(r.get("blood_pass",   "")).lower() == "true"
+        bg = "background:#fff3cd" if (matched and not bpass) else ""
+        if not matched:
+            blood_badge = "<span style='color:#aaa'>no probe</span>"
+        elif bpass:
+            blood_badge = "<span style='color:#22863a;font-weight:bold'>&#10003; pass</span>"
+        else:
+            blood_badge = "<span style='color:#c0392b;font-weight:bold'>&#9888; fail</span>"
+
+        # numeric values for sort; use -1 as sentinel for missing
+        sr_raw = r.get("selection_rate")
+        try:
+            sr_num = float(sr_raw) if sr_raw is not None else -1.0
+            sr_disp = f"{sr_num*100:.1f}%" if sr_num >= 0 else "&mdash;"
+        except (TypeError, ValueError):
+            sr_num, sr_disp = -1.0, "&mdash;"
+
+        def _num(v, default=-1.0):
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return default
+
+        rows_html += (
+            f"<tr data-row='{idx}' style='{bg}'"
+            f" data-sel='{sr_num}'"
+            f" data-site='{str(r.get('feature','') or '').lower()}'"
+            f" data-cg='{str(r.get('cg_probe','') or '').lower()}'"
+            f" data-bm='{_num(r.get('blood_mean_beta'))}'"
+            f" data-bmed='{_num(r.get('blood_median_beta'))}'"
+            f" data-bp='{'1' if bpass else ('0' if matched else '-1')}'"
+            f" data-tm='{_num(r.get('tcga_mean_beta'))}'"
+            f" data-tn='{_num(r.get('tcga_n_samples',0), 0)}'>"
+            f"<td style='font-family:monospace;font-size:.82em'>{r.get('feature', '')}</td>"
+            f"<td style='font-family:monospace;font-size:.82em'>{r.get('cg_probe', '') or '&mdash;'}</td>"
+            f"<td style='text-align:right'><strong>{sr_disp}</strong></td>"
+            f"<td style='text-align:right'>{_fv(r.get('blood_mean_beta'))}</td>"
+            f"<td style='text-align:right'>{_fv(r.get('blood_median_beta'))}</td>"
+            f"<td style='text-align:center'>{blood_badge}</td>"
+            f"<td style='text-align:right'>{_fv(r.get('tcga_mean_beta'))}</td>"
+            f"<td style='text-align:right'>{r.get('tcga_n_samples', '') or '&mdash;'}</td>"
+            f"</tr>\n"
+        )
+
+    controls_extval, js_pagination = _pagination_widget(TBL, CTRL, n_total, PAGE_SIZE)
+
+    if n_blood_fail > 0:
+        blood_note = (
+            f"<p style='color:#c0392b;font-size:.85em;margin-top:8px'>"
+            f"&#9888; <strong>{n_blood_fail}</strong> site(s) fail blood baseline check "
+            f"(blood_mean_beta &ge; 0.10, highlighted yellow). "
+            f"These sites may be confounded by blood cell methylation — "
+            f"consider removing or down-weighting them from the panel before clinical use.</p>"
+        )
+    else:
+        blood_note = ("<p style='color:#22863a;font-size:.85em;margin-top:8px'>"
+                      "&#10003; All matched sites pass blood baseline check (mean &beta; &lt; 0.10).</p>")
+
+    # ── Sort JS ─────────────────────────────────────────────────────────────────
+    # Columns: 0=site(str), 1=cg(str), 2=sel_rate(num desc), 3=blood_mean(num),
+    #          4=blood_med(num), 5=blood_pass(num desc), 6=tcga_mean(num), 7=tcga_n(num)
+    js_sort = f"""
+<script>
+(function() {{
+  var TBL   = document.getElementById ? null : null;   // resolved at runtime
+  var sortState = {{ col: 2, asc: false }};   // default: sel_rate descending
+  var DATA_ATTRS = ['data-site','data-cg','data-sel','data-bm','data-bmed','data-bp','data-tm','data-tn'];
+  var STR_COLS   = new Set([0, 1]);
+
+  function sortTable(col) {{
+    TBL = document.getElementById('{TBL}');
+    if (!TBL) return;
+    var asc = (sortState.col === col) ? !sortState.asc : (col === 2 ? false : true);
+    sortState = {{ col: col, asc: asc }};
+
+    var tbody = TBL.querySelector('tbody');
+    var rows  = Array.from(tbody.querySelectorAll('tr'));
+    rows.sort(function(a, b) {{
+      var av = a.getAttribute(DATA_ATTRS[col]);
+      var bv = b.getAttribute(DATA_ATTRS[col]);
+      var cmp;
+      if (STR_COLS.has(col)) {{
+        cmp = (av || '').localeCompare(bv || '');
+      }} else {{
+        var an = parseFloat(av), bn = parseFloat(bv);
+        var aM = isNaN(an) || an < -0.5, bM = isNaN(bn) || bn < -0.5;
+        if (aM && bM) cmp = 0;
+        else if (aM)  cmp = 1;   // missing always last
+        else if (bM)  cmp = -1;
+        else          cmp = an - bn;
+      }}
+      return asc ? cmp : -cmp;
+    }});
+    // Re-assign data-row after sort so pagination still works
+    rows.forEach(function(tr, i) {{
+      tr.setAttribute('data-row', i);
+      tbody.appendChild(tr);
+    }});
+    // Update header arrows
+    document.querySelectorAll('#{TBL} thead th').forEach(function(th, i) {{
+      th.style.cursor = 'pointer';
+      var arrow = th.querySelector('.sort-arrow');
+      if (arrow) {{
+        arrow.textContent = (i === col) ? (asc ? ' ▲' : ' ▼') : ' ⇅';
+      }}
+    }});
+    // Reset pagination to first page
+    if (window.{CTRL}_show) window.{CTRL}_show(0);
+  }}
+
+  document.addEventListener('DOMContentLoaded', function() {{
+    var ths = document.querySelectorAll('#{TBL} thead th');
+    ths.forEach(function(th, i) {{
+      var span = document.createElement('span');
+      span.className = 'sort-arrow';
+      span.style.cssText = 'font-size:.75em;margin-left:3px;color:#888';
+      span.textContent = (i === 2) ? ' ▼' : ' ⇅';
+      th.appendChild(span);
+      th.style.cursor = 'pointer';
+      th.onclick = function() {{ sortTable(i); }};
+    }});
+  }});
+}})();
+</script>"""
+
+    html = f"""
+<div class="section">
+<h2>13. Public Dataset Cross-validation (Step 18, optional)</h2>
+<p style="color:#666;font-size:.85em">
+  Panel sites mapped to Illumina 450K probes via hg38&rarr;hg19 liftOver (&plusmn;2 bp) and
+  cross-referenced against two public reference datasets:
+  <strong>GSE40279</strong> (whole blood, n=656) for blood baseline, and
+  <strong>TCGA-OV HumanMethylation450</strong> (&sim;590 tumour samples) for tumour signal confirmation.
+  Blood baseline threshold: mean &beta; &lt; 0.10.
+  Table sorted by LOO-CV feature selection rate by default; click any header to re-sort.
+</p>
+<table style="margin-bottom:10px">
+  <tr><th>Metric</th><th>Value</th></tr>
+  <tr><td>Panel sites</td><td>{n_total}</td></tr>
+  <tr><td>Sites matched to 450K probe</td><td>{n_matched} ({_safe_pct(n_matched, n_total)})</td></tr>
+  <tr><td>Blood baseline pass (mean &beta; &lt; 0.10)</td>
+      <td><strong style="color:#22863a">{n_blood_pass}</strong></td></tr>
+  <tr><td>Blood baseline fail (mean &beta; &ge; 0.10)</td>
+      <td><strong style="color:{'#c0392b' if n_blood_fail else '#22863a'}">{n_blood_fail}</strong></td></tr>
+  <tr><td>Sites with TCGA-OV coverage</td><td>{n_tcga}</td></tr>
+</table>
+{blood_note}
+{controls_extval}
+<div style="overflow-x:auto;margin-top:4px">
+<table id="{TBL}" style="font-size:.82em">
+  <thead>
+    <tr>
+      <th>Panel site</th>
+      <th>cg probe</th>
+      <th>Sel. rate</th>
+      <th>Blood mean &beta;</th>
+      <th>Blood median &beta;</th>
+      <th>Blood baseline</th>
+      <th>TCGA-OV mean &beta;</th>
+      <th>TCGA-OV n</th>
+    </tr>
+  </thead>
+  <tbody>
+  {rows_html}
+  </tbody>
+</table>
+</div>
+<p style="color:#666;font-size:.83em;margin-top:6px">
+  Yellow = blood baseline fail. Sel. rate = LOO-CV feature selection frequency (from panel_annotation.csv).
+  Full data: <code>external_validation.csv</code> &nbsp;|&nbsp;
+  Coordinate mapping: panel (hg38) &rarr; liftOver &rarr; hg19 &rarr; GPL13534 (&plusmn;2 bp).
+</p>
+{js_pagination}
+{js_sort}
+</div>"""
+
+    data = {
+        "n_total":      n_total,
+        "n_matched":    n_matched,
+        "n_blood_pass": n_blood_pass,
+        "n_blood_fail": n_blood_fail,
+        "n_tcga":       n_tcga,
+    }
+    return html, data
+
+
+def _build_ovr_subsection(ovr_records, roc_src):
+    """Return HTML fragment for the One-vs-Rest binary classifier subsection."""
+    if not ovr_records:
+        return ""
+
+    # Group rows by subtype
+    from collections import OrderedDict
+    groups = OrderedDict()
+    for r in ovr_records:
+        st = r.get("subtype", "")
+        groups.setdefault(st, []).append(r)
+
+    rows = ""
+    for subtype, recs in groups.items():
+        first = True
+        for r in recs:
+            try:
+                auc  = f"{float(r.get('auc',  0)):.3f}"
+                acc  = f"{float(r.get('accuracy',   0)):.3f}"
+                sens = f"{float(r.get('sensitivity', 0)):.3f}"
+                spec = f"{float(r.get('specificity', 0)):.3f}"
+            except (TypeError, ValueError):
+                auc = acc = sens = spec = "&mdash;"
+            st_cell = f"<td rowspan='{len(recs)}'>{subtype}</td>" if first else ""
+            rows += (
+                f"<tr>{st_cell}<td>{r.get('classifier','')}</td>"
+                f"<td>{auc}</td><td>{acc}</td><td>{sens}</td><td>{spec}</td>"
+                f"<td>{r.get('n_positive','')}</td><td>{r.get('n_negative','')}</td></tr>\n"
+            )
+            first = False
+
+    return f"""
+<hr style="margin:20px 0;border:none;border-top:1px solid #e0e0e0">
+<h3 style="margin-top:0">11b. One-vs-Rest Binary Classifiers (LOO-CV)</h3>
+<p style="color:#666;font-size:.85em">
+  For each subtype, binary re-labelling: that subtype → positive, all others → negative.
+  Same panel features and LOO-CV protocol as the multi-class task above.
+  Sensitivity = subtype recall; Specificity = other-class recall.
+</p>
+<table>
+  <tr><th>Subtype</th><th>Classifier</th><th>AUC</th><th>Accuracy</th>
+      <th>Sensitivity</th><th>Specificity</th><th>n Positive</th><th>n Negative</th></tr>
+  {rows}
+</table>
+<div style="margin-top:14px"><h3>ROC Curves (all subtypes)</h3>{_img_tag(roc_src, 'OvR ROC')}</div>
+<p style="color:#666;font-size:.83em">
+  Outputs: <code>ovr_summary.csv</code>, <code>ovr_predictions.csv</code>,
+  per-subtype confusion matrices: <code>subtype_confusion_OvR_&lt;clf&gt;_&lt;subtype&gt;.png</code>
+</p>"""
+
+
 def _build_classifier_section(result_dir, imgs_dir):
     """
     Read Step 14-16 output files and build HTML fragments + JSON data.
@@ -214,8 +908,10 @@ def _build_classifier_section(result_dir, imgs_dir):
             n_p20  = sum(1 for p in all_pvals if p < 0.20)
 
             # All-sites detail table (collapsed, sorted by delta desc)
+            WTBL  = "wilcox_tbl"
+            WCTRL = "wilcox_ctrl"
             all_rows = "".join(
-                f"<tr style='{'background:#e8f5e9' if r.get('pass_both') else ''}'>"
+                f"<tr data-row='{idx}' style='{'background:#e8f5e9' if r.get('pass_both') else ''}'>"
                 f"<td>{r['feature']}</td>"
                 f"<td style='text-align:right'>{float(r.get('benign_mean',0)):.3f}</td>"
                 f"<td style='text-align:right'>{float(r.get('malignant_mean',0)):.3f}</td>"
@@ -225,8 +921,9 @@ def _build_classifier_section(result_dir, imgs_dir):
                 f"<td style='text-align:center'>{'✓' if r.get('pass_delta') else '—'}</td>"
                 f"<td style='text-align:center'>{'<strong style=color:#22863a>Pass</strong>' if r.get('pass_both') else '<span style=color:#aaa>Fail</span>'}</td>"
                 f"</tr>"
-                for r in wilcox_records   # already sorted by delta desc
+                for idx, r in enumerate(wilcox_records)   # already sorted by delta desc
             )
+            wcontrols, wjs = _pagination_widget(WTBL, WCTRL, n_candidates)
 
             wilcox_section = f"""
 <h3 style="margin-top:20px">Sample-level Wilcoxon Pre-filter</h3>
@@ -261,18 +958,20 @@ def _build_classifier_section(result_dir, imgs_dir):
     Show all {n_candidates} candidate sites (sorted by sample |Δβ|, green = passed)
   </summary>
   <div style="overflow-x:auto;margin-top:8px">
-  <table style="font-size:.82em">
-    <tr><th>Site</th><th>Benign mean</th><th>Malignant mean</th>
+  {wcontrols}
+  <table id="{WTBL}" style="font-size:.82em">
+    <thead><tr><th>Site</th><th>Benign mean</th><th>Malignant mean</th>
         <th>|Δβ| (sample)</th><th>p-value</th>
-        <th>p OK</th><th>|Δβ| OK</th><th>Result</th></tr>
-    {all_rows}
+        <th>p OK</th><th>|Δβ| OK</th><th>Result</th></tr></thead>
+    <tbody>{all_rows}</tbody>
   </table>
   </div>
 </details>
 <p style="color:#666;font-size:.83em;margin-top:6px">
   Full stats: <code>wilcoxon_stats.csv</code> &nbsp;|&nbsp;
   Thresholds configurable in <code>config.toml</code> [ml] sample_wilcox_p / sample_delta_beta
-</p>"""
+</p>
+{wjs}"""
             wilcox_data = {
                 "n_candidates": n_candidates, "n_pass": n_wpass,
                 "n_fail_p": n_fail_p, "n_fail_delta": n_fail_d, "n_fail_both": n_fail_b,
@@ -345,7 +1044,7 @@ full per-site stats: <code>panel_cpg_depth.csv</code></p>"""
 
         sec9_html = f"""
 <div class="section">
-<h2>9. Feature Selection (LASSO + RF)</h2>
+<h2>8. Feature Selection (LASSO + RF)</h2>
 <p style="color:#666;font-size:.85em">
   Pipeline: group-level DMC (merged bedGraph) →
   coverage filter (≥50% samples) →
@@ -414,27 +1113,86 @@ outputs: <code>classifier_summary.csv</code>, <code>classifier_predictions.csv</
         sec10_data = None
 
     # ── Section 11: Subtype Classifier ──
-    sub_sum_path = os.path.join(result_dir, "subtype_summary.csv")
-    sub_roc_src  = _copy_img(os.path.join(result_dir, "subtype_roc.png"), imgs_dir)
-    rf_cm_src    = _copy_img(os.path.join(result_dir, "subtype_confusion_RF.png"), imgs_dir)
-    svm_cm_src   = _copy_img(os.path.join(result_dir, "subtype_confusion_SVM.png"), imgs_dir)
-    sub_records  = _read_csv_safe(sub_sum_path)
+    sub_sum_path   = os.path.join(result_dir, "subtype_summary.csv")
+    sub_roc_src    = _copy_img(os.path.join(result_dir, "subtype_roc.png"), imgs_dir)
+    rf_cm_src      = _copy_img(os.path.join(result_dir, "subtype_confusion_RF.png"), imgs_dir)
+    svm_cm_src     = _copy_img(os.path.join(result_dir, "subtype_confusion_SVM.png"), imgs_dir)
+    hgsoc_sum_path = os.path.join(result_dir, "ovr_summary.csv")
+    hgsoc_roc_src  = _copy_img(os.path.join(result_dir, "ovr_roc.png"), imgs_dir)
+    sub_records    = _read_csv_safe(sub_sum_path)
+    hgsoc_records  = _read_csv_safe(hgsoc_sum_path)
 
-    if sub_records is not None:
+    # Check for a skip marker written when data was insufficient
+    skip_path = os.path.join(result_dir, "subtype_skip.json")
+    skip_info = None
+    if os.path.exists(skip_path):
+        try:
+            import json as _json
+            with open(skip_path, encoding="utf-8") as _f:
+                skip_info = _json.load(_f)
+        except Exception:
+            pass
+
+    if skip_info and skip_info.get("skipped"):
+        skip_reason = skip_info.get("reason", "")
+        skip_warns  = skip_info.get("warnings", [])
+        warn_html   = "".join(f"<li>{w}</li>" for w in skip_warns) if skip_warns else ""
+        sec11_html  = f"""
+<div class="section">
+<h2>11. Subtype Classifier — Skipped</h2>
+<p style="color:#c0392b;font-size:.9em">
+  &#9888; Subtype classification was skipped because the dataset does not meet
+  the minimum requirements for reliable LOO-CV training.
+</p>
+<table>
+  <tr><th>Reason</th><td>{skip_reason}</td></tr>
+</table>
+{"<ul style='color:#856404;font-size:.85em;margin-top:8px'>" + warn_html + "</ul>" if warn_html else ""}
+<p style="color:#666;font-size:.83em;margin-top:8px">
+  Collect additional malignant/borderline samples with subtype labels and re-run
+  <code>--step subtype_classify</code> to enable this section.
+</p>
+</div>"""
+        sec11_data = None
+
+    elif sub_records is not None:
         sub_rows = ""
         for r in sub_records:
+            # Per-row data-quality warning indicator
+            row_warn = r.get("warnings", "")
+            warn_cell = (f"<td style='color:#856404;font-size:.82em'>{row_warn}</td>"
+                         if row_warn else "<td></td>")
             sub_rows += (
                 f"<tr><td>{r.get('classifier','')}</td>"
-                f"<td>{r.get('accuracy', 0):.3f}</td>"
+                f"<td>{float(r.get('accuracy', 0)):.3f}</td>"
                 f"<td>{r.get('n_samples', '')}</td>"
-                f"<td>{r.get('n_subtypes', '')}</td></tr>\n"
+                f"<td>{r.get('n_subtypes', '')}</td>"
+                f"<td style='font-size:.82em;color:#555'>{r.get('class_counts','')}</td>"
+                f"{warn_cell}</tr>\n"
+            )
+        # Collect any warnings to show above the table
+        all_warns = list({r.get("warnings", "") for r in sub_records if r.get("warnings")})
+        warn_banner = ""
+        if all_warns:
+            items = "".join(f"<li>{w}</li>" for w in all_warns)
+            warn_banner = (
+                f"<div style='background:#fff3cd;border:1px solid #ffc107;"
+                f"border-radius:4px;padding:8px 12px;margin-bottom:10px;"
+                f"font-size:.85em;color:#856404'>"
+                f"&#9888; Data quality notes:<ul style='margin:4px 0 0 16px'>{items}</ul></div>"
             )
         sec11_html = f"""
 <div class="section">
 <h2>11. Subtype Classifier (LOO-CV — Malignant + Borderline, Multi-class)</h2>
-<p style="color:#666;font-size:.85em">Subtypes: High-grade serous / Endometrioid / Clear cell / Low-grade serous / Mucinous</p>
+<p style="color:#666;font-size:.85em">
+  Subtypes: HGSC / Endometrioid / Clear cell / LGSC / Mucinous.
+  Strategy: One-vs-Rest (OvR); evaluation: Leave-One-Out CV.
+  Fold-wise imputation prevents data leakage.
+</p>
+{warn_banner}
 <table>
-  <tr><th>Classifier</th><th>Accuracy</th><th>Samples</th><th>Subtypes</th></tr>
+  <tr><th>Classifier</th><th>Accuracy</th><th>Samples</th><th>Subtypes</th>
+      <th>Class counts</th><th>Data warnings</th></tr>
   {sub_rows}
 </table>
 <div class="two-col" style="margin-top:14px">
@@ -442,20 +1200,30 @@ outputs: <code>classifier_summary.csv</code>, <code>classifier_predictions.csv</
   <div><h3>SVM Confusion Matrix</h3>{_img_tag(svm_cm_src, 'SVM Confusion Matrix')}</div>
 </div>
 <div style="margin-top:14px"><h3>OvR ROC Curves</h3>{_img_tag(sub_roc_src, 'Subtype ROC')}</div>
-<p style="color:#666;font-size:.83em">Strategy: One-vs-Rest (OvR); evaluation: LOO-CV;
-outputs: <code>subtype_summary.csv</code>, <code>subtype_predictions.csv</code></p>
+<p style="color:#666;font-size:.83em">
+  Outputs: <code>subtype_summary.csv</code>, <code>subtype_predictions.csv</code>
+  (includes per-sample confidence = max predicted probability)
+</p>
+{_build_ovr_subsection(hgsoc_records, hgsoc_roc_src)}
 </div>"""
         sec11_data = sub_records
+
     else:
         sec11_html = ""
         sec11_data = None
 
     clf_data = {
         "feature_selection":  sec9_data,
+        "outlier_detection":  None,          # filled below
         "classifier":         sec10_data,
         "subtype_classifier": sec11_data,
     }
-    return sec9_html, sec10_html, sec11_html, clf_data
+
+    # ── Outlier detection section (Step 14.5) ──
+    sec_outlier_html, outlier_data = _build_outlier_section(result_dir)
+    clf_data["outlier_detection"] = outlier_data
+
+    return sec9_html, sec_outlier_html, sec10_html, sec11_html, clf_data
 
 
 # ─────────────────────────────────────────────
@@ -472,14 +1240,19 @@ def generate_report(
     benign_samples=None,
     malignant_samples=None,
 ):
-    """Generate full analysis report (HTML + JSON)."""
+    """Generate full analysis report (HTML + JSON) inside result_dir/report/."""
     logger.info("开始生成分析报告")
 
     benign_samples    = benign_samples or []
     malignant_samples = malignant_samples or []
 
-    # ── Image output directory ────────────────────────────────────
-    imgs_dir = os.path.join(result_dir, "imgs")
+    # ── Report output directory (self-contained, easy to zip) ────────
+    timestamp = os.path.basename(os.path.normpath(result_dir))
+    report_dir = os.path.join(result_dir, f"{timestamp}_report")
+    os.makedirs(report_dir, exist_ok=True)
+
+    # ── Image output directory (inside report/) ──────────────────────
+    imgs_dir = os.path.join(report_dir, "imgs")
     os.makedirs(imgs_dir, exist_ok=True)
 
     # ── Discover all samples via fastp JSON ──────────────────────
@@ -715,8 +1488,14 @@ def generate_report(
 
     analysis_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Optional classifier sections (Steps 14-16; empty string if files absent)
-    sec9_html, sec10_html, sec11_html, clf_data = _build_classifier_section(result_dir, imgs_dir)
+    # Optional ML sections (Steps 8–11; empty string if files absent)
+    sec8_html, sec9_html, sec10_html, sec11_html, clf_data = _build_classifier_section(result_dir, imgs_dir)
+    # Section 12: annotation (runs after classifiers; silent if panel_annotation.csv absent)
+    sec12_html, annot_data = _build_annotation_section(result_dir)
+    clf_data["annotation"] = annot_data
+    # Section 13: public-dataset cross-validation (silent if external_validation.csv absent)
+    sec13_html, ext_val_data = _build_external_validation_section(result_dir)
+    clf_data["external_validation"] = ext_val_data
 
     # QC table rows
     qc_rows = ""
@@ -945,23 +1724,29 @@ def generate_report(
 <p style="color:#666;font-size:.83em">Red = {g1_label} higher; Blue = {g2_label} higher</p>
 </div>
 
+{sec8_html}
+
 {sec9_html}
 
 {sec10_html}
 
 {sec11_html}
 
-<!-- 12. Results Interpretation -->
+{sec12_html}
+
+{sec13_html}
+
+<!-- 14. Results Interpretation -->
 <div class="section">
-<h2>12. Results Interpretation &amp; Quality Assessment</h2>
+<h2>14. Results Interpretation &amp; Quality Assessment</h2>
 <div class="interp">
 {interp_html}
 </div>
 </div>
 
-<!-- 13. Analysis Pipeline -->
+<!-- 15. Analysis Pipeline -->
 <div class="section">
-<h2>13. Analysis Pipeline</h2>
+<h2>15. Analysis Pipeline</h2>
 <div class="funnel">
   <div class="funnel-step">fastp QC<br/>UMI extract</div><div class="funnel-arrow">→</div>
   <div class="funnel-step">bwameth<br/>alignment</div><div class="funnel-arrow">→</div>
@@ -1018,15 +1803,16 @@ def generate_report(
         },
         "ml": clf_data,
     }
-    json_report = os.path.join(result_dir, "analysis_report.json")
+    json_report = os.path.join(report_dir, "analysis_report.json")
     with open(json_report, "w", encoding="utf-8") as f:
         json.dump(report_data, f, indent=2, ensure_ascii=False)
 
-    html_report = os.path.join(result_dir, "analysis_report.html")
+    html_report = os.path.join(report_dir, "analysis_report.html")
     with open(html_report, "w", encoding="utf-8") as f:
         f.write(html)
 
     logger.info(f"分析报告生成完成: {html_report}")
+    logger.info(f"  报告目录（可直接打包）: {report_dir}")
     return html_report
 
 

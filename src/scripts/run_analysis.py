@@ -41,10 +41,13 @@ run_analysis.py - 执行完整的甲基化分析流程
   extract     8   甲基化信息提取（bismark_methylation_extractor）
   filter      9   甲基化数据过滤 + 候选区域过滤
   diff        10  差异甲基化分析
-  visualize      11  可视化图表生成（密度图/散点图/热图）
-  report         12  生成分析报告
-  feature_select 14  特征选择（LASSO + 随机森林）
-  classify       15  诊断分类器（LR / SVM / RF LOO-CV）
+  visualize      11  Plots: density / scatter / heatmap
+  report         19  Generate HTML + JSON report (all optional sections auto-embedded)
+  feature_select 14  Feature selection (LASSO + RF union; ≥10× coverage QC)
+  outlier_detect 14.5 Sample outlier detection (coverage / PCA z-score / Isolation Forest)
+  classify       15  Diagnostic classifiers LOO-CV: LR / SVM / RF / XGBoost / LightGBM
+  annotate       17  Site annotation (Ensembl + EWAS Catalog+Atlas + CpG island + PubMed)
+  external_validate 18  Cross-validation: GSE40279 blood baseline + TCGA-OV tumour signal
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
@@ -172,21 +175,24 @@ def check_presets():
 # 分步执行：步骤定义与状态文件
 # ──────────────────────────────────────────────
 
-# 步骤有序列表：(step_key, display_num, 中文说明)
+# 步骤有序列表：(step_key, display_num, english_description, depends_on)
 PIPELINE_STEPS = [
-    ("preprocess", "4",   "fastp质控 + UMI提取"),
-    ("align",      "5",   "Bismark双端比对"),
-    ("dedup",      "6",   "UMI去重"),
-    ("target",     "7",   "On-target过滤"),
-    ("mbias",      "7.5", "M-bias检查"),
-    ("extract",    "8",   "甲基化信息提取"),
-    ("filter",     "9",   "甲基化数据过滤 + 候选区域"),
-    ("diff",       "10",  "差异甲基化分析"),
-    ("visualize",       "11",  "可视化图表生成"),
-    ("feature_select",  "14",  "特征选择 (LASSO + RF)"),
-    ("classify",        "15",  "诊断分类器 (LR / SVM / RF  LOO-CV)"),
-    ("subtype_classify","16",  "亚型分类器 (恶性+交界性 多分类 LOO-CV)"),
-    ("report",          "17",  "生成分析报告"),
+    ("preprocess",        "4",    "fastp QC + UMI extraction (R2 5' 6N)",                         "—"),
+    ("align",             "5",    "bwameth alignment → sorted BAM (hg38)",                        "preprocess"),
+    ("dedup",             "6",    "UMI-aware dedup (umi_tools dedup --paired)",                   "align"),
+    ("target",            "7",    "On-target filter (bedtools intersect panel.bed)",               "dedup"),
+    ("mbias",             "7.5",  "M-bias check (MethylDackel mbias); review nOT/nOB SVGs",       "target"),
+    ("extract",           "8",    "Methylation extraction (MethylDackel → CpG bedGraph)",         "mbias"),
+    ("filter",            "9",    "Depth+repeat filter; candidate-region filter (88 regions)",     "extract"),
+    ("diff",              "10",   "Differential methylation: merged bedGraphs, |Δβ| ≥ 0.2",      "filter"),
+    ("visualize",         "11",   "Plots: density / scatter / heatmap (candidate regions)",        "diff"),
+    ("feature_select",    "14",   "Feature selection: LASSO(L1) ∪ RF; ≥10× sample coverage QC",  "diff"),
+    ("outlier_detect",    "14.5", "Sample QC: coverage fraction / PCA z / Isolation Forest",      "feature_select"),
+    ("classify",          "15",   "Classifiers LOO-CV: LR / SVM / RF / XGBoost / LightGBM",      "feature_select"),
+    ("subtype_classify",  "16",   "Subtype LOO-CV (malignant+borderline): RF + SVM OvR",          "classify"),
+    ("annotate",          "17",   "Site annotation: gene / CpG island / EWAS Catalog+Atlas",      "feature_select"),
+    ("external_validate", "18",   "Cross-validation: GSE40279 blood baseline + TCGA-OV signal",   "feature_select"),
+    ("report",            "19",   "HTML + JSON report (annotation + ext-validate auto-embedded)",  "diff"),
 ]
 STEP_KEYS = [s[0] for s in PIPELINE_STEPS]
 _STATE_FILE = "pipeline_state.json"
@@ -217,21 +223,48 @@ def _save_state(workdir, state):
 
 
 def _print_step_list(workdir=None):
-    """打印步骤列表及各步完成状态（若提供 workdir）。"""
-    state = _load_state(workdir) if workdir else {}
+    """Print all pipeline steps with completion status, description, and dependencies."""
+    state     = _load_state(workdir) if workdir else {}
     completed = state.get("completed_steps", [])
-    print("\n┌─────────────────────────────────────────────────────────┐")
-    print("│              血浆甲基化流程 — 步骤一览                  │")
-    print("├──────────────┬──────┬─────────────────────────────────┤")
-    print("│ --step 参数  │ 编号 │ 说明                            │")
-    print("├──────────────┼──────┼─────────────────────────────────┤")
-    for key, num, desc in PIPELINE_STEPS:
+
+    W_STEP, W_NUM, W_DESC, W_REQ = 22, 5, 60, 18
+
+    top = f"┌{'─'*(W_STEP+2)}┬{'─'*(W_NUM+2)}┬{'─'*(W_DESC+2)}┬{'─'*(W_REQ+2)}┐"
+    mid = f"├{'─'*(W_STEP+2)}┼{'─'*(W_NUM+2)}┼{'─'*(W_DESC+2)}┼{'─'*(W_REQ+2)}┤"
+    bot = f"└{'─'*(W_STEP+2)}┴{'─'*(W_NUM+2)}┴{'─'*(W_DESC+2)}┴{'─'*(W_REQ+2)}┘"
+
+    def _cell(text, width, align="<"):
+        text = str(text)
+        if len(text) > width:
+            text = text[:width - 1] + "…"
+        return f"{text:{align}{width}}"
+
+    def _row(key, num, desc, req):
         mark = "✓" if key in completed else " "
-        print(f"│ [{mark}] {key:<10}│  {num:<4}│ {desc:<31} │")
-    print("└──────────────┴──────┴─────────────────────────────────┘")
+        return (
+            f"│ {_cell(f'[{mark}] {key}', W_STEP)} "
+            f"│ {_cell(num, W_NUM, '^')} "
+            f"│ {_cell(desc, W_DESC)} "
+            f"│ {_cell(req, W_REQ)} │"
+        )
+
+    print()
+    print(top)
+    print(
+        f"│ {_cell('Step  (--step arg)', W_STEP)} "
+        f"│ {_cell('#', W_NUM, '^')} "
+        f"│ {_cell('Description', W_DESC)} "
+        f"│ {_cell('Requires', W_REQ)} │"
+    )
+    print(mid)
+    for entry in PIPELINE_STEPS:
+        print(_row(*entry))
+    print(bot)
     if workdir:
-        print(f"\n工作目录: {workdir}")
-        print(f"状态文件: {_state_path(workdir)}")
+        n_done = sum(1 for e in PIPELINE_STEPS if e[0] in completed)
+        print(f"\n  Workdir  : {workdir}")
+        print(f"  Progress : {n_done} / {len(PIPELINE_STEPS)} steps completed")
+        print(f"  State    : {_state_path(workdir)}")
     print()
 
 
@@ -636,7 +669,7 @@ def main():
         if benign_samples and malignant_samples:
             logger.info("━━ 步骤 14: 特征选择 (LASSO + RF) ━━")
             from scripts.modules.feature_utils import select_features
-            panel_features, importance_df = select_features(
+            panel_features, _ = select_features(
                 workdir, result_dir, config, benign_samples, malignant_samples
             )
             _save_state(workdir, {"completed_steps": state.get("completed_steps", []) + ["feature_select"]})
@@ -648,13 +681,49 @@ def main():
                 return
 
     # =========================================================
+    # 步骤 14.5: outlier_detect
+    # =========================================================
+    if _should_run("outlier_detect", False):
+        if benign_samples and malignant_samples:
+            logger.info("━━ 步骤 14.5: 样本异常检测 ━━")
+            import numpy as np
+            from scripts.modules.feature_utils import build_feature_matrix, detect_sample_outliers
+            fm_path = os.path.join(result_dir, "feature_matrix.npz")
+            if os.path.exists(fm_path):
+                data = np.load(fm_path, allow_pickle=True)
+                X_od       = data["X"]
+                y_od       = data["y"]
+                sids_od    = list(data["sample_ids"])
+            else:
+                logger.info("  未找到 feature_matrix.npz，从 bedGraph 构建特征矩阵...")
+                X_od, y_od, sids_od, _, _, _ = build_feature_matrix(
+                    workdir, result_dir, benign_samples, malignant_samples, config
+                )
+            outlier_df, suspect_ids = detect_sample_outliers(X_od, y_od, sids_od, config)
+            if not outlier_df.empty:
+                outlier_path = os.path.join(result_dir, "outlier_report.csv")
+                outlier_df.to_csv(outlier_path, index=False)
+                logger.info(f"  → 异常检测报告已保存: {outlier_path}")
+            if suspect_ids:
+                logger.warning(f"  ⚠ 疑似异常样本（≥2项指标触发）: {suspect_ids}")
+                logger.warning(f"  ⚠ 请查看 {os.path.join(result_dir, 'outlier_report.csv')}，"
+                               f"确认后在 config.toml [ml] exclude_samples = [...] 中填写 ID，"
+                               f"再重跑 classify 步骤")
+            _save_state(workdir, {"completed_steps": state.get("completed_steps", []) + ["outlier_detect"]})
+        else:
+            logger.error("outlier_detect 需要 benign_samples 和 malignant_samples，"
+                         "请先完成 extract 步骤（或确保 pipeline_state.json 中有分组信息）")
+            if single_step:
+                return
+
+    # =========================================================
     # 步骤 15: classify
     # =========================================================
     if _should_run("classify", False):
         if benign_samples and malignant_samples:
             logger.info("━━ 步骤 15: 诊断分类器 LOO-CV ━━")
             from scripts.modules.classifier_utils import run_classifiers
-            clf_results, summary_df = run_classifiers(
+            _, _ = run_classifiers(
                 workdir, result_dir, config, benign_samples, malignant_samples
             )
             _save_state(workdir, {"completed_steps": state.get("completed_steps", []) + ["classify"]})
@@ -677,10 +746,44 @@ def main():
             logger.info(f"  → 亚型分类结果已保存至 {result_dir}")
 
     # =========================================================
-    # 步骤 17: report（最后一步，汇总所有结果）
+    # 步骤 17: annotate（在 report 之前运行，结果会嵌入报告）
+    # =========================================================
+    if _should_run("annotate", False):
+        logger.info("━━ 步骤 17: 特征位点注释 (Ensembl + EWAS Catalog) ━━")
+        from scripts.modules.annotation_utils import run_annotation
+        ann_df, ann_summary = run_annotation(result_dir, config)
+        if not ann_df.empty:
+            _save_state(workdir, {"completed_steps": state.get("completed_steps", []) + ["annotate"]})
+            logger.info(f"  → 注释结果已保存至 {result_dir}/panel_annotation.csv")
+            logger.info(f"  → EWAS命中: {ann_summary.get('n_with_ewas',0)}/{ann_summary.get('n_sites',0)} 个位点"
+                        f"（窗口 ±{ann_summary.get('ewas_window_bp',500)} bp）")
+        else:
+            logger.error("  注释步骤未产生结果，请检查 panel_cpg.csv 是否存在")
+
+    # =========================================================
+    # 步骤 18: external_validate（可选，需要 data/external/ 参考数据）
+    # =========================================================
+    if _should_run("external_validate", False):
+        logger.info("━━ 步骤 18: 公共数据集交叉验证 ━━")
+        from scripts.external_validate import run_external_validation
+        data_dir_ext = "data"
+        external_dir = os.path.join(data_dir_ext, "external")
+        if not os.path.isdir(external_dir):
+            logger.error(f"  external_dir 不存在: {external_dir}  — "
+                         f"请将参考数据放入 data/external/ 后重试")
+            if single_step:
+                return
+        else:
+            run_external_validation(result_dir, data_dir_ext, external_dir)
+            _save_state(workdir, {"completed_steps": state.get("completed_steps", []) + ["external_validate"]})
+            logger.info(f"  → 外部验证完成: {os.path.join(result_dir, 'external_validation.csv')}")
+            logger.info("  → 运行 --step report 将 Section 13 嵌入 HTML 报告")
+
+    # =========================================================
+    # 步骤 19: report（最后一步，汇总所有结果；含注释节 + 外部验证节）
     # =========================================================
     if _should_run("report", args.skip_report):
-        logger.info("━━ 步骤 17: 生成分析报告 ━━")
+        logger.info("━━ 步骤 19: 生成分析报告 ━━")
         generate_report(workdir, result_dir,
                         sample1_methylation, sample2_methylation,
                         candidate_sample1, candidate_sample2,

@@ -1,34 +1,37 @@
 #!/usr/bin/env python3
 """
-subtype_utils.py - 亚型分类器模块（Step 16）
+subtype_utils.py - Subtype classifier module (Step 16)
 
-对分类为"恶性"或"交界性"的样本，按"亚型"列进行多分类。
-支持的亚型：高级别浆液性癌、子宫内膜样癌、透明细胞癌、低级别浆液性癌、黏液性
+Multi-class LOO-CV on malignant + borderline samples using the "subtype" column
+from the sample Excel.  Classifiers: RF and SVM (OvR).
 
-特征矩阵：优先复用 feature_matrix.npz（Step 14 缓存），不重读 bedGraph。
+Also runs a dedicated binary classifier: 高级别浆液性癌 (HGSOC) vs all other subtypes.
 
-分类器（均使用 LOO-CV，小样本标准做法）：
-  RF  — 随机森林（n_estimators=200）
-        原生支持多分类；class_weight="balanced" 应对类别不均衡；
-        特征重要性可解释。
-  SVM — RBF 核支持向量机，One-vs-Rest（OvR）策略
-        高维小样本表现稳健；probability=True（Platt scaling）输出概率；
-        class_weight="balanced" 应对类别不均衡。
-
-输出（保存至 result_dir）：
-    subtype_predictions.csv       — 每个样本的预测亚型和各类概率
-    subtype_summary.csv           — 每个分类器的准确率汇总
-    subtype_confusion_{RF|SVM}.png — 混淆矩阵图
-    subtype_roc.png               — OvR ROC 曲线（各亚型 AUC）
+Outputs (saved to result_dir):
+    subtype_predictions.csv          -- per-sample predicted subtype + confidence (multi-class)
+    subtype_summary.csv              -- accuracy per classifier, data-quality warnings
+    subtype_skip.json                -- present only when training is skipped (too few data)
+    subtype_confusion_{RF|SVM}.png   -- multi-class confusion matrix
+    subtype_roc.png                  -- multi-class OvR ROC curves
+    hgsoc_predictions.csv            -- per-sample HGSOC vs Others binary predictions
+    hgsoc_summary.csv                -- AUC / accuracy / sensitivity / specificity
+    hgsoc_confusion_{RF|SVM}.png     -- binary confusion matrix
+    hgsoc_roc.png                    -- binary ROC curve
 """
 
 import os
+import json
 import numpy as np
 import pandas as pd
+from collections import Counter
 
 from utils.logger import logger
 
-# 亚型标签：Excel 中"亚型"列的规范写法
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+# Chinese subtype labels as they appear in the Excel "亚型" column
 SUBTYPE_CLASSES = [
     "高级别浆液性癌",
     "子宫内膜样癌",
@@ -37,7 +40,7 @@ SUBTYPE_CLASSES = [
     "黏液性",
 ]
 
-# English labels used in plots (avoids CJK font dependency)
+# Concise English labels used in plots/CSVs (avoids CJK font dependency)
 SUBTYPE_EN = {
     "高级别浆液性癌": "HGSC",
     "子宫内膜样癌":   "Endometrioid",
@@ -46,45 +49,108 @@ SUBTYPE_EN = {
     "黏液性":         "Mucinous",
 }
 
+# Viability thresholds
+MIN_SAMPLES_TOTAL    = 10   # absolute minimum to attempt LOO-CV
+MIN_SAMPLES_PER_CLASS = 2   # classes below this get a reliability warning
+WARN_SAMPLES_TOTAL   = 20   # overall reliability warning below this total
 
-# ──────────────────────────────────────────────────────
-# 标签读取：从 Excel 构建 sample_id → 亚型 映射
-# ──────────────────────────────────────────────────────
+
+# ---------------------------------------------------------------------------
+# Viability check
+# ---------------------------------------------------------------------------
+
+def _check_viability(labels):
+    """
+    Decide whether the dataset is large enough for meaningful LOO-CV.
+
+    Returns:
+        viable   (bool)       -- False means skip training entirely
+        reason   (str)        -- plain-English explanation when not viable
+        warnings (list[str])  -- non-fatal reliability concerns
+    """
+    counts    = Counter(labels)
+    n_total   = len(labels)
+    n_classes = len(counts)
+
+    if n_total < MIN_SAMPLES_TOTAL:
+        return False, (
+            f"Only {n_total} labelled sample(s) — minimum {MIN_SAMPLES_TOTAL} required. "
+            f"Class distribution: {dict(counts)}. "
+            "Collect more malignant/borderline samples before running subtype classification."
+        ), []
+
+    if n_classes < 2:
+        return False, (
+            f"Only 1 subtype class present ({list(counts.keys())[0]}, n={n_total}). "
+            "At least 2 distinct subtypes are required."
+        ), []
+
+    warnings = []
+    if n_total < WARN_SAMPLES_TOTAL:
+        warnings.append(
+            f"Small dataset ({n_total} samples total): LOO-CV results should be "
+            "treated as indicative only."
+        )
+
+    singletons = [c for c, n in counts.items() if n < MIN_SAMPLES_PER_CLASS]
+    if singletons:
+        en = [SUBTYPE_EN.get(c, c) for c in singletons]
+        warnings.append(
+            f"Class(es) with only 1 sample — will never appear in training for their "
+            f"leave-out fold: {en}. Predictions for these classes are unreliable."
+        )
+
+    rare = [c for c, n in counts.items() if MIN_SAMPLES_PER_CLASS <= n < 3]
+    if rare:
+        en = [SUBTYPE_EN.get(c, c) for c in rare]
+        warnings.append(
+            f"Class(es) with <3 samples: {en}. "
+            "AUC and per-class sensitivity will be near-random for these groups."
+        )
+
+    return True, "", warnings
+
+
+def _save_skip_summary(result_dir, reason, warnings=None):
+    """Write a skip marker so the report can display the reason."""
+    path = os.path.join(result_dir, "subtype_skip.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"skipped": True, "reason": reason,
+                   "warnings": warnings or []}, f, ensure_ascii=False, indent=2)
+    logger.info(f"  Subtype skip reason saved: {path}")
+
+
+# ---------------------------------------------------------------------------
+# Label reading
+# ---------------------------------------------------------------------------
 
 def _build_subtype_map(config):
     """
-    从 config.toml sample_info_excel 读取所有 sheet，
-    返回 {sample_id: subtype_str} 字典。
-    仅保留分类为"恶性"或"交界性"且亚型非空的行。
+    Read all sheets from sample_info_excel and return {sample_id: subtype_str}.
+    Only retains rows where 分类 is '恶性' or '交界性' and 亚型 is non-empty.
     """
     excel_file = config.get("data", {}).get("sample_info_excel", "")
     if not excel_file or not os.path.exists(excel_file):
-        logger.error(f"sample_info_excel 不存在: {excel_file}")
+        logger.error(f"sample_info_excel not found: {excel_file}")
         return {}
 
     xl = pd.ExcelFile(excel_file)
     subtype_map = {}
     for sheet in xl.sheet_names:
         df = pd.read_excel(excel_file, sheet_name=sheet)
-        logger.info(f"  sheet '{sheet}' 列名: {list(df.columns)}")
+        logger.info(f"  sheet '{sheet}' columns: {list(df.columns)}")
         if "fq_R1" not in df.columns:
-            logger.info(f"  → 无 fq_R1 列，跳过")
+            logger.info("  → no fq_R1 column, skip")
             continue
 
         if "分类" in df.columns:
             df["分类"] = df["分类"].astype(str).str.strip()
-            cats = df["分类"].value_counts().to_dict()
-            logger.info(f"  → 分类分布: {cats}")
-        else:
-            logger.warning(f"  → 无 '分类' 列")
-
-        if "亚型" in df.columns:
-            df["亚型"] = df["亚型"].astype(str).str.strip()
-            subtypes = df["亚型"].value_counts().to_dict()
-            logger.info(f"  → 亚型分布: {subtypes}")
-        else:
-            logger.warning(f"  → 无 '亚型' 列，跳过")
+            logger.info(f"  → 分类 distribution: {df['分类'].value_counts().to_dict()}")
+        if "亚型" not in df.columns:
+            logger.warning("  → no '亚型' column, skip")
             continue
+        df["亚型"] = df["亚型"].astype(str).str.strip()
+        logger.info(f"  → 亚型 distribution: {df['亚型'].value_counts().to_dict()}")
 
         for _, row in df.iterrows():
             category = str(row.get("分类", "")).strip() if "分类" in df.columns else "恶性"
@@ -93,36 +159,33 @@ def _build_subtype_map(config):
             subtype = str(row.get("亚型", "")).strip()
             if not subtype or subtype in ("nan", ""):
                 continue
-            r1 = str(row.get("fq_R1", "")).strip()
-            if not r1 or r1 == "nan":
-                continue
+            r1  = str(row.get("fq_R1", "")).strip()
             pid = r1.split(".")[0]
-            subtype_map[pid] = subtype
+            if pid and pid != "nan":
+                subtype_map[pid] = subtype
 
-    logger.info(f"从Excel读取亚型标签: {len(subtype_map)} 个样本")
-    _dist = {}
-    for v in subtype_map.values():
-        _dist[v] = _dist.get(v, 0) + 1
-    for k, cnt in sorted(_dist.items(), key=lambda x: -x[1]):
-        logger.info(f"  {k}: {cnt}")
+    dist = Counter(subtype_map.values())
+    logger.info(f"Subtype labels loaded: {len(subtype_map)} samples")
+    for k, v in sorted(dist.items(), key=lambda x: -x[1]):
+        logger.info(f"  {k}: {v}")
     return subtype_map
 
 
-# ──────────────────────────────────────────────────────
-# 特征矩阵加载（复用 Step 14 缓存）
-# ──────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Feature matrix helpers (reuse Step 14 cache)
+# ---------------------------------------------------------------------------
 
 def _load_feature_matrix(result_dir):
     fm_path = os.path.join(result_dir, "feature_matrix.npz")
     if not os.path.exists(fm_path):
         raise FileNotFoundError(
-            f"未找到 feature_matrix.npz，请先运行 feature_select 步骤: {fm_path}"
+            f"feature_matrix.npz not found — run feature_select first: {fm_path}"
         )
     data = np.load(fm_path, allow_pickle=True)
-    X = data["X"]
-    sample_ids = list(data["sample_ids"])
+    X            = data["X"]
+    sample_ids   = list(data["sample_ids"])
     feature_names = list(data["feature_names"])
-    logger.info(f"加载特征矩阵: {X.shape[0]} 样本 × {X.shape[1]} 特征")
+    logger.info(f"Feature matrix loaded: {X.shape[0]} samples × {X.shape[1]} features")
     return X, sample_ids, feature_names
 
 
@@ -131,28 +194,35 @@ def _apply_panel_filter(X, feature_names, result_dir):
     if os.path.exists(panel_path):
         panel_set = set(pd.read_csv(panel_path)["feature"])
         indices = [i for i, fn in enumerate(feature_names) if fn in panel_set]
-        logger.info(f"应用 panel_cpg.csv：使用 {len(indices)} 个特征")
+        logger.info(f"Panel filter applied: {len(indices)} features retained")
         return X[:, indices], [feature_names[i] for i in indices]
     return X, feature_names
 
 
-def _impute(X):
+# Fold-wise imputation helpers (mirrors classifier_utils to avoid data leakage)
+def _impute_fit(X):
+    col_medians = np.nanmedian(X, axis=0)
+    col_medians = np.where(np.isnan(col_medians), 0.0, col_medians)
     X_imp = X.copy()
-    col_med = np.nanmedian(X_imp, axis=0)
-    for j in range(X_imp.shape[1]):
+    for j in range(X.shape[1]):
         mask = np.isnan(X_imp[:, j])
-        X_imp[mask, j] = col_med[j] if not np.isnan(col_med[j]) else 0.0
+        X_imp[mask, j] = col_medians[j]
+    return X_imp, col_medians
+
+
+def _impute_transform(X, col_medians):
+    X_imp = X.copy()
+    for j in range(X.shape[1]):
+        mask = np.isnan(X_imp[:, j])
+        X_imp[mask, j] = col_medians[j]
     return X_imp
 
 
-# ──────────────────────────────────────────────────────
-# 可视化
-# ──────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Visualisation
+# ---------------------------------------------------------------------------
 
 def _save_confusion_plot(cm, en_labels, clf_name, result_dir):
-    """
-    en_labels: list of English label strings (same order as cm axes).
-    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -161,8 +231,8 @@ def _save_confusion_plot(cm, en_labels, clf_name, result_dir):
 
     n = len(en_labels)
     fig, ax = plt.subplots(figsize=(max(6, n), max(5, n)))
-    ax.imshow(cm, interpolation="nearest", cmap="Blues")
-    ax.set_title(f"{clf_name} - Subtype Confusion Matrix")
+    im = ax.imshow(cm, interpolation="nearest", cmap="Blues")
+    ax.set_title(f"{clf_name} — Subtype Confusion Matrix (LOO-CV)")
     ax.set_xticks(range(n))
     ax.set_yticks(range(n))
     ax.set_xticklabels(en_labels, rotation=45, ha="right", fontsize=9)
@@ -178,13 +248,10 @@ def _save_confusion_plot(cm, en_labels, clf_name, result_dir):
     path = os.path.join(result_dir, f"subtype_confusion_{clf_name}.png")
     fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
-    logger.info(f"  混淆矩阵已保存: {path}")
+    logger.info(f"  Confusion matrix saved: {path}")
 
 
 def _save_roc_plot(results, en_labels, result_dir):
-    """
-    en_labels: list of English label strings indexed by class integer.
-    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -194,14 +261,16 @@ def _save_roc_plot(results, en_labels, result_dir):
                          "font.sans-serif": ["DejaVu Sans"]})
 
     n_classes = len(en_labels)
-    fig, axes = plt.subplots(1, len(results), figsize=(6 * len(results), 5))
-    if len(results) == 1:
+    n_clf = len(results)
+    fig, axes = plt.subplots(1, n_clf, figsize=(6 * n_clf, 5))
+    if n_clf == 1:
         axes = [axes]
-
     colors = plt.cm.tab10.colors
 
     for ax, (clf_name, res) in zip(axes, results.items()):
         y_true_bin = label_binarize(res["y_true"], classes=list(range(n_classes)))
+        if y_true_bin.ndim == 1:           # binary edge case
+            y_true_bin = np.column_stack([1 - y_true_bin, y_true_bin])
         y_prob = res["y_prob"]
         for i, lbl in enumerate(en_labels):
             if i >= y_true_bin.shape[1] or i >= y_prob.shape[1]:
@@ -223,21 +292,192 @@ def _save_roc_plot(results, en_labels, result_dir):
     path = os.path.join(result_dir, "subtype_roc.png")
     fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
-    logger.info(f"  ROC曲线已保存: {path}")
+    logger.info(f"  ROC curves saved: {path}")
 
 
-# ──────────────────────────────────────────────────────
-# 主入口：Step 16
-# ──────────────────────────────────────────────────────
+
+# ---------------------------------------------------------------------------
+# One-vs-Rest binary classifiers  (each subtype vs all others)
+# ---------------------------------------------------------------------------
+
+def _run_ovr_binary(X_raw, labels, sample_ids, observed_classes, result_dir, config):
+    """
+    For every class in observed_classes run a binary LOO-CV (class vs all others).
+
+    Skips a class if it has fewer than 2 positive or 2 negative samples.
+
+    Outputs saved to result_dir:
+        ovr_summary.csv          — AUC / accuracy / sensitivity / specificity per (subtype, clf)
+        ovr_predictions.csv      — per-sample binary predictions for every (subtype, clf)
+        ovr_roc.png              — combined ROC: one subplot per classifier, one curve per subtype
+        ovr_confusion_{clf}_{en}.png — confusion matrix per (clf, subtype)
+
+    Returns list of summary-row dicts (same content as ovr_summary.csv).
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.svm import SVC
+    from sklearn.model_selection import LeaveOneOut
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.metrics import (accuracy_score, confusion_matrix,
+                                 roc_curve, auc as sklearn_auc)
+
+    plt.rcParams.update({"font.family": "sans-serif",
+                         "font.sans-serif": ["DejaVu Sans"]})
+
+    ml_cfg = (config or {}).get("ml", {})
+    clf_factories = {
+        "RF":  lambda: RandomForestClassifier(
+            n_estimators=ml_cfg.get("rf_n_estimators", 200),
+            class_weight="balanced", random_state=42, n_jobs=-1,
+        ),
+        "SVM": lambda: SVC(
+            kernel="rbf", C=ml_cfg.get("svm_C", 1.0),
+            probability=True, class_weight="balanced", random_state=42,
+        ),
+    }
+    clf_names   = list(clf_factories.keys())
+    loo         = LeaveOneOut()
+    summary_all = []   # list of dicts → ovr_summary.csv
+    pred_all    = []   # list of dicts → ovr_predictions.csv
+
+    # Per-classifier ROC data collected across all subtypes for the combined plot
+    roc_data = {cn: {} for cn in clf_names}   # {clf_name: {subtype_en: (fpr, tpr, auc)}}
+
+    for cls in observed_classes:
+        en = SUBTYPE_EN.get(cls, cls)
+        y_bin  = np.array([1 if lbl == cls else 0 for lbl in labels])
+        n_pos  = int(y_bin.sum())
+        n_neg  = len(y_bin) - n_pos
+
+        if n_pos < 2 or n_neg < 2:
+            logger.warning(
+                f"  OvR [{en}]: skipped — need ≥2 positive and ≥2 negative "
+                f"(pos={n_pos}, neg={n_neg})"
+            )
+            continue
+
+        logger.info(f"  OvR [{en}]: pos={n_pos}, neg={n_neg}")
+
+        for clf_name, factory in clf_factories.items():
+            y_true_list, y_prob_list, y_pred_list = [], [], []
+
+            for train_idx, test_idx in loo.split(X_raw):
+                X_tr_imp, col_meds = _impute_fit(X_raw[train_idx])
+                X_te_imp           = _impute_transform(X_raw[test_idx], col_meds)
+                scaler             = StandardScaler()
+                X_tr_sc            = scaler.fit_transform(X_tr_imp)
+                X_te_sc            = scaler.transform(X_te_imp)
+
+                clf = factory()
+                clf.fit(X_tr_sc, y_bin[train_idx])
+
+                cls_list   = list(clf.classes_)
+                prob_raw   = clf.predict_proba(X_te_sc)[0]
+                pos_prob   = prob_raw[cls_list.index(1)] if 1 in cls_list else 0.0
+                pred       = int(clf.predict(X_te_sc)[0])
+
+                y_true_list.append(int(y_bin[test_idx[0]]))
+                y_prob_list.append(pos_prob)
+                y_pred_list.append(pred)
+
+            y_true   = np.array(y_true_list)
+            y_prob   = np.array(y_prob_list)
+            y_pred   = np.array(y_pred_list)
+
+            acc = accuracy_score(y_true, y_pred)
+            cm  = confusion_matrix(y_true, y_pred, labels=[0, 1])
+            tn, fp, fn, tp = cm.ravel() if cm.shape == (2, 2) else (0, 0, 0, 0)
+            sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+            fpr, tpr, _ = roc_curve(y_true, y_prob)
+            auc_val     = sklearn_auc(fpr, tpr)
+
+            logger.info(
+                f"    {clf_name}: AUC={auc_val:.3f}  acc={acc:.3f}  "
+                f"sens={sensitivity:.3f}  spec={specificity:.3f}"
+            )
+            roc_data[clf_name][en] = (fpr, tpr, auc_val)
+
+            # Confusion matrix plot
+            _save_confusion_plot(cm, ["Other", en], f"OvR_{clf_name}_{en}", result_dir)
+
+            summary_all.append({
+                "subtype":      en,
+                "classifier":   clf_name,
+                "auc":          round(auc_val, 4),
+                "accuracy":     round(acc, 4),
+                "sensitivity":  round(sensitivity, 4),
+                "specificity":  round(specificity, 4),
+                "n_positive":   n_pos,
+                "n_negative":   n_neg,
+            })
+            for i, sid in enumerate(sample_ids):
+                pred_all.append({
+                    "subtype":      en,
+                    "classifier":   clf_name,
+                    "sample_id":    sid,
+                    "true_subtype": SUBTYPE_EN.get(labels[i], labels[i]),
+                    "true_label":   "Pos" if y_true[i] == 1 else "Neg",
+                    "predicted":    "Pos" if y_pred[i] == 1 else "Neg",
+                    "prob_pos":     round(float(y_prob[i]), 4),
+                    "correct":      bool(y_true[i] == y_pred[i]),
+                })
+
+    if not summary_all:
+        logger.warning("  OvR binary: no subtypes had enough samples — nothing saved")
+        return []
+
+    # Save CSVs
+    pd.DataFrame(summary_all).to_csv(
+        os.path.join(result_dir, "ovr_summary.csv"), index=False
+    )
+    pd.DataFrame(pred_all).to_csv(
+        os.path.join(result_dir, "ovr_predictions.csv"), index=False
+    )
+
+    # Combined ROC plot: one subplot per classifier, one curve per subtype
+    colors = plt.cm.tab10.colors
+    n_clf  = len(clf_names)
+    fig, axes = plt.subplots(1, n_clf, figsize=(6 * n_clf, 5))
+    if n_clf == 1:
+        axes = [axes]
+    for ax, clf_name in zip(axes, clf_names):
+        for i, (en, (fpr, tpr, auc_val)) in enumerate(roc_data[clf_name].items()):
+            ax.plot(fpr, tpr, color=colors[i % len(colors)], lw=2,
+                    label=f"{en} (AUC={auc_val:.2f})")
+        ax.plot([0, 1], [0, 1], "k--", lw=1, alpha=0.5)
+        ax.set_title(f"{clf_name} — One-vs-Rest ROC")
+        ax.set_xlabel("False Positive Rate")
+        ax.set_ylabel("True Positive Rate")
+        ax.legend(loc="lower right", fontsize=8)
+        ax.grid(alpha=0.3)
+    fig.tight_layout()
+    roc_path = os.path.join(result_dir, "ovr_roc.png")
+    fig.savefig(roc_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    logger.info(f"  OvR ROC saved: {roc_path}")
+    logger.info(f"  OvR binary outputs saved to {result_dir}")
+    return summary_all
+
+
+# ---------------------------------------------------------------------------
+# Main entry: Step 16
+# ---------------------------------------------------------------------------
 
 def run_subtype_classifier(workdir, result_dir, config):
     """
-    Step 16 主函数：对恶性+交界性样本按亚型做多分类 LOO-CV。
+    Step 16: Multi-class LOO-CV on malignant + borderline samples.
+    Also runs HGSOC vs Others binary LOO-CV.
 
-    Args:
-        workdir:    临时目录（feature_matrix.npz 路径的 result_dir 优先）
-        result_dir: 结果目录（读取特征矩阵，写入输出）
-        config:     配置对象
+    Improvements over the original:
+    - Viability check with clear skip message when data is insufficient
+    - LabelEncoder fitted only on observed classes (no empty confusion matrix rows)
+    - Fold-wise imputation to prevent data leakage
+    - Confidence score (max predicted probability) in predictions CSV
+    - Data-quality warnings propagated to summary CSV and report
 
     Returns:
         results:    dict {clf_name: {y_true, y_prob, y_pred, accuracy, confusion_matrix}}
@@ -249,13 +489,13 @@ def run_subtype_classifier(workdir, result_dir, config):
     from sklearn.preprocessing import StandardScaler, LabelEncoder
     from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
 
-    # 1. 构建亚型标签映射
+    # 1. Build label map
     subtype_map = _build_subtype_map(config)
     if not subtype_map:
-        logger.error("无法读取亚型标签，跳过亚型分类")
+        logger.error("Cannot read subtype labels — skipping subtype classification")
         return {}, pd.DataFrame()
 
-    # 2. 加载特征矩阵
+    # 2. Load feature matrix
     try:
         X_all, all_sample_ids, feature_names = _load_feature_matrix(result_dir)
     except FileNotFoundError as e:
@@ -264,48 +504,52 @@ def run_subtype_classifier(workdir, result_dir, config):
 
     X_all, feature_names = _apply_panel_filter(X_all, feature_names, result_dir)
 
-    import re  # noqa: F401 (re 已在模块顶层可用，此处保留以防直接调用)
-
-    # 3. 筛选有亚型标签的样本（精确匹配 sample_id）
+    # 3. Filter to samples with known subtype labels
     indices, labels, sample_ids = [], [], []
-    missing = []
     for i, sid in enumerate(all_sample_ids):
         subtype = subtype_map.get(sid)
-        if subtype is not None:
-            if subtype in SUBTYPE_CLASSES:
-                indices.append(i)
-                labels.append(subtype)
-                sample_ids.append(sid)
-            else:
-                logger.warning(f"  样本 {sid} 亚型 '{subtype}' 不在已知列表，跳过")
-        else:
-            missing.append(sid)
+        if subtype is None:
+            continue
+        if subtype not in SUBTYPE_CLASSES:
+            logger.warning(f"  Sample {sid}: unknown subtype '{subtype}' — skipped")
+            continue
+        indices.append(i)
+        labels.append(subtype)
+        sample_ids.append(sid)
 
-    if missing:
-        logger.info(f"  {len(missing)} 个样本无亚型标签（可能为良性），已跳过")
-    # 诊断：打印前5个 sample_id 与 subtype_map 前5个 key 对比
-    logger.info(f"  feature_matrix sample_ids 前5个: {all_sample_ids[:5]}")
-    logger.info(f"  subtype_map keys 前5个: {list(subtype_map.keys())[:5]}")
+    n_benign_skipped = len(all_sample_ids) - len(indices) - sum(
+        1 for sid in all_sample_ids if subtype_map.get(sid) not in SUBTYPE_CLASSES + [None]
+    )
+    logger.info(f"  {n_benign_skipped} samples have no subtype label (benign) — skipped")
+    logger.debug(f"  feature_matrix sample_ids[:5]: {all_sample_ids[:5]}")
+    logger.debug(f"  subtype_map keys[:5]: {list(subtype_map.keys())[:5]}")
 
-    if len(indices) < 5:
-        logger.error(f"有效亚型样本不足（{len(indices)} 个），无法训练分类器")
+    # 4. Viability check — fail fast with a clear message
+    viable, reason, warnings = _check_viability(labels)
+    for w in warnings:
+        logger.warning(f"  [subtype] {w}")
+    if not viable:
+        logger.error(f"  [subtype] SKIP — {reason}")
+        _save_skip_summary(result_dir, reason, warnings)
         return {}, pd.DataFrame()
 
-    X = _impute(X_all[indices])
+    X_raw = X_all[indices]
+
+    # Encode only observed classes (cleaner confusion matrix)
+    observed_classes = sorted(set(labels), key=lambda c: SUBTYPE_CLASSES.index(c)
+                              if c in SUBTYPE_CLASSES else 99)
     le = LabelEncoder()
-    le.fit(SUBTYPE_CLASSES)
-    y = le.transform(labels)
-    classes = le.classes_
+    le.fit(observed_classes)
+    y         = le.transform(labels)
+    n_classes = len(observed_classes)
+    en_labels = [SUBTYPE_EN.get(c, c) for c in observed_classes]
 
-    logger.info(f"亚型分类样本: {len(sample_ids)} 个，亚型数: {len(set(labels))}")
-    for cls in classes:
-        cnt = labels.count(cls)
-        if cnt > 0:
-            logger.info(f"  {cls}: {cnt}")
+    counts = Counter(labels)
+    logger.info(f"Subtype classification: {len(sample_ids)} samples, {n_classes} class(es)")
+    for cls in observed_classes:
+        logger.info(f"  {SUBTYPE_EN.get(cls, cls):>14s}: {counts[cls]}")
 
-    # 4. 分类器（多分类，LOO-CV）
-    # RF : 随机森林，原生支持多分类，class_weight="balanced" 处理类别不均衡
-    # SVM: RBF 核支持向量机，decision_function_shape="ovr"（一对多）策略，probability=True 输出概率
+    # 5. Classifiers
     ml_cfg = (config or {}).get("ml", {})
     classifiers = {
         "RF": RandomForestClassifier(
@@ -317,106 +561,114 @@ def run_subtype_classifier(workdir, result_dir, config):
         "SVM": SVC(
             kernel="rbf",
             C=ml_cfg.get("svm_C", 1.0),
-            probability=True,          # Platt scaling 输出概率
+            probability=True,
             class_weight="balanced",
-            decision_function_shape="ovr",   # One-vs-Rest 多分类
+            decision_function_shape="ovr",
             random_state=42,
         ),
     }
 
-    # 5. LOO-CV
-    loo = LeaveOneOut()
+    # 6. LOO-CV with fold-wise imputation (no leakage)
+    loo     = LeaveOneOut()
     results = {}
-    n_total_classes = len(classes)
 
     for clf_name, clf in classifiers.items():
         logger.info(f"  LOO-CV: {clf_name} ...")
         y_true_list, y_prob_list, y_pred_list = [], [], []
 
-        for train_idx, test_idx in loo.split(X):
-            X_train, X_test = X[train_idx], X[test_idx]
-            y_train, y_test = y[train_idx], y[test_idx]
+        for train_idx, test_idx in loo.split(X_raw):
+            X_tr_raw, X_te_raw = X_raw[train_idx], X_raw[test_idx]
+            y_train,  y_test   = y[train_idx],     y[test_idx]
 
-            scaler = StandardScaler()
-            X_train_sc = scaler.fit_transform(X_train)
-            X_test_sc = scaler.transform(X_test)
+            # Fold-wise imputation — fit on train only
+            X_tr_imp, col_meds = _impute_fit(X_tr_raw)
+            X_te_imp           = _impute_transform(X_te_raw, col_meds)
 
-            clf.fit(X_train_sc, y_train)
+            scaler  = StandardScaler()
+            X_tr_sc = scaler.fit_transform(X_tr_imp)
+            X_te_sc = scaler.transform(X_te_imp)
 
-            # predict_proba 只对训练集出现的类返回概率列；
-            # 当某 fold 训练集缺少某一亚型时列数 < n_total_classes，
-            # 需要按 clf.classes_ 将概率填入完整大小的向量。
-            prob_raw = clf.predict_proba(X_test_sc)[0]
-            prob_full = np.zeros(n_total_classes)
+            clf.fit(X_tr_sc, y_train)
+
+            # Align probabilities to full n_classes vector
+            # clf.classes_ may be a subset when some class absent from this fold
+            prob_raw  = clf.predict_proba(X_te_sc)[0]
+            prob_full = np.zeros(n_classes)
             for j, cls_idx in enumerate(clf.classes_):
                 prob_full[int(cls_idx)] = prob_raw[j]
 
-            pred = clf.predict(X_test_sc)[0]
+            pred = int(clf.predict(X_te_sc)[0])
 
             y_true_list.append(int(y_test[0]))
             y_prob_list.append(prob_full)
-            y_pred_list.append(int(pred))
+            y_pred_list.append(pred)
 
         y_true = np.array(y_true_list)
         y_prob = np.array(y_prob_list)   # (n_samples, n_classes)
         y_pred = np.array(y_pred_list)
 
         acc = accuracy_score(y_true, y_pred)
-        cm = confusion_matrix(y_true, y_pred, labels=list(range(len(classes))))
+        cm  = confusion_matrix(y_true, y_pred, labels=list(range(n_classes)))
 
         results[clf_name] = {
-            "y_true": y_true,
-            "y_prob": y_prob,
-            "y_pred": y_pred,
-            "accuracy": acc,
+            "y_true":           y_true,
+            "y_prob":           y_prob,
+            "y_pred":           y_pred,
+            "accuracy":         acc,
             "confusion_matrix": cm,
         }
-        logger.info(f"    {clf_name}: 准确率={acc:.3f}")
-        en_names = [SUBTYPE_EN.get(str(c), str(c)) for c in classes]
+        logger.info(f"    {clf_name}: accuracy={acc:.3f}")
         logger.info("\n" + classification_report(
             y_true, y_pred,
-            labels=list(range(len(classes))),
-            target_names=en_names,
+            labels=list(range(n_classes)),
+            target_names=en_labels,
             zero_division=0,
         ))
 
-    # 6. 可视化 — build English label list once, pass to both plot functions
-    en_labels = [SUBTYPE_EN.get(str(c), str(c)) for c in classes]
+    # 7. Plots
     for clf_name, res in results.items():
         _save_confusion_plot(res["confusion_matrix"], en_labels, clf_name, result_dir)
     _save_roc_plot(results, en_labels, result_dir)
 
-    # 7. 逐样本预测结果
+    # 8. Per-sample predictions (confidence = max predicted probability)
     rows = []
     for clf_name, res in results.items():
         for i, sid in enumerate(sample_ids):
             row = {
-                "sample_id": sid,
-                "true_subtype": le.inverse_transform([res["y_true"][i]])[0],
-                "classifier": clf_name,
+                "sample_id":         sid,
+                "true_subtype":      le.inverse_transform([res["y_true"][i]])[0],
+                "classifier":        clf_name,
                 "predicted_subtype": le.inverse_transform([res["y_pred"][i]])[0],
-                "correct": bool(res["y_true"][i] == res["y_pred"][i]),
+                "confidence":        round(float(res["y_prob"][i].max()), 4),
+                "correct":           bool(res["y_true"][i] == res["y_pred"][i]),
             }
-            for j, cls in enumerate(classes):
-                row[f"prob_{cls[:4]}"] = round(float(res["y_prob"][i, j]), 4)
+            for j, cls in enumerate(observed_classes):
+                col = f"prob_{SUBTYPE_EN.get(cls, cls[:6])}"
+                row[col] = round(float(res["y_prob"][i, j]), 4)
             rows.append(row)
-    pred_df = pd.DataFrame(rows)
+    pred_df   = pd.DataFrame(rows)
     pred_path = os.path.join(result_dir, "subtype_predictions.csv")
     pred_df.to_csv(pred_path, index=False)
-    logger.info(f"  逐样本预测已保存: {pred_path}")
+    logger.info(f"  Per-sample predictions saved: {pred_path}")
 
-    # 8. 汇总
+    # 9. Summary (includes data-quality warnings)
     summary_rows = []
     for clf_name, res in results.items():
         summary_rows.append({
-            "classifier": clf_name,
-            "accuracy": round(res["accuracy"], 4),
-            "n_samples": len(sample_ids),
-            "n_subtypes": len(set(labels)),
+            "classifier":   clf_name,
+            "accuracy":     round(res["accuracy"], 4),
+            "n_samples":    len(sample_ids),
+            "n_subtypes":   n_classes,
+            "class_counts": str({SUBTYPE_EN.get(k, k): v
+                                 for k, v in sorted(counts.items(), key=lambda x: -x[1])}),
+            "warnings":     " | ".join(warnings) if warnings else "",
         })
-    summary_df = pd.DataFrame(summary_rows)
+    summary_df   = pd.DataFrame(summary_rows)
     summary_path = os.path.join(result_dir, "subtype_summary.csv")
     summary_df.to_csv(summary_path, index=False)
-    logger.info(f"  亚型分类汇总已保存: {summary_path}")
+    logger.info(f"  Subtype summary saved: {summary_path}")
+
+    # 10. One-vs-Rest binary classifiers (each subtype vs others)
+    _run_ovr_binary(X_raw, labels, sample_ids, observed_classes, result_dir, config)
 
     return results, summary_df

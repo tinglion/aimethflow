@@ -1,0 +1,123 @@
+# Docker 容器专用配置（路径已改为容器内挂载路径）
+# 对应 docker-compose.yml 的 volume 映射
+name = "甲基化分析项目"
+version = "1.0.0"
+
+[data]
+root_dir = "/mnt"
+tissue_dir = "/mnt/OC_tissue"
+plasma_dir = "/mnt/OC_plasma"
+sample_info_excel = "data/卵巢癌fq编号与样本信息对应表v3.xlsx"
+probe_panel_bed = "data/panel_B10308.bed"
+candidate_regions = "data/OC_tissue_88_regions.hg38.txt"
+
+[directories]
+temp_dir = "/mnt/temp"
+result_dir = "/mnt/result"
+log_dir = "/mnt/result/logs"
+
+[fastq]
+progress_interval = 1000000
+sample_size = 1000
+random_seed = 42
+
+[extraction]
+min_quality = 20
+min_depth = 10
+reference_genome = "/mnt/ref/hg38.fa"
+
+[diff_methylation]
+threshold = 0.2
+p_value = 0.05
+min_depth = 20
+
+[visualization]
+plot_types = ["density", "scatter", "heatmap"]
+fig_width = 12
+fig_height = 8
+dpi = 300
+font_size = 12
+
+[filtering]
+repeat_bed = "/mnt/ref/hg38.repeat.bed"
+promoter_bed = "/mnt/ref/hg38_upstream_2k_st.bed.gz"
+min_depth = 5
+max_depth = 50
+
+[plasma]
+aligner = "bwameth"
+umi_length = 6
+umi_location = "read2"
+trim_front1 = 12
+trim_front2 = 12
+trim_tail2 = 5
+min_length = 35
+min_quality = 20
+non_directional = false
+nOT = "0,0,0,20"
+nOB = "0,0,17,0"
+min_mapq = 40
+min_cpg_per_region = 3
+min_reads_per_region = 5
+methylated_read_threshold = 0.60
+low_confidence_threshold = 0.40
+diff_p_value = 0.05
+diff_delta_beta = 0.10
+
+[threads]
+fastp = 8
+bwameth = 8
+samtools_sort = 4
+samtools_sort_mem = "8G"
+methyldackel = 4
+umi_tools = 1
+
+[tools]
+# venv 安装路径（Docker 内固定）
+conda_env_bin = "/opt/venv/bin"
+umi_tools_fallback = "/opt/venv/bin/umi_tools"
+
+[cleanup]
+delete_after_dedup = false
+delete_after_target = false
+
+[ml]
+feature_selection_mode = "union"
+min_feature_coverage = 0.5
+sample_wilcox_p   = 0.05
+sample_delta_beta = 0.10
+sample_wilcox_p_88   = 0.05
+sample_delta_beta_88 = 0.1
+max_features_clf = 20
+lasso_cv_folds = 5
+rf_n_estimators = 500
+rf_min_importance = 0.0
+lr_C = 1.0
+svm_C = 1.0
+xgb_n_estimators = 200
+xgb_max_depth = 4
+xgb_learning_rate = 0.1
+lgbm_n_estimators = 200
+lgbm_max_depth = 4
+lgbm_learning_rate = 0.1
+outlier_coverage_min = 0.30
+outlier_pca_z = 2.5
+min_10x_coverage_rate = 0.80
+exclude_samples = ['B10013', 'B10022', 'B10018', 'B10268']
+
+[annotation]
+ewas_window = 500
+gene_window = 2000
+api_delay = 0.25
+api_timeout = 15
+cpgi_bed = ""
+ewas_atlas = true
+pubmed_search = true
+ncbi_api_key = ""
+pubmed_max_hits = 20
+
+[logging]
+level = "INFO"
+format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+save_to_file = true
+console_output = true

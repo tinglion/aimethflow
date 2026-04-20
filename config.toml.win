@@ -12,7 +12,7 @@ tissue_dir = "/mnt/f/meth/OC_tissue"
 # 血浆样本数据目录
 plasma_dir = "/mnt/f/meth/OC_plasma"
 # 样本信息Excel文件路径
-sample_info_excel = "data/按分期处理_卵巢癌fq编号与样本信息对应表v3.xlsx"
+sample_info_excel = "data/卵巢癌fq编号与样本信息对应表v3.xlsx"
 # 探针区域文件路径
 probe_panel_bed = "data/panel_B10308.bed"
 # 候选区域文件路径
@@ -96,8 +96,8 @@ min_quality = 20        # 最低碱基质量Q值
 non_directional = false # 单链建库方向性（待M-bias确认后调整）
 # MethylDackel extract 位置偏差校正（根据 M-bias 图调整，格式: "R1_5',R1_3',R2_5',R2_3'"）
 # 0,0,0,0 = 不截；建议先看 mbias SVG 再填写
-nOT = "0,0,0,0"        # OT链（M-bias建议: 0,0,0,111 → 先保持0，确认SVG后再调整）
-nOB = "0,0,0,0"        # OB链（M-bias建议: 0,0,17,0  → 先保持0，确认SVG后再调整）
+nOT = "0,0,0,20"        # OT链（M-bias建议: 0,0,0,111 → 先保持0，确认SVG后再调整）
+nOB = "0,0,17,0"        # OB链（M-bias建议: 0,0,17,0  → 先保持0，确认SVG后再调整）
 # 比对质量过滤
 min_mapq = 40
 # 区域覆盖深度过滤
@@ -146,6 +146,16 @@ delete_after_target = false
 feature_selection_mode = "union"
 # 最低覆盖率阈值：DMC位点在 ≥ 此比例的样本中有覆盖才保留（0~1）
 min_feature_coverage = 0.5
+# 样本级 Wilcoxon 预筛选阈值（在 LASSO/RF 之前，过滤合并 bedGraph 产生的假性高 |Δβ| 位点）
+# diff_methylation.txt 是对合并组 bedGraph 比较的结果，组内噪声被平均掉会虚高 |Δβ|。
+# 这里用个体样本层面的 Mann-Whitney U 检验作二次筛选。
+sample_wilcox_p   = 0.05   # p 值阈值（非 88 区域位点，标准）0.05
+sample_delta_beta = 0.10   # 样本级 |Δβ| 阈值（非 88 区域位点，标准）
+sample_wilcox_p_88   = 0.05   # p 值阈值（88 组织候选区域内位点，宽松先验）
+sample_delta_beta_88 = 0.1   # |Δβ| 阈值（88 组织候选区域内位点，宽松先验）
+# 分类器最大输入特征数（0 = 不限制；建议设为 n_samples/10 左右防止过拟合）
+# 120样本 → 建议 10~20；超过限制时按 LASSO+RF 综合评分保留 top-N
+max_features_clf = 20
 # LASSO (L1 logistic) 交叉验证折数
 lasso_cv_folds = 5
 # 随机森林树数量（特征选择 + 分类均使用）
@@ -156,6 +166,44 @@ rf_min_importance = 0.0
 lr_C = 1.0
 # SVM 正则化参数 C
 svm_C = 1.0
+# XGBoost 参数
+xgb_n_estimators = 200
+xgb_max_depth = 4
+xgb_learning_rate = 0.1
+# LightGBM 参数
+lgbm_n_estimators = 200
+lgbm_max_depth = 4
+lgbm_learning_rate = 0.1
+# 样本异常检测参数
+# 样本最低覆盖率：CpG 有覆盖的位点比例 < 此值时触发覆盖率异常标记
+outlier_coverage_min = 0.30
+# PCA 组内距离 z-score 阈值：超过此值触发 PCA 异常标记
+outlier_pca_z = 2.5
+# Panel 位点 ≥10x 测序深度的最低样本覆盖比例（低于此值的位点从最终 Panel 中强制移除）
+min_10x_coverage_rate = 0.80
+# 确认排除的样本 ID（在查看 outlier_report.csv 后填写）
+exclude_samples = ['B10013', 'B10022', 'B10018', 'B10268']
+
+# Feature site annotation configuration (Step 17)
+[annotation]
+# EWAS Catalog search window around each CpG site (bp)
+ewas_window = 500
+# Ensembl gene overlap window around each site (bp)
+gene_window = 2000
+# Delay between API calls (seconds) — respect rate limits
+api_delay = 0.25
+# Request timeout (seconds)
+api_timeout = 15
+# Path to local hg38 CpG island BED file (leave empty to auto-download from UCSC)
+cpgi_bed = ""
+# EWAS Atlas (CNCB NGDC) — query positional associations
+ewas_atlas = true
+# PubMed E-utilities — search gene + "plasma methylation cancer"
+pubmed_search = true
+# NCBI API key (optional; increases rate limit from 3→10 req/s; leave empty to omit)
+ncbi_api_key = "4abb0ffcf184c006f41fde521b7f7266cb09"
+# Max PubMed results to retrieve per gene
+pubmed_max_hits = 20
 
 # 日志配置
 [logging]

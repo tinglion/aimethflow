@@ -1,0 +1,15 @@
+data/
+temp/
+result/
+notebooks/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+.git/
+.env
+*.egg-info/
+dist/
+build/
+tests/
+logs/

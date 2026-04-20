@@ -19,6 +19,7 @@ classifier_utils.py - 诊断分类器模块（Step 15）
 """
 
 import os
+import warnings
 import numpy as np
 import pandas as pd
 
@@ -189,13 +190,26 @@ def _select_features_in_fold(X_train, y_train, region_in_88, config):
     rf.fit(X_w, y_train)
     rf_local = np.where(rf.feature_importances_ > 0)[0]
 
-    # 5. 并集映射回原始列索引
+    # 5. 并集，按 LASSO 系数 + RF 重要性综合评分排序，限制最大特征数
     if selection_mode == "lasso":
         local_idx = lasso_local
     elif selection_mode == "rf":
         local_idx = rf_local
     else:
         local_idx = np.unique(np.concatenate([lasso_local, rf_local]))
+
+    # 综合评分（各归一化后求和）：评分越高 → 越优先保留
+    lasso_abs  = np.abs(lasso.coef_[0])                  # shape: (n_wilcox,)
+    rf_imp     = rf.feature_importances_                  # shape: (n_wilcox,)
+    lasso_norm = lasso_abs / (lasso_abs.max() + 1e-10)
+    rf_norm    = rf_imp    / (rf_imp.max()    + 1e-10)
+    combined   = lasso_norm + rf_norm                     # shape: (n_wilcox,)
+
+    max_feat = ml_cfg.get("max_features_clf", 0)
+    if max_feat > 0 and len(local_idx) > max_feat:
+        scores  = combined[local_idx]
+        top_n   = np.argsort(scores)[-max_feat:]          # 取综合评分最高的 N 个
+        local_idx = local_idx[np.sort(top_n)]             # 保持列序
 
     return wilcox_indices[local_idx]
 
@@ -330,6 +344,26 @@ def run_classifiers(workdir, result_dir, config, benign_samples, malignant_sampl
         logger.error("特征矩阵无特征，跳过分类器评估")
         return {}, pd.DataFrame()
 
+    # 1b. 异常样本检测 + 排除
+    ml_cfg_pre = (config or {}).get("ml", {})
+    from scripts.modules.feature_utils import detect_sample_outliers
+    outlier_df, suspect_ids = detect_sample_outliers(X, y, sample_ids, config)
+    if len(outlier_df) > 0:
+        outlier_path = os.path.join(result_dir, "outlier_report.csv")
+        outlier_df.to_csv(outlier_path, index=False)
+        logger.info(f"  异常检测报告已保存: {outlier_path}")
+
+    exclude_set = set(ml_cfg_pre.get("exclude_samples", []))
+    if exclude_set:
+        keep_mask = np.array([sid not in exclude_set for sid in sample_ids])
+        n_excluded = int((~keep_mask).sum())
+        logger.info(f"  根据 exclude_samples 排除 {n_excluded} 个样本: "
+                    f"{[sid for sid in sample_ids if sid in exclude_set]}")
+        X          = X[keep_mask]
+        y          = y[keep_mask]
+        sample_ids = [sid for sid, k in zip(sample_ids, keep_mask) if k]
+        region_in_88 = region_in_88   # feature 维度不变，无需过滤
+
     n_in_88 = int(region_in_88.sum())
     logger.info(f"  全量特征矩阵: {X.shape[0]} 样本 × {X.shape[1]} 特征  "
                 f"(88区域内: {n_in_88}  区域外: {X.shape[1]-n_in_88}，"
@@ -393,7 +427,8 @@ def run_classifiers(workdir, result_dir, config, benign_samples, malignant_sampl
     clf_y_prob = {n: [] for n in clf_names}
     clf_y_pred = {n: [] for n in clf_names}
 
-    fold_n_features = []   # 每折选中的特征数
+    fold_n_features   = []   # 每折选中的特征数
+    fold_selected_names = []  # 每折选中的特征名列表（用于频率统计）
 
     n_folds = X.shape[0]
     log_interval = max(1, n_folds // 10)
@@ -407,6 +442,7 @@ def run_classifiers(workdir, result_dir, config, benign_samples, malignant_sampl
         if len(sel_idx) == 0:
             sel_idx = np.arange(X.shape[1])   # 兜底：全特征
         fold_n_features.append(len(sel_idx))
+        fold_selected_names.append([feature_names[i] for i in sel_idx])
 
         X_tr = X_train_raw[:, sel_idx]
         X_te = X_test_raw[:, sel_idx]
@@ -421,13 +457,21 @@ def run_classifiers(workdir, result_dir, config, benign_samples, malignant_sampl
         X_te_sc = scaler.transform(X_te_imp)
 
         # 3d. 所有分类器在同一折特征集上训练 + 预测
-        for clf_name, clf in classifiers.items():
-            clf.fit(X_tr_sc, y_train)
-            prob = clf.predict_proba(X_te_sc)[0, 1]
-            pred = clf.predict(X_te_sc)[0]
-            clf_y_true[clf_name].append(int(y_test[0]))
-            clf_y_prob[clf_name].append(float(prob))
-            clf_y_pred[clf_name].append(int(pred))
+        # LightGBM >= 4.x 在 fit numpy array 时内部生成特征名，predict 时 sklearn
+        # 校验层会因无名称发出 UserWarning，对结果无影响，局部屏蔽。
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="X does not have valid feature names",
+                category=UserWarning,
+            )
+            for clf_name, clf in classifiers.items():
+                clf.fit(X_tr_sc, y_train)
+                prob = clf.predict_proba(X_te_sc)[0, 1]
+                pred = clf.predict(X_te_sc)[0]
+                clf_y_true[clf_name].append(int(y_test[0]))
+                clf_y_prob[clf_name].append(float(prob))
+                clf_y_pred[clf_name].append(int(pred))
 
         if (fold_idx + 1) % log_interval == 0 or fold_idx == n_folds - 1:
             logger.info(f"    fold {fold_idx+1}/{n_folds}  "
@@ -438,6 +482,36 @@ def run_classifiers(workdir, result_dir, config, benign_samples, malignant_sampl
     logger.info(f"  Nested CV 每折特征数: 均值={fold_arr.mean():.1f}  "
                 f"中位数={float(np.median(fold_arr)):.1f}  "
                 f"最少={fold_arr.min()}  最多={fold_arr.max()}")
+
+    # ── 特征选择频率统计 ──
+    from collections import Counter
+    name_counter = Counter()
+    for names in fold_selected_names:
+        name_counter.update(names)
+
+    feat_to_in88 = {fn: bool(region_in_88[i]) for i, fn in enumerate(feature_names)}
+    freq_rows = sorted(
+        [{"feature": feat, "in_88_regions": feat_to_in88.get(feat, False),
+          "selection_count": cnt, "selection_rate": round(cnt / n_folds, 4)}
+         for feat, cnt in name_counter.items()],
+        key=lambda r: -r["selection_count"]
+    )
+    freq_df = pd.DataFrame(freq_rows)
+    freq_path = os.path.join(result_dir, "feature_selection_freq.csv")
+    freq_df.to_csv(freq_path, index=False)
+    logger.info(f"  特征选择频率表已保存: {freq_path}")
+
+    # 稳定特征（选中率 ≥ 50%）
+    stable_thr = 0.50
+    stable_rows = [r for r in freq_rows if r["selection_rate"] >= stable_thr]
+    logger.info(f"\n  ══ 稳定特征 Panel（选中率≥{stable_thr:.0%}，共 {len(stable_rows)} 个）══")
+    for r in stable_rows:
+        marker = "★" if r["in_88_regions"] else "○"
+        logger.info(f"    {marker} {r['feature']:<30s}  "
+                    f"{r['selection_rate']:.0%} ({r['selection_count']}/{n_folds}折)")
+    if not stable_rows:
+        logger.info("    （无稳定特征；建议检查 max_features_clf 或放宽 Wilcoxon 阈值）")
+    logger.info("")
 
     # 4. 汇总指标
     results = {}

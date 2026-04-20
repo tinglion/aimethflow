@@ -157,6 +157,51 @@ rf_min_importance = 0.0
 lr_C = 1.0
 # SVM 正则化参数 C
 svm_C = 1.0
+# XGBoost 参数
+xgb_n_estimators = 200
+xgb_max_depth = 4
+xgb_learning_rate = 0.1
+# LightGBM 参数
+lgbm_n_estimators = 200
+lgbm_max_depth = 4
+lgbm_learning_rate = 0.1
+# 样本级 Wilcoxon 预筛选阈值（在 LASSO/RF 之前，过滤合并 bedGraph 产生的假性高 |Δβ| 位点）
+# diff_methylation.txt 是对合并组 bedGraph 比较的结果，组内噪声被平均掉会虚高 |Δβ|。
+# 这里用个体样本层面的 Mann-Whitney U 检验作二次筛选。
+sample_wilcox_p   = 0.05   # p 值阈值（非 88 区域位点，标准）0.05
+sample_delta_beta = 0.10   # 样本级 |Δβ| 阈值（非 88 区域位点，标准）
+sample_wilcox_p_88   = 0.05   # p 值阈值（88 组织候选区域内位点，宽松先验）
+sample_delta_beta_88 = 0.1   # |Δβ| 阈值（88 组织候选区域内位点，宽松先验）
+# 分类器最大输入特征数（0 = 不限制；建议设为 n_samples/10 左右防止过拟合）
+max_features_clf = 20
+# 样本异常检测参数
+outlier_coverage_min = 0.30
+outlier_pca_z = 2.5
+# Panel 位点 ≥10x 测序深度的最低样本覆盖比例（低于此值的位点从最终 Panel 中强制移除）
+min_10x_coverage_rate = 0.80
+# 确认排除的样本 ID（在查看 outlier_report.csv 后填写）
+exclude_samples = []
+
+# Feature site annotation configuration (Step 17)
+[annotation]
+# EWAS Catalog search window around each CpG site (bp)
+ewas_window = 500
+# Ensembl gene overlap window around each site (bp)
+gene_window = 2000
+# Delay between API calls (seconds) — respect rate limits
+api_delay = 0.25
+# Request timeout (seconds)
+api_timeout = 15
+# Path to local hg38 CpG island BED file (leave empty to auto-download from UCSC)
+cpgi_bed = ""
+# EWAS Atlas (CNCB NGDC) — query positional associations
+ewas_atlas = true
+# PubMed E-utilities — search gene + "plasma methylation cancer"
+pubmed_search = true
+# NCBI API key (optional; increases rate limit from 3→10 req/s; leave empty to omit)
+ncbi_api_key = ""
+# Max PubMed results to retrieve per gene
+pubmed_max_hits = 20
 
 # 日志配置
 [logging]

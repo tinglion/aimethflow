@@ -287,6 +287,126 @@ def run_rf_importance(X, y, config=None):
 
 
 # ──────────────────────────────────────────────────────
+# 样本异常检测
+# ──────────────────────────────────────────────────────
+
+def detect_sample_outliers(X, y, sample_ids, config=None):
+    """
+    多角度识别潜在异常样本。不自动排除；结果供用户判断后写入 exclude_samples。
+
+    三种检测方法（需 ≥2 个同时触发才标记为 suspect）：
+      1. 覆盖率：NaN 占比 > (1 - outlier_coverage_min)
+      2. 组内 PCA 距离：PC1-2 欧氏距离的组内 z-score > outlier_pca_z
+      3. Isolation Forest：组内异常分数排在后 25%
+
+    Args:
+        X:          (n_samples, n_features)，NaN 表示无覆盖
+        y:          (n_samples,)，0=良性 1=恶性
+        sample_ids: list[str]
+        config:     配置对象
+
+    Returns:
+        df:          pd.DataFrame，包含各项指标，已排序（suspect 优先）
+        suspect_ids: list[str]，疑似异常样本 ID
+    """
+    try:
+        from sklearn.decomposition import PCA
+        from sklearn.preprocessing import StandardScaler
+        from sklearn.ensemble import IsolationForest
+        import pandas as pd
+    except ImportError as e:
+        logger.warning(f"detect_sample_outliers: 缺少依赖 {e}，跳过异常检测")
+        return pd.DataFrame(), []
+
+    ml_cfg = (config or {}).get("ml", {})
+    coverage_min = ml_cfg.get("outlier_coverage_min", 0.30)
+    pca_z_thr    = ml_cfg.get("outlier_pca_z",        2.5)
+
+    n_samples, n_features = X.shape
+    rows = []
+
+    nan_frac = np.isnan(X).mean(axis=1)          # shape: (n_samples,)
+
+    # 组内 PCA + Isolation Forest（分 benign / malignant 各自计算）
+    pca_z_scores = np.full(n_samples, np.nan)
+    iforest_flag = np.zeros(n_samples, dtype=bool)
+
+    for label in (0, 1):
+        grp_idx = np.where(y == label)[0]
+        if len(grp_idx) < 4:
+            continue
+
+        X_grp = X[grp_idx].copy()
+        # 用列中位数插补 NaN，避免 PCA/IF 报错
+        col_meds = np.nanmedian(X_grp, axis=0)
+        col_meds = np.where(np.isnan(col_meds), 0.0, col_meds)
+        for j in range(X_grp.shape[1]):
+            mask = np.isnan(X_grp[:, j])
+            X_grp[mask, j] = col_meds[j]
+
+        # 标准化
+        scaler = StandardScaler()
+        X_sc = scaler.fit_transform(X_grp)
+
+        # ── 方法 2：PCA 组内距离 z-score ──
+        n_components = min(2, len(grp_idx) - 1, n_features)
+        if n_components >= 1:
+            pca = PCA(n_components=n_components, random_state=42)
+            coords = pca.fit_transform(X_sc)          # (n_grp, n_components)
+            dists  = np.linalg.norm(coords, axis=1)   # 到原点的欧氏距离
+            mu, sd = dists.mean(), dists.std(ddof=0)
+            z = (dists - mu) / (sd + 1e-10)
+            pca_z_scores[grp_idx] = z
+
+        # ── 方法 3：Isolation Forest ──
+        if len(grp_idx) >= 8:
+            contamination = 0.25
+            iforest = IsolationForest(
+                n_estimators=200, contamination=contamination,
+                random_state=42
+            )
+            pred_if = iforest.fit_predict(X_sc)       # -1 = outlier
+            iforest_flag[grp_idx] = (pred_if == -1)
+
+    # ── 综合打分 ──
+    flag_cov  = nan_frac > (1.0 - coverage_min)           # 方法 1
+    flag_pca  = pca_z_scores > pca_z_thr                  # 方法 2
+    flag_if   = iforest_flag                               # 方法 3
+
+    n_flags = flag_cov.astype(int) + flag_pca.astype(int) + flag_if.astype(int)
+    suspect  = n_flags >= 2
+
+    label_names = {0: "benign", 1: "malignant"}
+    for i, sid in enumerate(sample_ids):
+        rows.append({
+            "sample_id":       sid,
+            "group":           label_names.get(int(y[i]), "unknown"),
+            "nan_frac":        round(float(nan_frac[i]), 4),
+            "flag_coverage":   bool(flag_cov[i]),
+            "pca_z_score":     round(float(pca_z_scores[i]), 4) if not np.isnan(pca_z_scores[i]) else None,
+            "flag_pca":        bool(flag_pca[i]),
+            "flag_isolation":  bool(flag_if[i]),
+            "n_flags":         int(n_flags[i]),
+            "suspect":         bool(suspect[i]),
+        })
+
+    df = pd.DataFrame(rows).sort_values(["suspect", "n_flags"], ascending=[False, False])
+
+    suspect_ids = [r["sample_id"] for r in rows if r["suspect"]]
+
+    n_suspect = len(suspect_ids)
+    logger.info(f"  样本异常检测: {n_samples} 个样本，"
+                f"疑似异常 {n_suspect} 个（≥2 项指标触发）")
+    if suspect_ids:
+        logger.info(f"  疑似异常样本: {suspect_ids}")
+        logger.info(f"  可将确认异常的样本 ID 添加到 config.toml [ml] exclude_samples = [...]")
+    else:
+        logger.info(f"  未发现疑似异常样本")
+
+    return df, suspect_ids
+
+
+# ──────────────────────────────────────────────────────
 # 主入口：Step 14
 # ──────────────────────────────────────────────────────
 
@@ -464,10 +584,15 @@ def select_features(workdir, result_dir, config, benign_samples, malignant_sampl
     else:  # "union"（默认）
         final_indices = np.unique(np.concatenate([lasso_indices, rf_indices]))
 
-    panel_features = [feature_names[i] for i in final_indices]
+    panel_features  = [feature_names[i]      for i in final_indices]
+    panel_in_88     = [bool(region_in_88[i]) for i in final_indices]
     logger.info(f"最终入选特征: {len(panel_features)} 个  (mode={selection_mode})")
+    logger.info(f"  ★=88组织区域内  ○=区域外")
+    for feat, in88 in sorted(zip(panel_features, panel_in_88), key=lambda x: x[0]):
+        marker = "★" if in88 else "○"
+        logger.info(f"    {marker} {feat}")
 
-    # 5. 保存特征重要性
+    # 5. Build importance DataFrame (panel_selected updated after coverage QC below)
     lasso_selected = np.zeros(len(feature_names), dtype=bool)
     lasso_selected[lasso_indices] = True
     rf_selected = np.zeros(len(feature_names), dtype=bool)
@@ -487,18 +612,69 @@ def select_features(workdir, result_dir, config, benign_samples, malignant_sampl
         "panel_selected":    panel_selected,
     }).sort_values("rf_importance", ascending=False)
 
+    # 6. Compute depth stats for panel sites; apply ≥10x coverage QC hard filter
+    ml_cfg2     = (config or {}).get("ml", {})
+    min_10x_cov = ml_cfg2.get("min_10x_coverage_rate", 0.80)
+
+    D_panel        = D[:, final_indices]       # shape: (n_samples, n_panel)
+    n_samples_total = D_panel.shape[0]
+
+    site_mean      = D_panel.mean(axis=0)
+    site_median    = np.median(D_panel, axis=0)
+    site_p10       = np.percentile(D_panel, 10, axis=0)
+    site_p90       = np.percentile(D_panel, 90, axis=0)
+    site_min       = D_panel.min(axis=0)
+    site_max       = D_panel.max(axis=0)
+    site_n_cov     = (D_panel > 0).sum(axis=0)
+    site_n_10x     = (D_panel >= 10).sum(axis=0)
+    cov_rate_10x   = site_n_10x / n_samples_total
+    pass_cov_qc    = cov_rate_10x >= min_10x_cov
+
+    depth_df = pd.DataFrame({
+        "feature":           panel_features,
+        "n_covered":         site_n_cov.astype(int),
+        "coverage_rate":     (site_n_cov / n_samples_total).round(4),
+        "n_10x":             site_n_10x.astype(int),
+        "coverage_rate_10x": cov_rate_10x.round(4),
+        "pass_coverage_qc":  pass_cov_qc,
+        "mean_depth":        site_mean.round(1),
+        "median_depth":      site_median.round(1),
+        "p10_depth":         site_p10.round(1),
+        "p90_depth":         site_p90.round(1),
+        "min_depth":         site_min.astype(int),
+        "max_depth":         site_max.astype(int),
+    })
+
+    n_removed_cov = int((~pass_cov_qc).sum())
+    if n_removed_cov > 0:
+        logger.warning(
+            f"  ≥10x覆盖过滤 (阈值 {min_10x_cov:.0%}): 移除 {n_removed_cov} 个低覆盖位点"
+        )
+        fail_rows = depth_df[~pass_cov_qc][["feature", "coverage_rate_10x"]].head(10)
+        for _, row in fail_rows.iterrows():
+            logger.debug(f"    移除: {row['feature']}  10x_rate={row['coverage_rate_10x']:.2%}")
+        panel_features = [f for f, p in zip(panel_features, pass_cov_qc) if p]
+    else:
+        logger.info(
+            f"  ≥10x覆盖过滤 (阈值 {min_10x_cov:.0%}): 全部 {len(panel_features)} 个位点通过"
+        )
+
+    # Update panel_selected to reflect coverage QC outcome
+    panel_set = set(panel_features)
+    importance_df["panel_selected"] = importance_df["feature"].isin(panel_set)
+
+    # 7. Save feature importance (after coverage QC so panel_selected is final)
     imp_path = os.path.join(result_dir, "feature_importance.csv")
     importance_df.to_csv(imp_path, index=False)
     logger.info(f"  特征重要性已保存: {imp_path}")
 
-    # 6. 保存 panel CpG 位点列表
+    # 8. Save panel CpG site list (coverage-QC-filtered)
     panel_df = pd.DataFrame({"feature": panel_features})
     panel_path = os.path.join(result_dir, "panel_cpg.csv")
     panel_df.to_csv(panel_path, index=False)
-    logger.info(f"  Panel CpG位点已保存: {panel_path}")
+    logger.info(f"  Panel CpG位点已保存: {panel_path} ({len(panel_features)} 个，≥10x覆盖过滤后)")
 
-    # 7. 保存特征矩阵（供 classify 步骤复用，避免重读 bedGraph）
-    #    存入 Wilcoxon 筛选前的全量特征（覆盖率过滤后），让 nested CV 在每折内独立筛选。
+    # 9. Save full feature matrix (pre-panel, for nested CV in classify)
     fm_path = os.path.join(result_dir, "feature_matrix.npz")
     np.savez(fm_path,
              X=X_all, y=y,
@@ -508,40 +684,19 @@ def select_features(workdir, result_dir, config, benign_samples, malignant_sampl
              region_in_88=region_in_88_all)
     logger.info(f"  特征矩阵已保存 (全量 {X_all.shape[1]} 特征，Wilcoxon 前，含区域归属): {fm_path}")
 
-    # 8. 计算 panel 位点深度统计并保存
-    D_panel = D[:, final_indices]            # shape: (n_samples, n_panel)
-    n_samples_total = D_panel.shape[0]
-
-    site_mean   = D_panel.mean(axis=0)
-    site_median = np.median(D_panel, axis=0)
-    site_p10    = np.percentile(D_panel, 10, axis=0)
-    site_p90    = np.percentile(D_panel, 90, axis=0)
-    site_min    = D_panel.min(axis=0)
-    site_max    = D_panel.max(axis=0)
-    site_n_cov  = (D_panel > 0).sum(axis=0)  # samples with depth > 0
-
-    depth_df = pd.DataFrame({
-        "feature":       panel_features,
-        "n_covered":     site_n_cov.astype(int),
-        "coverage_rate": (site_n_cov / n_samples_total).round(4),
-        "mean_depth":    site_mean.round(1),
-        "median_depth":  site_median.round(1),
-        "p10_depth":     site_p10.round(1),
-        "p90_depth":     site_p90.round(1),
-        "min_depth":     site_min.astype(int),
-        "max_depth":     site_max.astype(int),
-    })
+    # 10. Save depth stats
     depth_path = os.path.join(result_dir, "panel_cpg_depth.csv")
     depth_df.to_csv(depth_path, index=False)
     logger.info(f"  Panel位点深度统计已保存: {depth_path}")
 
-    # 深度摘要日志
     overall_mean   = float(site_mean.mean())
     overall_median = float(np.median(site_median))
     low5_count  = int((site_mean < 5).sum())
     low10_count = int((site_mean < 10).sum())
     ge20_count  = int((site_mean >= 20).sum())
+    n_pass_10x  = int(pass_cov_qc.sum())
     logger.info(f"  Panel深度摘要: 均值={overall_mean:.1f}x  中位数={overall_median:.1f}x  "
                 f"平均深度<5x: {low5_count}个  <10x: {low10_count}个  ≥20x: {ge20_count}个")
+    logger.info(f"  ≥10x样本覆盖率≥{min_10x_cov:.0%}: {n_pass_10x}/{len(depth_df)} 个位点通过")
 
     return panel_features, importance_df
