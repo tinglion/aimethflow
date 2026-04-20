@@ -4,8 +4,9 @@
 
 | 项目 | 决策 |
 |------|------|
-| 基础镜像 | `ubuntu:24.04` |
-| Python 依赖 | pip only，无 conda |
+| 基础镜像 | `continuumio/miniconda3` |
+| 生信工具 | conda（bioconda + conda-forge），与服务器环境一致 |
+| Python 依赖 | conda env `meth` (3.10.14) + pip |
 | GPU | 不启用 |
 | 参考基因组 | 外部挂载，不打包 |
 | data / temp / result | 外部挂载，不打包 |
@@ -16,42 +17,38 @@
 ## 镜像层结构
 
 ```
-ubuntu:24.04
-  ├─ [apt]  python3.12 + 编译依赖 + 系统库           ~200 MB
-  ├─ [apt/binary]  fastp / bwa-mem2 / samtools       ~150 MB
-  │              / MethylDackel / parallel
-  ├─ [pip]  requirements.txt + umi_tools + bwameth   ~600 MB
-  │         + jupyterlab
-  └─ [COPY] src/                                      ~10 MB
-            （data / temp / result 运行时挂载）
+continuumio/miniconda3
+  ├─ [conda] mamba（求解加速）
+  ├─ [mamba] create -n meth python=3.10.14    ~400 MB
+  ├─ [mamba] bioconda 生信工具                 ~800 MB
+  │          fastp / bwameth / samtools /
+  │          bedtools / methyldackel / umi_tools / pysam
+  ├─ [pip]   requirements.txt + jupyterlab    ~500 MB
+  └─ [COPY]  src/                              ~10 MB
+             （data / temp / result 运行时挂载）
 ```
 
 ---
 
 ## 工具安装方式
 
-### apt（Ubuntu 24.04 官方仓库）
+### conda（bioconda + conda-forge）
+
+| 工具 | 版本 | 用途 |
+|------|------|------|
+| fastp | 0.23.4 | 质控 trimming |
+| bwameth | latest | 亚硫酸盐比对 |
+| samtools | latest | BAM 处理 |
+| bedtools | latest | 区域过滤 |
+| methyldackel | latest | 甲基化提取 |
+| umi_tools | latest | UMI 去重 |
+| pysam | 0.22.0 | Python BAM 读取 |
+
+### pip（conda env 内）
 
 ```
-samtools          # ≥1.19，Ubuntu 24.04 仓库自带
-parallel          # gnu-parallel
-zlib1g-dev libcurl4-openssl-dev libssl-dev  # 编译依赖
-```
-
-### 预编译二进制（GitHub Release 直接下载）
-
-| 工具 | 来源 |
-|------|------|
-| fastp | OpenGene/fastp releases |
-| bwa-mem2 | bwa-meth/bwa-mem2 releases |
-| MethylDackel | dpryan79/MethylDackel releases |
-
-### pip install
-
-```
-umi_tools bwameth          # 生信 Python 工具
-jupyterlab ipykernel       # Jupyter 环境
--r requirements.txt        # 项目依赖
+jupyterlab ipykernel   # Jupyter 环境
+-r requirements.txt    # 项目 Python 依赖
 ```
 
 ---

@@ -1,8 +1,14 @@
+name: aimethflow
+
 services:
+  # ── 镜像构建基础（无 profile，供 docker compose build 使用）─────────────────
+  base:
+    build: .
+    image: aimethflow:latest
+
   # ── 全流程分析 ──────────────────────────────────────────────────────────────
   # 用法: docker compose --profile analysis run --rm analysis --steps 1-19
   analysis:
-    build: .
     image: aimethflow:latest
     profiles: ["analysis"]
     volumes:
@@ -21,7 +27,6 @@ services:
   # 用法: docker compose --profile jupyter up jupyter
   #       浏览器打开 http://localhost:8888
   jupyter:
-    build: .
     image: aimethflow:latest
     profiles: ["jupyter"]
     ports:

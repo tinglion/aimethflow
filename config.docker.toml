@@ -74,8 +74,8 @@ umi_tools = 1
 
 [tools]
 # venv 安装路径（Docker 内固定）
-conda_env_bin = "/opt/venv/bin"
-umi_tools_fallback = "/opt/venv/bin/umi_tools"
+conda_env_bin = "/opt/conda/envs/meth/bin"
+umi_tools_fallback = "/opt/conda/envs/meth/bin/umi_tools"
 
 [cleanup]
 delete_after_dedup = false

@@ -47,7 +47,36 @@ Key differences vs. the prior (Youxun) approach:
 
 > **仅支持 Linux / WSL2**，生信工具（bismark、bwameth、MethylDackel 等）不支持 Windows 原生环境。
 
-### 1. 创建 conda 环境
+### 方式 A — Docker（推荐，开箱即用）
+
+**前置条件**：Docker ≥ 24、Docker Compose Plugin（`docker compose` 命令可用）
+
+```bash
+# 1. 复制并填写路径
+cp .env.example .env
+# 编辑 .env：填写宿主机上的数据/参考基因组/结果目录
+
+# 2. 构建镜像（首次约 10–20 分钟，后续有缓存）
+docker compose --progress=plain build
+
+# 3a. 全流程分析
+docker compose --profile analysis run --rm analysis --steps 1-19
+
+# 3b. 分步执行（示例：只跑 preprocess）
+docker compose --profile analysis run --rm analysis --step preprocess /mnt/OC_plasma/
+
+# 4. 启动 JupyterLab 分步查看结果
+docker compose --profile jupyter up jupyter
+#    浏览器打开 http://localhost:8888
+```
+
+详细说明（挂载卷、工具版本、config.docker.toml 路径映射）→ [DOCKER.md](DOCKER.md)
+
+---
+
+### 方式 B — Conda（本地开发）
+
+#### 1. 创建 conda 环境
 
 ```bash
 conda create -n meth python=3.10.14 -y
@@ -71,7 +100,7 @@ pip install -e ".[ml]" -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 `[ml]` 包含 `xgboost` 和 `lightgbm`；不需要 ML 步骤时可省略：`pip install -e .`
 
-### 2. 参考基因组索引（首次运行）
+#### 2. 参考基因组索引（首次运行）
 
 ```bash
 # bwameth 索引（血浆流程，推荐）
@@ -92,7 +121,7 @@ bwameth c2t index files (all required, total ~17 GB):
 | `hg38.fa.bwameth.c2t.amb` | 42 KB | Ambiguous base table |
 | `hg38.fa.bwameth.c2t.ann` | 44 KB | Chromosome annotations (SAM header) |
 
-### 3. 辅助文件
+#### 3. 辅助文件
 
 | 文件 | 说明 |
 | --- | --- |
