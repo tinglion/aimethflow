@@ -20,9 +20,9 @@ classifiers = [
   "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
-  "Programming Language :: Python :: 3.10.14",
 ]
 
+# 核心依赖（必装）
 dependencies = [
   "biopython>=1.84",
   "matplotlib>=3.8.2",
@@ -31,13 +31,24 @@ dependencies = [
   "pandas>=2.2.0",
   "seaborn>=0.13.0",
   "scikit-learn>=1.3.0",
-  "xgboost>=2.0.0",
-  "lightgbm>=4.0.0",
-  "pysam>=0.22.0",
+  "pysam>=0.22.0",        # Linux/WSL only
   "openpyxl",
+  "fastapi>=0.110.0",
+  "uvicorn[standard]>=0.29.0",
 ]
 
 [project.optional-dependencies]
+# ML 分类器（Steps 14–16）
+ml = [
+  "xgboost>=2.0.0",
+  "lightgbm>=4.0.0",
+]
+# Jupyter 查看结果
+jupyter = [
+  "jupyterlab>=4.0.0",
+  "ipykernel>=6.0.0",
+]
+# 开发工具
 dev = [
   "pytest>=7.0.0",
   "pytest-cov>=4.0.0",
@@ -55,14 +66,11 @@ include = ["*"]
 
 [tool.black]
 line-length = 100
-target-version = ['py310', 'py311', 'py312']
+target-version = ['py310']
 
 [tool.coverage.run]
 source = ["src"]
-omit = [
-    "*/tests/*",
-    "*/test_*.py",
-]
+omit = ["*/tests/*", "*/test_*.py"]
 
 [tool.coverage.report]
 show_missing = true
@@ -74,12 +82,10 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 
-
 [project.scripts]
 methylation-extractor = "methylation.methylation_extractor:main"
 diff-methylation = "methylation.diff_methylation:main"
 methylation-visualizer = "methylation.methylation_visualizer:main"
-
 fq-inspect = "scripts.fq_inspect:main"
 fq-dump = "scripts.fq_dump:main"
 run-analysis = "scripts.run_analysis:main"

@@ -25,13 +25,11 @@ RUN mamba install -n meth -y -c conda-forge \
         jupyterlab ipykernel \
     && conda clean -afy
 
-# ── Python 依赖（conda env 内的 pip）─────────────────────────────────────────
-COPY requirements.txt /tmp/
-RUN /opt/conda/envs/meth/bin/pip install --no-cache-dir -r /tmp/requirements.txt
-
-# ── 应用代码 ──────────────────────────────────────────────────────────────────
+# ── 应用代码 + Python 依赖（pyproject.toml 单一来源）────────────────────────
 WORKDIR /app
-COPY src/ /app/src/
+COPY pyproject.toml README.md ./
+COPY src/ ./src/
+RUN /opt/conda/envs/meth/bin/pip install --no-cache-dir ".[ml]" -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 ENV PATH="/opt/conda/envs/meth/bin:$PATH"
 ENV PYTHONPATH=/app/src

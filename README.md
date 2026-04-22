@@ -100,11 +100,13 @@ conda install -y -c bioconda -c conda-forge \
     umi_tools \
     pysam=0.22.0
 
-# Python 依赖
+# Python 依赖（从 pyproject.toml 安装，单一来源）
 pip install -e ".[ml]" -i https://pypi.tuna.tsinghua.edu.cn/simple
+# 同时需要 Jupyter：pip install -e ".[ml,jupyter]"
+# 开发工具：        pip install -e ".[ml,jupyter,dev]"
 ```
 
-`[ml]` 包含 `xgboost` 和 `lightgbm`；不需要 ML 步骤时可省略：`pip install -e .`
+`[ml]` = xgboost + lightgbm；`[jupyter]` = jupyterlab + ipykernel；`[dev]` = 测试工具
 
 #### 2. 参考基因组索引（首次运行）
 
@@ -152,6 +154,7 @@ bwameth c2t index files (all required, total ~17 GB):
 │   │   └── methylation_visualizer.py
 │   ├── scripts/
 │   │   ├── run_analysis.py        # 主入口（CLI）
+│   │   ├── webui.py               # Web UI（FastAPI，端口 9999）
 │   │   └── modules/
 │   │       ├── alignment_utils.py     # 比对 / 去重 / 靶区过滤 / 提取
 │   │       ├── fastq_utils.py         # fastp 预处理
@@ -201,6 +204,33 @@ bwameth c2t index files (all required, total ~17 GB):
 ---
 
 ## 快速开始
+
+### Web UI（推荐）
+
+浏览器可视化操作配置、执行步骤、查看结果和报告。
+
+**Docker 模式**（`docker compose up -d` 后自动启动）：
+
+```text
+http://<server-ip>:9999
+```
+
+**本地开发模式**：
+
+```bash
+# 项目根目录下执行；METH_WORKDIR 告知 webui 在哪里找 config.toml / temp / result
+export METH_WORKDIR=$(pwd)          # Linux / macOS / WSL
+# $env:METH_WORKDIR = (Get-Location).Path  # PowerShell
+
+conda activate meth
+python src/scripts/webui.py
+# 浏览器打开 http://localhost:9999
+```
+
+> Web UI 读写的是 `$METH_WORKDIR/config.toml`，本地开发时即项目根下的 `config.toml`。
+> Docker 容器内挂载的是 `config.docker.toml`，两者路径不同，互不干扰。
+
+---
 
 ### 全流程一键运行
 

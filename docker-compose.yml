@@ -2,8 +2,9 @@ name: aimethflow
 
 x-analysis-volumes: &analysis-volumes
   volumes:
-    - ${DATA_DIR:?请在 .env 中设置 DATA_DIR}:/app/data:ro
-    - ${CONFIG_FILE:?请在 .env 中设置 CONFIG_FILE}:/app/config.toml:ro
+    # ── 本地配置（改了立即生效）──────────────────────────────────────────────
+    - ./config.docker.toml:/app/config.toml  # 编辑此文件调整参数，无需进容器
+    # ── 外部数据（宿主机绝对路径，在 .env 中配置）────────────────────────────
     - ${TISSUE_DIR:?请在 .env 中设置 TISSUE_DIR}:/mnt/OC_tissue:ro
     - ${PLASMA_DIR:?请在 .env 中设置 PLASMA_DIR}:/mnt/OC_plasma:ro
     - ${REF_DIR:?请在 .env 中设置 REF_DIR}:/mnt/ref:ro
@@ -18,10 +19,9 @@ services:
     build: .
     image: aimethflow:latest
 
-  # ── 常驻分析容器（默认启动，无需指定 profile）──────────────────────────────
+  # ── 常驻分析容器（默认启动）──────────────────────────────────────────────────
   # 启动: docker compose up -d
-  # 提交: docker compose exec analysis \
-  #           python /app/src/scripts/run_analysis.py --steps 1-19
+  # 提交: docker compose exec analysis python /app/src/scripts/run_analysis.py --steps 1-19
   # 进入: docker compose exec analysis bash
   analysis:
     image: aimethflow:latest
@@ -31,7 +31,7 @@ services:
     restart: unless-stopped
     command: sleep infinity
 
-  # ── 一次性运行（用完即删）──────────────────────────────────────────────────
+  # ── 一次性运行（用完即删）────────────────────────────────────────────────────
   # 用法: docker compose --profile run run --rm analysis-run \
   #           python /app/src/scripts/run_analysis.py --steps 1-19
   analysis-run:
@@ -39,7 +39,17 @@ services:
     profiles: ["run"]
     <<: *analysis-volumes
 
-  # ── JupyterLab（分步查看结果）──────────────────────────────────────────────
+  # ── Web UI（默认启动，端口 9999）─────────────────────────────────────────────
+  # 访问: http://<host>:9999
+  webui:
+    image: aimethflow:latest
+    <<: *analysis-volumes
+    ports:
+      - "9999:9999"
+    restart: unless-stopped
+    command: python /app/src/scripts/webui.py
+
+  # ── JupyterLab ────────────────────────────────────────────────────────────
   # 启动: docker compose --profile jupyter up -d jupyter
   #       浏览器打开 http://localhost:8888
   jupyter:
@@ -48,12 +58,12 @@ services:
     ports:
       - "8888:8888"
     volumes:
-      - ${DATA_DIR:?请在 .env 中设置 DATA_DIR}:/app/data:ro
-      - ${CONFIG_FILE:?请在 .env 中设置 CONFIG_FILE}:/app/config.toml:ro
+      - ./config.docker.toml:/app/config.toml
       - ${TISSUE_DIR:?请在 .env 中设置 TISSUE_DIR}:/mnt/OC_tissue:ro
       - ${PLASMA_DIR:?请在 .env 中设置 PLASMA_DIR}:/mnt/OC_plasma:ro
       - ${REF_DIR:?请在 .env 中设置 REF_DIR}:/mnt/ref:ro
       - ${TEMP_DIR:?请在 .env 中设置 TEMP_DIR}:/mnt/temp
+      - ${RESULT_DIR:?请在 .env 中设置 RESULT_DIR}:/mnt/result
       - ${NOTEBOOKS_DIR:-./notebooks}:/app/notebooks
     environment:
       - NCBI_API_KEY=${NCBI_API_KEY:-}
