@@ -241,9 +241,11 @@ run-analysis --plasma /mnt/f/meth/OC_plasma/
 ### 分步执行
 
 ```bash
+WORKDIR=temp/20260406
+
 # Step 4: preprocessing (creates workdir; subsequent steps reuse it)
-run-analysis --plasma --step preprocess /mnt/f/meth/OC_plasma/
-WORKDIR=$(ls -dt temp/20[0-9]* | head -1)   # capture generated workdir
+run-analysis --plasma --step preprocess /mnt/f/meth/OC_plasma/  --workdir $WORKDIR
+# WORKDIR=$(ls -dt temp/20[0-9]* | head -1)   # capture generated workdir
 
 # Steps 5–11: alignment / dedup / extraction / analysis
 run-analysis --plasma --step align          --workdir $WORKDIR

@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="zh">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>AIMethFlow</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
+  <style>
+    body {
+      background: #f8f9fa
+    }
+
+    .navbar-brand {
+      font-weight: 700;
+      letter-spacing: .05em
+    }
+
+    #log-box {
+      background: #1e1e1e;
+      color: #d4d4d4;
+      font-family: monospace;
+      font-size: .8rem;
+      height: 320px;
+      overflow-y: auto;
+      padding: .75rem;
+      border-radius: 4px;
+      white-space: pre-wrap
+    }
+
+    .step-row td {
+      vertical-align: middle
+    }
+
+    .badge-pending {
+      background: #6c757d
+    }
+
+    .badge-done {
+      background: #198754
+    }
+
+    .badge-running {
+      background: #0d6efd
+    }
+
+    .badge-error {
+      background: #dc3545
+    }
+
+    .badge-skipped {
+      background: #adb5bd
+    }
+
+    textarea.toml {
+      font-family: monospace;
+      font-size: .82rem;
+      height: 70vh
+    }
+
+    #results-list {
+      font-size: .85rem
+    }
+
+    .tab-content {
+      padding-top: 1rem
+    }
+  </style>
+</head>
+
+<body>
+  <nav class="navbar navbar-dark bg-dark px-3">
+    <span class="navbar-brand">⚗ AIMethFlow</span>
+    <span class="text-secondary small" id="nav-workdir"></span>
+  </nav>
+
+  <div class="container-fluid mt-2">
+    <ul class="nav nav-tabs" id="tabs">
+      <li class="nav-item"><a class="nav-link active" data-tab="pipeline" href="#">流程</a></li>
+      <li class="nav-item"><a class="nav-link" data-tab="config" href="#">配置</a></li>
+      <li class="nav-item"><a class="nav-link" data-tab="results" href="#">结果</a></li>
+      <li class="nav-item"><a class="nav-link" data-tab="report" href="#">报告</a></li>
+    </ul>
+
+    <!-- 流程 -->
+    <div id="tab-pipeline" class="tab-content">
+      <div class="d-flex align-items-center gap-2 mb-2">
+        <label class="form-label mb-0 text-nowrap small fw-bold">工作目录</label>
+        <select class="form-select form-select-sm" id="wd-select" style="max-width:280px"
+          onchange="loadSteps()"></select>
+        <button class="btn btn-sm btn-outline-secondary" onclick="loadWorkdirs()">刷新</button>
+      </div>
+      <div class="row">
+        <div class="col-lg-5">
+          <table class="table table-sm table-hover">
+            <thead>
+              <tr>
+                <th>步骤</th>
+                <th>状态</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="step-tbody"></tbody>
+          </table>
+        </div>
+        <div class="col-lg-7">
+          <div class="d-flex justify-content-between align-items-center mb-1">
+            <small class="text-muted" id="log-title">— 日志 —</small>
+            <button class="btn btn-sm btn-outline-secondary" onclick="clearLog()">清空</button>
+          </div>
+          <div id="log-box"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 配置 -->
+    <div id="tab-config" class="tab-content d-none">
+      <div class="d-flex gap-2 mb-2">
+        <button class="btn btn-primary btn-sm" onclick="saveConfig()">保存</button>
+        <button class="btn btn-outline-secondary btn-sm" onclick="loadConfig()">重新加载</button>
+        <span class="text-muted small align-self-center" id="cfg-status"></span>
+      </div>
+      <textarea class="form-control toml" id="cfg-editor" spellcheck="false"></textarea>
+    </div>
+
+    <!-- 结果 -->
+    <div id="tab-results" class="tab-content d-none">
+      <button class="btn btn-sm btn-outline-secondary mb-2" onclick="loadResults()">刷新</button>
+      <div id="results-list"></div>
+    </div>
+
+    <!-- 报告 -->
+    <div id="tab-report" class="tab-content d-none">
+      <div class="row" style="height:calc(100vh - 120px)">
+        <div class="col-lg-3 d-flex flex-column">
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <small class="fw-bold">报告列表</small>
+            <button class="btn btn-sm btn-outline-secondary py-0" onclick="loadReports()">刷新</button>
+          </div>
+          <div id="report-list" class="list-group overflow-auto flex-grow-1" style="font-size:.85rem"></div>
+        </div>
+        <div class="col-lg-9 h-100">
+          <iframe id="report-frame" class="w-100 h-100" style="border:none" src="about:blank"></iframe>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const BASE = '/methapi';
+    const STATUS_CLASS = {
+      pending: 'badge-pending', done: 'badge-done', running: 'badge-running',
+      error: 'badge-error', skipped: 'badge-skipped'
+    };
+    const STATUS_LABEL = { pending: '待执行', done: '完成', running: '执行中', error: '失败', skipped: '跳过' };
+    let currentJob = null;
+
+    // ── tabs ──────────────────────────────────────────────────────────────────────
+    document.querySelectorAll('[data-tab]').forEach(a => {
+      a.addEventListener('click', e => {
+        e.preventDefault();
+        document.querySelectorAll('[data-tab]').forEach(x => x.classList.remove('active'));
+        a.classList.add('active');
+        document.querySelectorAll('.tab-content').forEach(x => x.classList.add('d-none'));
+        document.getElementById('tab-' + a.dataset.tab).classList.remove('d-none');
+        if (a.dataset.tab === 'config') loadConfig();
+        if (a.dataset.tab === 'results') loadResults();
+        if (a.dataset.tab === 'report') loadReports();
+      });
+    });
+
+    // ── pipeline ──────────────────────────────────────────────────────────────────
+    async function loadWorkdirs() {
+      const r = await fetch(`${BASE}/api/workdirs`).then(r => r.json());
+      const sel = document.getElementById('wd-select');
+      const cur = sel.value;
+      sel.innerHTML = r.workdirs.map((d, i) =>
+        `<option value="${d}"${d === cur ? ' selected' : ''}>${d}${i === 0 ? ' (最新)' : ''}</option>`
+      ).join('') || '<option value="">（无工作目录）</option>';
+      loadSteps();
+    }
+
+    async function loadSteps() {
+      const wd = document.getElementById('wd-select').value;
+      const url = wd ? `${BASE}/api/steps?workdir=${encodeURIComponent(wd)}` : `${BASE}/api/steps`;
+      const r = await fetch(url).then(r => r.json());
+      if (r.workdir) document.getElementById('nav-workdir').textContent = r.workdir;
+      const tbody = document.getElementById('step-tbody');
+      tbody.innerHTML = r.steps.map(s => {
+        const cls = STATUS_CLASS[s.status] || 'badge-pending';
+        const lbl = STATUS_LABEL[s.status] || s.status;
+        return `<tr class="step-row">
+      <td>${s.label}</td>
+      <td><span class="badge ${cls}">${lbl}</span></td>
+      <td><button class="btn btn-sm btn-outline-primary py-0" onclick="runStep('${s.key}','${s.label}')">▶</button></td>
+    </tr>`;
+      }).join('');
+    }
+
+    async function runStep(key, label) {
+      if (currentJob && !confirm('当前有任务正在执行，确定要新建任务吗？')) return;
+      document.getElementById('log-title').textContent = `▶ ${label}`;
+      document.getElementById('log-box').innerHTML = '';
+      const wd = document.getElementById('wd-select').value;
+      const url = wd ? `${BASE}/api/run/${key}?workdir=${encodeURIComponent(wd)}` : `${BASE}/api/run/${key}`;
+      const r = await fetch(url, { method: 'POST' }).then(r => r.json());
+      if (r.job_id) streamLogs(r.job_id);
+    }
+
+    function streamLogs(jobId) {
+      currentJob = jobId;
+      const logBox = document.getElementById('log-box');
+      const es = new EventSource(`${BASE}/api/logs/${jobId}`);
+      es.onmessage = e => {
+        if (e.data.startsWith('__DONE_')) {
+          const rc = parseInt(e.data.replace('__DONE_', ''));
+          logBox.innerHTML += `\n[退出码: ${rc}]\n`;
+          es.close(); currentJob = null; loadSteps();
+          return;
+        }
+        logBox.innerHTML += escHtml(JSON.parse(e.data)) + '\n';
+        logBox.scrollTop = logBox.scrollHeight;
+      };
+      es.onerror = () => { es.close(); currentJob = null; };
+    }
+
+    function clearLog() { document.getElementById('log-box').innerHTML = ''; }
+    function escHtml(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+
+    // ── config ────────────────────────────────────────────────────────────────────
+    async function loadConfig() {
+      const r = await fetch(`${BASE}/api/config/raw`).then(r => r.json());
+      document.getElementById('cfg-editor').value = r.content;
+      document.getElementById('cfg-status').textContent = '';
+    }
+
+    async function saveConfig() {
+      const content = document.getElementById('cfg-editor').value;
+      const resp = await fetch(`${BASE}/api/config/raw`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content }),
+      });
+      const j = await resp.json();
+      const el = document.getElementById('cfg-status');
+      if (resp.ok) { el.style.color = 'green'; el.textContent = '✓ 已保存'; }
+      else { el.style.color = 'red'; el.textContent = '✗ ' + (j.detail || '保存失败'); }
+    }
+
+    // ── results ───────────────────────────────────────────────────────────────────
+    async function loadResults() {
+      const r = await fetch(`${BASE}/api/results`).then(r => r.json());
+      const el = document.getElementById('results-list');
+      if (!r.files.length) { el.innerHTML = '<p class="text-muted">暂无结果文件</p>'; return; }
+      el.innerHTML = '<table class="table table-sm"><thead><tr><th>文件</th><th>大小</th></tr></thead><tbody>'
+        + r.files.map(f => `<tr><td><code>${f.path}</code></td><td class="text-muted">${f.size_str}</td></tr>`).join('')
+        + '</tbody></table>';
+    }
+
+    // ── report ────────────────────────────────────────────────────────────────────
+    async function loadReports() {
+      const r = await fetch(`${BASE}/api/reports`).then(r => r.json());
+      const el = document.getElementById('report-list');
+      if (!r.reports.length) { el.innerHTML = '<p class="text-muted small px-1">暂无报告</p>'; return; }
+      el.innerHTML = r.reports.map((rep, i) =>
+        `<a href="#" class="list-group-item list-group-item-action py-1${i === 0 ? ' active' : ''}"
+        data-path="${rep.report_path}"
+        onclick="openReport(this);return false">${rep.name}</a>`
+      ).join('');
+      openReport(el.firstElementChild);
+    }
+
+    function openReport(el) {
+      document.querySelectorAll('#report-list a').forEach(a => a.classList.remove('active'));
+      el.classList.add('active');
+      document.getElementById('report-frame').src = '/meth/report-files/' + el.dataset.path;
+    }
+
+    // ── init ──────────────────────────────────────────────────────────────────────
+    loadWorkdirs();
+    setInterval(loadSteps, 8000);
+  </script>
+</body>
+
+</html>

@@ -14,17 +14,14 @@ x-analysis-volumes: &analysis-volumes
     - NCBI_API_KEY=${NCBI_API_KEY:-}
 
 services:
-  # ── 镜像构建基础（无 profile，供 docker compose build 使用）─────────────────
-  base:
-    build: .
-    image: aimethflow:latest
-
   # ── 常驻分析容器（默认启动，内含 Web UI）────────────────────────────────────
+  # 构建: docker compose build
   # 启动: docker compose up -d
   # Web UI: http://<host>:9999/meth/
   # 提交任务: 通过 Web UI 或 docker compose exec analysis python /app/src/scripts/run_analysis.py --steps 1-19
   # 进入 shell: docker compose exec analysis bash
   analysis:
+    build: .
     image: aimethflow:latest
     <<: *analysis-volumes
     ports:
