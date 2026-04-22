@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AIMethFlow Web UI — port 9999, prefix /meth"""
+"""AIMethFlow Web UI — port 9999, pages: /meth/, API: /methapi/"""
 import json
 import os
 import queue
@@ -13,7 +13,7 @@ from typing import Optional
 import toml
 import uvicorn
 from fastapi import APIRouter, FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel
 
 ROOT = Path(os.environ.get("METH_WORKDIR", "/app"))
@@ -21,25 +21,26 @@ CONFIG_PATH = ROOT / "config.toml"
 PYTHON = sys.executable
 
 app = FastAPI(title="AIMethFlow")
-router = APIRouter(prefix="/methapi")
+page_router = APIRouter(prefix="/meth")  # HTML pages
+api_router = APIRouter(prefix="/methapi")  # REST / SSE
 
 STEPS = [
-    ("preprocess",        "Step 4   预处理 fastp"),
-    ("align",             "Step 5   比对 bwameth"),
-    ("dedup",             "Step 6   去重 umi_tools"),
-    ("target",            "Step 7   靶区过滤"),
-    ("mbias",             "Step 7.5 M-bias 检查"),
-    ("extract",           "Step 8   甲基化提取"),
-    ("filter",            "Step 9   过滤"),
-    ("diff",              "Step 10  差异分析"),
-    ("visualize",         "Step 11  可视化"),
-    ("feature_select",    "Step 14  特征选择"),
-    ("outlier_detect",    "Step 14.5 异常检测"),
-    ("classify",          "Step 15  诊断分类"),
-    ("subtype_classify",  "Step 16  亚型分类"),
-    ("annotate",          "Step 17  位点注释"),
+    ("preprocess", "Step 4   预处理 fastp"),
+    ("align", "Step 5   比对 bwameth"),
+    ("dedup", "Step 6   去重 umi_tools"),
+    ("target", "Step 7   靶区过滤"),
+    ("mbias", "Step 7.5 M-bias 检查"),
+    ("extract", "Step 8   甲基化提取"),
+    ("filter", "Step 9   过滤"),
+    ("diff", "Step 10  差异分析"),
+    ("visualize", "Step 11  可视化"),
+    ("feature_select", "Step 14  特征选择"),
+    ("outlier_detect", "Step 14.5 异常检测"),
+    ("classify", "Step 15  诊断分类"),
+    ("subtype_classify", "Step 16  亚型分类"),
+    ("annotate", "Step 17  位点注释"),
     ("external_validate", "Step 18  公共数据验证"),
-    ("report",            "Step 19  生成报告"),
+    ("report", "Step 19  生成报告"),
 ]
 
 # job_id -> {proc, queue, step, status}
@@ -47,6 +48,7 @@ _jobs: dict[str, dict] = {}
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
+
 
 def _cfg() -> dict:
     if not CONFIG_PATH.exists():
@@ -82,7 +84,8 @@ def _latest_report() -> Optional[Path]:
 
 # ── API ───────────────────────────────────────────────────────────────────────
 
-@router.get("/api/config/raw")
+
+@api_router.get("/api/config/raw")
 def get_config_raw():
     if not CONFIG_PATH.exists():
         raise HTTPException(404)
@@ -93,7 +96,7 @@ class ConfigBody(BaseModel):
     content: str
 
 
-@router.post("/api/config/raw")
+@api_router.post("/api/config/raw")
 def save_config_raw(body: ConfigBody):
     try:
         toml.loads(body.content)
@@ -103,36 +106,46 @@ def save_config_raw(body: ConfigBody):
     return {"ok": True}
 
 
-@router.get("/api/steps")
+@api_router.get("/api/steps")
 def get_steps():
     state = _pipeline_state()
     wd = _latest_workdir()
     rows = []
     for key, label in STEPS:
         s = state.get(key, {})
-        rows.append({
-            "key": key,
-            "label": label,
-            "status": s.get("status", "pending"),
-            "completed_at": s.get("completed_at", ""),
-        })
+        rows.append(
+            {
+                "key": key,
+                "label": label,
+                "status": s.get("status", "pending"),
+                "completed_at": s.get("completed_at", ""),
+            }
+        )
     return {"steps": rows, "workdir": str(wd) if wd else None}
 
 
-@router.post("/api/run/{step}")
+@api_router.post("/api/run/{step}")
 def run_step(step: str, workdir: Optional[str] = None):
     if step not in {k for k, _ in STEPS}:
         raise HTTPException(400, f"未知步骤: {step}")
 
     wd = workdir or str(_latest_workdir() or "")
-    cmd = [PYTHON, str(ROOT / "src/scripts/run_analysis.py"),
-           "--plasma", "--step", step, "--config", str(CONFIG_PATH)]
+    cmd = [
+        PYTHON,
+        str(ROOT / "src/scripts/run_analysis.py"),
+        "--plasma",
+        "--step",
+        step,
+        "--config",
+        str(CONFIG_PATH),
+    ]
     if wd:
         cmd += ["--workdir", wd]
 
     log_q: queue.Queue = queue.Queue()
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            text=True, bufsize=1, cwd=str(ROOT))
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, cwd=str(ROOT)
+    )
 
     def _read():
         for line in proc.stdout:
@@ -146,7 +159,7 @@ def run_step(step: str, workdir: Optional[str] = None):
     return {"job_id": job_id}
 
 
-@router.get("/api/logs/{job_id}")
+@api_router.get("/api/logs/{job_id}")
 def stream_logs(job_id: str):
     if job_id not in _jobs:
         raise HTTPException(404)
@@ -163,12 +176,14 @@ def stream_logs(job_id: str):
                 break
             yield f"data: {json.dumps(line.rstrip())}\n\n"
 
-    return StreamingResponse(_gen(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache",
-                                      "X-Accel-Buffering": "no"})
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
-@router.get("/api/results")
+@api_router.get("/api/results")
 def list_results():
     try:
         rdir = ROOT / _cfg().get("directories", {}).get("result_dir", "result")
@@ -180,27 +195,60 @@ def list_results():
     for f in sorted(rdir.rglob("*"), key=lambda p: p.stat().st_mtime, reverse=True):
         if f.is_file() and not f.name.startswith("."):
             sz = f.stat().st_size
-            files.append({"path": str(f.relative_to(ROOT)),
-                          "size": sz,
-                          "size_str": f"{sz/1024:.1f} KB" if sz < 1048576 else f"{sz/1048576:.1f} MB"})
+            files.append(
+                {
+                    "path": str(f.relative_to(ROOT)),
+                    "size": sz,
+                    "size_str": f"{sz/1024:.1f} KB" if sz < 1048576 else f"{sz/1048576:.1f} MB",
+                }
+            )
     return {"files": files[:300]}
 
 
-@router.get("/report", response_class=HTMLResponse)
+@api_router.get("/api/reports")
+def list_reports_api():
+    try:
+        rdir = ROOT / _cfg().get("directories", {}).get("result_dir", "result")
+    except Exception:
+        rdir = ROOT / "result"
+    reports = []
+    for p in sorted(rdir.glob("*/*_report/analysis_report.html"), reverse=True):
+        reports.append({
+            "name": p.parent.name,
+            "report_path": str(p.relative_to(ROOT)).replace("\\", "/"),
+        })
+    return {"reports": reports}
+
+
+@page_router.get("/report-files/{file_path:path}")
+def serve_report_file(file_path: str):
+    target = (ROOT / file_path).resolve()
+    if not str(target).startswith(str(ROOT.resolve())):
+        raise HTTPException(403)
+    if not target.exists() or not target.is_file():
+        raise HTTPException(404)
+    return FileResponse(target)
+
+
+@page_router.get("/report")
 def view_report():
     r = _latest_report()
     if not r:
-        return HTMLResponse("<p style='padding:2rem;font-family:sans-serif'>暂无报告，请先运行 Step 19。</p>",
-                            status_code=404)
-    return HTMLResponse(r.read_text(encoding="utf-8"))
+        return HTMLResponse(
+            "<p style='padding:2rem;font-family:sans-serif'>暂无报告，请先运行 Step 19。</p>",
+            status_code=404,
+        )
+    rel = str(r.relative_to(ROOT)).replace("\\", "/")
+    return RedirectResponse(f"/meth/report-files/{rel}")
 
 
-@router.get("/", response_class=HTMLResponse)
+@page_router.get("/", response_class=HTMLResponse)
 def index():
     return HTMLResponse(HTML)
 
 
-app.include_router(router)
+app.include_router(page_router)
+app.include_router(api_router)
 
 # ── Web UI ────────────────────────────────────────────────────────────────────
 
@@ -279,15 +327,23 @@ textarea.toml{font-family:monospace;font-size:.82rem;height:70vh}
 
 <!-- 报告 -->
 <div id="tab-report" class="tab-content d-none">
-  <div class="d-flex gap-2 mb-2">
-    <button class="btn btn-sm btn-outline-secondary" onclick="reloadReport()">刷新报告</button>
+  <div class="row" style="height:calc(100vh - 120px)">
+    <div class="col-lg-3 d-flex flex-column">
+      <div class="d-flex justify-content-between align-items-center mb-2">
+        <small class="fw-bold">报告列表</small>
+        <button class="btn btn-sm btn-outline-secondary py-0" onclick="loadReports()">刷新</button>
+      </div>
+      <div id="report-list" class="list-group overflow-auto flex-grow-1" style="font-size:.85rem"></div>
+    </div>
+    <div class="col-lg-9 h-100">
+      <iframe id="report-frame" class="w-100 h-100" style="border:none" src="about:blank"></iframe>
+    </div>
   </div>
-  <iframe id="report-frame" class="iframe-wrap w-100" src="/meth/report"></iframe>
 </div>
 </div>
 
 <script>
-const BASE = '/meth';
+const BASE = '/methapi';
 const STATUS_CLASS = {pending:'badge-pending',done:'badge-done',running:'badge-running',
                       error:'badge-error',skipped:'badge-skipped'};
 const STATUS_LABEL = {pending:'待执行',done:'完成',running:'执行中',error:'失败',skipped:'跳过'};
@@ -303,6 +359,7 @@ document.querySelectorAll('[data-tab]').forEach(a => {
     document.getElementById('tab-' + a.dataset.tab).classList.remove('d-none');
     if (a.dataset.tab === 'config') loadConfig();
     if (a.dataset.tab === 'results') loadResults();
+    if (a.dataset.tab === 'report') loadReports();
   });
 });
 
@@ -383,8 +440,30 @@ async function loadResults() {
 }
 
 // ── report ────────────────────────────────────────────────────────────────────
+async function loadReports() {
+  const r = await fetch(`${BASE}/api/reports`).then(r => r.json());
+  const el = document.getElementById('report-list');
+  if (!r.reports.length) {
+    el.innerHTML = '<p class="text-muted small px-1">暂无报告</p>';
+    return;
+  }
+  el.innerHTML = r.reports.map((rep, i) =>
+    `<a href="#" class="list-group-item list-group-item-action py-1${i===0?' active':''}"
+        data-path="${rep.report_path}"
+        onclick="openReport(this);return false">${rep.name}</a>`
+  ).join('');
+  openReport(el.firstElementChild);
+}
+
+function openReport(el) {
+  document.querySelectorAll('#report-list a').forEach(a => a.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById('report-frame').src = '/meth/report-files/' + el.dataset.path;
+}
+
 function reloadReport() {
-  document.getElementById('report-frame').src = `${BASE}/report?` + Date.now();
+  const f = document.getElementById('report-frame');
+  f.src = f.src;
 }
 
 loadSteps();
@@ -395,5 +474,6 @@ setInterval(loadSteps, 8000);
 
 
 if __name__ == "__main__":
-    uvicorn.run("webui:app", host="0.0.0.0", port=9999, reload=False,
-                app_dir=str(Path(__file__).parent))
+    uvicorn.run(
+        "webui:app", host="0.0.0.0", port=9999, reload=True, app_dir=str(Path(__file__).parent)
+    )
