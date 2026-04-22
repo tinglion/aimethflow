@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AIMethFlow Web UI — port 9999"""
+"""AIMethFlow Web UI — port 9999, prefix /meth"""
 import json
 import os
 import queue
@@ -12,7 +12,7 @@ from typing import Optional
 
 import toml
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import APIRouter, FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -21,6 +21,7 @@ CONFIG_PATH = ROOT / "config.toml"
 PYTHON = sys.executable
 
 app = FastAPI(title="AIMethFlow")
+router = APIRouter(prefix="/methapi")
 
 STEPS = [
     ("preprocess",        "Step 4   预处理 fastp"),
@@ -81,7 +82,7 @@ def _latest_report() -> Optional[Path]:
 
 # ── API ───────────────────────────────────────────────────────────────────────
 
-@app.get("/api/config/raw")
+@router.get("/api/config/raw")
 def get_config_raw():
     if not CONFIG_PATH.exists():
         raise HTTPException(404)
@@ -92,7 +93,7 @@ class ConfigBody(BaseModel):
     content: str
 
 
-@app.post("/api/config/raw")
+@router.post("/api/config/raw")
 def save_config_raw(body: ConfigBody):
     try:
         toml.loads(body.content)
@@ -102,7 +103,7 @@ def save_config_raw(body: ConfigBody):
     return {"ok": True}
 
 
-@app.get("/api/steps")
+@router.get("/api/steps")
 def get_steps():
     state = _pipeline_state()
     wd = _latest_workdir()
@@ -118,7 +119,7 @@ def get_steps():
     return {"steps": rows, "workdir": str(wd) if wd else None}
 
 
-@app.post("/api/run/{step}")
+@router.post("/api/run/{step}")
 def run_step(step: str, workdir: Optional[str] = None):
     if step not in {k for k, _ in STEPS}:
         raise HTTPException(400, f"未知步骤: {step}")
@@ -145,7 +146,7 @@ def run_step(step: str, workdir: Optional[str] = None):
     return {"job_id": job_id}
 
 
-@app.get("/api/logs/{job_id}")
+@router.get("/api/logs/{job_id}")
 def stream_logs(job_id: str):
     if job_id not in _jobs:
         raise HTTPException(404)
@@ -167,7 +168,7 @@ def stream_logs(job_id: str):
                                       "X-Accel-Buffering": "no"})
 
 
-@app.get("/api/results")
+@router.get("/api/results")
 def list_results():
     try:
         rdir = ROOT / _cfg().get("directories", {}).get("result_dir", "result")
@@ -185,7 +186,7 @@ def list_results():
     return {"files": files[:300]}
 
 
-@app.get("/report", response_class=HTMLResponse)
+@router.get("/report", response_class=HTMLResponse)
 def view_report():
     r = _latest_report()
     if not r:
@@ -194,12 +195,14 @@ def view_report():
     return HTMLResponse(r.read_text(encoding="utf-8"))
 
 
-# ── Web UI ────────────────────────────────────────────────────────────────────
-
-@app.get("/", response_class=HTMLResponse)
+@router.get("/", response_class=HTMLResponse)
 def index():
     return HTMLResponse(HTML)
 
+
+app.include_router(router)
+
+# ── Web UI ────────────────────────────────────────────────────────────────────
 
 HTML = """<!DOCTYPE html>
 <html lang="zh">
@@ -279,11 +282,12 @@ textarea.toml{font-family:monospace;font-size:.82rem;height:70vh}
   <div class="d-flex gap-2 mb-2">
     <button class="btn btn-sm btn-outline-secondary" onclick="reloadReport()">刷新报告</button>
   </div>
-  <iframe id="report-frame" class="iframe-wrap w-100" src="/report"></iframe>
+  <iframe id="report-frame" class="iframe-wrap w-100" src="/meth/report"></iframe>
 </div>
 </div>
 
 <script>
+const BASE = '/meth';
 const STATUS_CLASS = {pending:'badge-pending',done:'badge-done',running:'badge-running',
                       error:'badge-error',skipped:'badge-skipped'};
 const STATUS_LABEL = {pending:'待执行',done:'完成',running:'执行中',error:'失败',skipped:'跳过'};
@@ -296,8 +300,7 @@ document.querySelectorAll('[data-tab]').forEach(a => {
     document.querySelectorAll('[data-tab]').forEach(x => x.classList.remove('active'));
     a.classList.add('active');
     document.querySelectorAll('.tab-content').forEach(x => x.classList.add('d-none'));
-    const t = document.getElementById('tab-' + a.dataset.tab);
-    t.classList.remove('d-none');
+    document.getElementById('tab-' + a.dataset.tab).classList.remove('d-none');
     if (a.dataset.tab === 'config') loadConfig();
     if (a.dataset.tab === 'results') loadResults();
   });
@@ -305,7 +308,7 @@ document.querySelectorAll('[data-tab]').forEach(a => {
 
 // ── pipeline ──────────────────────────────────────────────────────────────────
 async function loadSteps() {
-  const r = await fetch('/api/steps').then(r => r.json());
+  const r = await fetch(`${BASE}/api/steps`).then(r => r.json());
   if (r.workdir) document.getElementById('nav-workdir').textContent = r.workdir;
   const tbody = document.getElementById('step-tbody');
   tbody.innerHTML = '';
@@ -323,31 +326,25 @@ async function loadSteps() {
 }
 
 async function runStep(key, label) {
-  if (currentJob) {
-    if (!confirm('当前有任务正在执行，确定要新建任务吗？')) return;
-  }
+  if (currentJob && !confirm('当前有任务正在执行，确定要新建任务吗？')) return;
   document.getElementById('log-title').textContent = `▶ ${label}`;
-  const logBox = document.getElementById('log-box');
-  logBox.innerHTML = '';
-  const r = await fetch(`/api/run/${key}`, {method:'POST'}).then(r => r.json());
+  document.getElementById('log-box').innerHTML = '';
+  const r = await fetch(`${BASE}/api/run/${key}`, {method:'POST'}).then(r => r.json());
   if (r.job_id) streamLogs(r.job_id);
 }
 
 function streamLogs(jobId) {
   currentJob = jobId;
   const logBox = document.getElementById('log-box');
-  const es = new EventSource(`/api/logs/${jobId}`);
+  const es = new EventSource(`${BASE}/api/logs/${jobId}`);
   es.onmessage = e => {
     if (e.data.startsWith('__DONE_')) {
       const rc = parseInt(e.data.replace('__DONE_',''));
       logBox.innerHTML += `\\n[退出码: ${rc}]\\n`;
-      es.close();
-      currentJob = null;
-      loadSteps();
+      es.close(); currentJob = null; loadSteps();
       return;
     }
-    const line = JSON.parse(e.data);
-    logBox.innerHTML += escHtml(line) + '\\n';
+    logBox.innerHTML += escHtml(JSON.parse(e.data)) + '\\n';
     logBox.scrollTop = logBox.scrollHeight;
   };
   es.onerror = () => { es.close(); currentJob = null; };
@@ -358,14 +355,14 @@ function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replac
 
 // ── config ────────────────────────────────────────────────────────────────────
 async function loadConfig() {
-  const r = await fetch('/api/config/raw').then(r => r.json());
+  const r = await fetch(`${BASE}/api/config/raw`).then(r => r.json());
   document.getElementById('cfg-editor').value = r.content;
   document.getElementById('cfg-status').textContent = '';
 }
 
 async function saveConfig() {
   const content = document.getElementById('cfg-editor').value;
-  const r = await fetch('/api/config/raw', {
+  const r = await fetch(`${BASE}/api/config/raw`, {
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({content})
   });
@@ -377,7 +374,7 @@ async function saveConfig() {
 
 // ── results ───────────────────────────────────────────────────────────────────
 async function loadResults() {
-  const r = await fetch('/api/results').then(r => r.json());
+  const r = await fetch(`${BASE}/api/results`).then(r => r.json());
   const el = document.getElementById('results-list');
   if (!r.files.length) { el.innerHTML = '<p class="text-muted">暂无结果文件</p>'; return; }
   el.innerHTML = '<table class="table table-sm"><thead><tr><th>文件</th><th>大小</th></tr></thead><tbody>'
@@ -387,11 +384,9 @@ async function loadResults() {
 
 // ── report ────────────────────────────────────────────────────────────────────
 function reloadReport() {
-  const f = document.getElementById('report-frame');
-  f.src = '/report?' + Date.now();
+  document.getElementById('report-frame').src = `${BASE}/report?` + Date.now();
 }
 
-// ── init ──────────────────────────────────────────────────────────────────────
 loadSteps();
 setInterval(loadSteps, 8000);
 </script>

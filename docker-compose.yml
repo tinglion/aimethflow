@@ -19,17 +19,20 @@ services:
     build: .
     image: aimethflow:latest
 
-  # ── 常驻分析容器（默认启动）──────────────────────────────────────────────────
+  # ── 常驻分析容器（默认启动，内含 Web UI）────────────────────────────────────
   # 启动: docker compose up -d
-  # 提交: docker compose exec analysis python /app/src/scripts/run_analysis.py --steps 1-19
-  # 进入: docker compose exec analysis bash
+  # Web UI: http://<host>:9999/meth/
+  # 提交任务: 通过 Web UI 或 docker compose exec analysis python /app/src/scripts/run_analysis.py --steps 1-19
+  # 进入 shell: docker compose exec analysis bash
   analysis:
     image: aimethflow:latest
     <<: *analysis-volumes
+    ports:
+      - "9999:9999"
     stdin_open: true
     tty: true
     restart: unless-stopped
-    command: sleep infinity
+    command: python /app/src/scripts/webui.py
 
   # ── 一次性运行（用完即删）────────────────────────────────────────────────────
   # 用法: docker compose --profile run run --rm analysis-run \
@@ -38,16 +41,6 @@ services:
     image: aimethflow:latest
     profiles: ["run"]
     <<: *analysis-volumes
-
-  # ── Web UI（默认启动，端口 9999）─────────────────────────────────────────────
-  # 访问: http://<host>:9999
-  webui:
-    image: aimethflow:latest
-    <<: *analysis-volumes
-    ports:
-      - "9999:9999"
-    restart: unless-stopped
-    command: python /app/src/scripts/webui.py
 
   # ── JupyterLab ────────────────────────────────────────────────────────────
   # 启动: docker compose --profile jupyter up -d jupyter
