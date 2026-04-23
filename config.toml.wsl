@@ -1,6 +1,6 @@
-# 甲基化分析项目配置文件
+# AIMethFlow 配置文件
 # 项目名称
-name = "甲基化分析项目"
+name = "AIMethFlow"
 version = "1.0.0"
 
 # 数据目录配置
@@ -12,11 +12,11 @@ tissue_dir = "/mnt/f/meth/OC_tissue"
 # 血浆样本数据目录
 plasma_dir = "/mnt/f/meth/OC_plasma"
 # 样本信息Excel文件路径
-sample_info_excel = "data/卵巢癌fq编号与样本信息对应表v3.xlsx"
+sample_info_excel = "卵巢癌fq编号与样本信息对应表v3.xlsx"
 # 探针区域文件路径
-probe_panel_bed = "data/panel_B10308.bed"
+probe_panel_bed = "panel_B10308.bed"
 # 候选区域文件路径
-candidate_regions = "data/OC_tissue_88_regions.hg38.txt"
+candidate_regions = "OC_tissue_88_regions.hg38.txt"
 
 # 目录配置
 [directories]
@@ -26,6 +26,8 @@ temp_dir = "temp"
 result_dir = "result"
 # 日志文件目录
 log_dir = "logs"
+# 参考数据文件目录
+data_dir = "data"
 
 # FastQ分析配置
 [fastq]

@@ -7,14 +7,15 @@ version = "1.0.0"
 root_dir = "/mnt"
 tissue_dir = "/mnt/OC_tissue"
 plasma_dir = "/mnt/OC_plasma"
-sample_info_excel = "data/卵巢癌fq编号与样本信息对应表v3.xlsx"
-probe_panel_bed = "data/panel_B10308.bed"
-candidate_regions = "data/OC_tissue_88_regions.hg38.txt"
+sample_info_excel = "卵巢癌fq编号与样本信息对应表v3.xlsx"
+probe_panel_bed = "panel_B10308.bed"
+candidate_regions = "OC_tissue_88_regions.hg38.txt"
 
 [directories]
 temp_dir = "/mnt/temp"
 result_dir = "/mnt/result"
 log_dir = "/mnt/result/logs"
+data_dir = "/mnt/data"
 
 [fastq]
 progress_interval = 1000000

@@ -21,7 +21,7 @@
       color: #d4d4d4;
       font-family: monospace;
       font-size: .8rem;
-      height: 320px;
+      height: 500px;
       overflow-y: auto;
       padding: .75rem;
       border-radius: 4px;
@@ -86,7 +86,7 @@
     <div id="tab-pipeline" class="tab-content">
       <div class="d-flex align-items-center gap-2 mb-2">
         <label class="form-label mb-0 text-nowrap small fw-bold">Working Directory</label>
-        <select class="form-select form-select-sm" id="wd-select" style="max-width:280px"
+        <select class="form-select form-select-sm" id="wd-select" style="max-width:400px"
           onchange="loadSteps()"></select>
         <button class="btn btn-sm btn-outline-secondary" onclick="loadWorkdirs()">Refresh</button>
       </div>
@@ -106,7 +106,10 @@
         <div class="col-lg-7">
           <div class="d-flex justify-content-between align-items-center mb-1">
             <small class="text-muted" id="log-title">— Log —</small>
-            <button class="btn btn-sm btn-outline-secondary" onclick="clearLog()">Clear</button>
+            <div class="d-flex gap-1">
+              <button class="btn btn-sm btn-danger d-none" id="kill-btn" onclick="killJob()">&#9632; Stop</button>
+              <button class="btn btn-sm btn-outline-secondary" onclick="clearLog()">Clear</button>
+            </div>
           </div>
           <div id="log-box"></div>
         </div>
@@ -209,19 +212,34 @@
 
     function streamLogs(jobId) {
       currentJob = jobId;
+      document.getElementById('kill-btn').classList.remove('d-none');
       const logBox = document.getElementById('log-box');
       const es = new EventSource(`${BASE}/api/logs/${jobId}`);
       es.onmessage = e => {
         if (e.data.startsWith('__DONE_')) {
           const rc = parseInt(e.data.replace('__DONE_', ''));
           logBox.innerHTML += `\n[Exit code: ${rc}]\n`;
-          es.close(); currentJob = null; loadSteps();
+          es.close(); currentJob = null;
+          document.getElementById('kill-btn').classList.add('d-none');
+          loadSteps();
           return;
         }
         logBox.innerHTML += escHtml(JSON.parse(e.data)) + '\n';
         logBox.scrollTop = logBox.scrollHeight;
       };
-      es.onerror = () => { es.close(); currentJob = null; };
+      es.onerror = () => {
+        es.close(); currentJob = null;
+        document.getElementById('kill-btn').classList.add('d-none');
+      };
+    }
+
+    async function killJob() {
+      if (!currentJob) return;
+      await fetch(`${BASE}/api/jobs/${currentJob}/kill`, { method: 'POST' });
+      document.getElementById('log-box').innerHTML += '\n[Job stopped by user]\n';
+      currentJob = null;
+      document.getElementById('kill-btn').classList.add('d-none');
+      loadSteps();
     }
 
     function clearLog() { document.getElementById('log-box').innerHTML = ''; }

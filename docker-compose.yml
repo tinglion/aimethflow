@@ -8,6 +8,7 @@ x-analysis-volumes: &analysis-volumes
     - ${TISSUE_DIR:?请在 .env 中设置 TISSUE_DIR}:/mnt/OC_tissue:ro
     - ${PLASMA_DIR:?请在 .env 中设置 PLASMA_DIR}:/mnt/OC_plasma:ro
     - ${REF_DIR:?请在 .env 中设置 REF_DIR}:/mnt/ref:ro
+    - ${DATA_DIR:?请在 .env 中设置 DATA_DIR}:/mnt/data:ro
     - ${TEMP_DIR:?请在 .env 中设置 TEMP_DIR}:/mnt/temp
     - ${RESULT_DIR:?请在 .env 中设置 RESULT_DIR}:/mnt/result
   environment:
@@ -51,7 +52,8 @@ services:
       - ./config.docker.toml:/app/config.toml
       - ${TISSUE_DIR:?请在 .env 中设置 TISSUE_DIR}:/mnt/OC_tissue:ro
       - ${PLASMA_DIR:?请在 .env 中设置 PLASMA_DIR}:/mnt/OC_plasma:ro
-      - ${REF_DIR:?请在 .env 中设置 REF_DIR}:/mnt/ref:ro
+      - ${REF_DIR:?请在 .env 中设置 REF_DIR}:/mnt/ref
+      - ${DATA_DIR:?请在 .env 中设置 DATA_DIR}:/mnt/data:ro
       - ${TEMP_DIR:?请在 .env 中设置 TEMP_DIR}:/mnt/temp
       - ${RESULT_DIR:?请在 .env 中设置 RESULT_DIR}:/mnt/result
       - ${NOTEBOOKS_DIR:-./notebooks}:/app/notebooks
