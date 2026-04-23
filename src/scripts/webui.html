@@ -76,27 +76,27 @@
 
   <div class="container-fluid mt-2">
     <ul class="nav nav-tabs" id="tabs">
-      <li class="nav-item"><a class="nav-link active" data-tab="pipeline" href="#">流程</a></li>
-      <li class="nav-item"><a class="nav-link" data-tab="config" href="#">配置</a></li>
-      <li class="nav-item"><a class="nav-link" data-tab="results" href="#">结果</a></li>
-      <li class="nav-item"><a class="nav-link" data-tab="report" href="#">报告</a></li>
+      <li class="nav-item"><a class="nav-link active" data-tab="pipeline" href="#">Pipeline</a></li>
+      <li class="nav-item"><a class="nav-link" data-tab="config" href="#">Config</a></li>
+      <li class="nav-item"><a class="nav-link" data-tab="results" href="#">Results</a></li>
+      <li class="nav-item"><a class="nav-link" data-tab="report" href="#">Report</a></li>
     </ul>
 
     <!-- 流程 -->
     <div id="tab-pipeline" class="tab-content">
       <div class="d-flex align-items-center gap-2 mb-2">
-        <label class="form-label mb-0 text-nowrap small fw-bold">工作目录</label>
+        <label class="form-label mb-0 text-nowrap small fw-bold">Working Directory</label>
         <select class="form-select form-select-sm" id="wd-select" style="max-width:280px"
           onchange="loadSteps()"></select>
-        <button class="btn btn-sm btn-outline-secondary" onclick="loadWorkdirs()">刷新</button>
+        <button class="btn btn-sm btn-outline-secondary" onclick="loadWorkdirs()">Refresh</button>
       </div>
       <div class="row">
         <div class="col-lg-5">
           <table class="table table-sm table-hover">
             <thead>
               <tr>
-                <th>步骤</th>
-                <th>状态</th>
+                <th>Step</th>
+                <th>Status</th>
                 <th></th>
               </tr>
             </thead>
@@ -105,8 +105,8 @@
         </div>
         <div class="col-lg-7">
           <div class="d-flex justify-content-between align-items-center mb-1">
-            <small class="text-muted" id="log-title">— 日志 —</small>
-            <button class="btn btn-sm btn-outline-secondary" onclick="clearLog()">清空</button>
+            <small class="text-muted" id="log-title">— Log —</small>
+            <button class="btn btn-sm btn-outline-secondary" onclick="clearLog()">Clear</button>
           </div>
           <div id="log-box"></div>
         </div>
@@ -116,8 +116,8 @@
     <!-- 配置 -->
     <div id="tab-config" class="tab-content d-none">
       <div class="d-flex gap-2 mb-2">
-        <button class="btn btn-primary btn-sm" onclick="saveConfig()">保存</button>
-        <button class="btn btn-outline-secondary btn-sm" onclick="loadConfig()">重新加载</button>
+        <button class="btn btn-primary btn-sm" onclick="saveConfig()">Save</button>
+        <button class="btn btn-outline-secondary btn-sm" onclick="loadConfig()">Reload</button>
         <span class="text-muted small align-self-center" id="cfg-status"></span>
       </div>
       <textarea class="form-control toml" id="cfg-editor" spellcheck="false"></textarea>
@@ -125,7 +125,7 @@
 
     <!-- 结果 -->
     <div id="tab-results" class="tab-content d-none">
-      <button class="btn btn-sm btn-outline-secondary mb-2" onclick="loadResults()">刷新</button>
+      <button class="btn btn-sm btn-outline-secondary mb-2" onclick="loadResults()">Refresh</button>
       <div id="results-list"></div>
     </div>
 
@@ -134,8 +134,8 @@
       <div class="row" style="height:calc(100vh - 120px)">
         <div class="col-lg-3 d-flex flex-column">
           <div class="d-flex justify-content-between align-items-center mb-2">
-            <small class="fw-bold">报告列表</small>
-            <button class="btn btn-sm btn-outline-secondary py-0" onclick="loadReports()">刷新</button>
+            <small class="fw-bold">Reports</small>
+            <button class="btn btn-sm btn-outline-secondary py-0" onclick="loadReports()">Refresh</button>
           </div>
           <div id="report-list" class="list-group overflow-auto flex-grow-1" style="font-size:.85rem"></div>
         </div>
@@ -152,7 +152,7 @@
       pending: 'badge-pending', done: 'badge-done', running: 'badge-running',
       error: 'badge-error', skipped: 'badge-skipped'
     };
-    const STATUS_LABEL = { pending: '待执行', done: '完成', running: '执行中', error: '失败', skipped: '跳过' };
+    const STATUS_LABEL = { pending: 'Pending', done: 'Done', running: 'Running', error: 'Failed', skipped: 'Skipped' };
     let currentJob = null;
 
     // ── tabs ──────────────────────────────────────────────────────────────────────
@@ -175,8 +175,8 @@
       const sel = document.getElementById('wd-select');
       const cur = sel.value;
       sel.innerHTML = r.workdirs.map((d, i) =>
-        `<option value="${d}"${d === cur ? ' selected' : ''}>${d}${i === 0 ? ' (最新)' : ''}</option>`
-      ).join('') || '<option value="">（无工作目录）</option>';
+        `<option value="${d}"${d === cur ? ' selected' : ''}>${d}${i === 0 ? ' (latest)' : ''}</option>`
+      ).join('') || '<option value="">(no working directories)</option>';
       loadSteps();
     }
 
@@ -198,7 +198,7 @@
     }
 
     async function runStep(key, label) {
-      if (currentJob && !confirm('当前有任务正在执行，确定要新建任务吗？')) return;
+      if (currentJob && !confirm('A job is already running. Start a new one?')) return;
       document.getElementById('log-title').textContent = `▶ ${label}`;
       document.getElementById('log-box').innerHTML = '';
       const wd = document.getElementById('wd-select').value;
@@ -214,7 +214,7 @@
       es.onmessage = e => {
         if (e.data.startsWith('__DONE_')) {
           const rc = parseInt(e.data.replace('__DONE_', ''));
-          logBox.innerHTML += `\n[退出码: ${rc}]\n`;
+          logBox.innerHTML += `\n[Exit code: ${rc}]\n`;
           es.close(); currentJob = null; loadSteps();
           return;
         }
@@ -243,16 +243,16 @@
       });
       const j = await resp.json();
       const el = document.getElementById('cfg-status');
-      if (resp.ok) { el.style.color = 'green'; el.textContent = '✓ 已保存'; }
-      else { el.style.color = 'red'; el.textContent = '✗ ' + (j.detail || '保存失败'); }
+      if (resp.ok) { el.style.color = 'green'; el.textContent = '✓ Saved'; }
+      else { el.style.color = 'red'; el.textContent = '✗ ' + (j.detail || 'Save failed'); }
     }
 
     // ── results ───────────────────────────────────────────────────────────────────
     async function loadResults() {
       const r = await fetch(`${BASE}/api/results`).then(r => r.json());
       const el = document.getElementById('results-list');
-      if (!r.files.length) { el.innerHTML = '<p class="text-muted">暂无结果文件</p>'; return; }
-      el.innerHTML = '<table class="table table-sm"><thead><tr><th>文件</th><th>大小</th></tr></thead><tbody>'
+      if (!r.files.length) { el.innerHTML = '<p class="text-muted">No result files</p>'; return; }
+      el.innerHTML = '<table class="table table-sm"><thead><tr><th>File</th><th>Size</th></tr></thead><tbody>'
         + r.files.map(f => `<tr><td><code>${f.path}</code></td><td class="text-muted">${f.size_str}</td></tr>`).join('')
         + '</tbody></table>';
     }
@@ -261,7 +261,7 @@
     async function loadReports() {
       const r = await fetch(`${BASE}/api/reports`).then(r => r.json());
       const el = document.getElementById('report-list');
-      if (!r.reports.length) { el.innerHTML = '<p class="text-muted small px-1">暂无报告</p>'; return; }
+      if (!r.reports.length) { el.innerHTML = '<p class="text-muted small px-1">No reports</p>'; return; }
       el.innerHTML = r.reports.map((rep, i) =>
         `<a href="#" class="list-group-item list-group-item-action py-1${i === 0 ? ' active' : ''}"
         data-path="${rep.report_path}"

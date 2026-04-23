@@ -25,22 +25,22 @@ page_router = APIRouter(prefix="/meth")   # HTML pages
 api_router  = APIRouter(prefix="/methapi") # REST / SSE
 
 STEPS = [
-    ("preprocess",        "Step 4    预处理 fastp"),
-    ("align",             "Step 5    比对 bwameth"),
-    ("dedup",             "Step 6    去重 umi_tools"),
-    ("target",            "Step 7    靶区过滤"),
-    ("mbias",             "Step 7.5  M-bias 检查"),
-    ("extract",           "Step 8    甲基化提取"),
-    ("filter",            "Step 9    过滤"),
-    ("diff",              "Step 10   差异分析"),
-    ("visualize",         "Step 11   可视化"),
-    ("feature_select",    "Step 14   特征选择"),
-    ("outlier_detect",    "Step 14.5 异常检测"),
-    ("classify",          "Step 15   诊断分类"),
-    ("subtype_classify",  "Step 16   亚型分类"),
-    ("annotate",          "Step 17   位点注释"),
-    ("external_validate", "Step 18   公共数据验证"),
-    ("report",            "Step 19   生成报告"),
+    ("preprocess",        "Step 4    Preprocessing (fastp)"),
+    ("align",             "Step 5    Alignment (bwameth)"),
+    ("dedup",             "Step 6    Deduplication (umi_tools)"),
+    ("target",            "Step 7    Target Region Filter"),
+    ("mbias",             "Step 7.5  M-bias Check"),
+    ("extract",           "Step 8    Methylation Extraction"),
+    ("filter",            "Step 9    Filtering"),
+    ("diff",              "Step 10   Differential Analysis"),
+    ("visualize",         "Step 11   Visualization"),
+    ("feature_select",    "Step 14   Feature Selection"),
+    ("outlier_detect",    "Step 14.5 Outlier Detection"),
+    ("classify",          "Step 15   Diagnostic Classification"),
+    ("subtype_classify",  "Step 16   Subtype Classification"),
+    ("annotate",          "Step 17   Site Annotation"),
+    ("external_validate", "Step 18   External Validation"),
+    ("report",            "Step 19   Report Generation"),
 ]
 _STEP_KEYS = {k for k, _ in STEPS}
 
@@ -100,7 +100,7 @@ def save_config_raw(body: ConfigBody):
     try:
         toml.loads(body.content)
     except Exception as e:
-        raise HTTPException(400, f"TOML 解析错误: {e}")
+        raise HTTPException(400, f"TOML parse error: {e}")
     CONFIG_PATH.write_text(body.content, encoding="utf-8")
     return {"ok": True}
 
@@ -110,12 +110,12 @@ def save_config_raw(body: ConfigBody):
 @api_router.get("/api/workdirs")
 def list_workdirs():
     dirs = sorted(_temp_dir().glob("20[0-9]*"), reverse=True)
-    return {"workdirs": [str(d.relative_to(ROOT)).replace("\\", "/") for d in dirs]}
+    return {"workdirs": [str(d) for d in dirs]}
 
 
 @api_router.get("/api/steps")
 def get_steps(workdir: Optional[str] = None):
-    wd = (ROOT / workdir) if workdir else _latest_workdir()
+    wd = Path(workdir) if workdir else _latest_workdir()
     completed: set = set()
     if wd and wd.exists():
         p = wd / "pipeline_state.json"
@@ -143,7 +143,7 @@ def get_steps(workdir: Optional[str] = None):
 @api_router.post("/api/run/{step}")
 def run_step(step: str, workdir: Optional[str] = None):
     if step not in _STEP_KEYS:
-        raise HTTPException(400, f"未知步骤: {step}")
+        raise HTTPException(400, f"Unknown step: {step}")
 
     wd = workdir or str(_latest_workdir() or "")
     cmd = [PYTHON, str(ROOT / "src/scripts/run_analysis.py"),
@@ -201,7 +201,7 @@ def list_results():
         if f.is_file() and not f.name.startswith("."):
             sz = f.stat().st_size
             files.append({
-                "path": str(f.relative_to(ROOT)),
+                "path": str(f.relative_to(rdir)),
                 "size": sz,
                 "size_str": f"{sz/1024:.1f} KB" if sz < 1_048_576 else f"{sz/1_048_576:.1f} MB",
             })
@@ -212,9 +212,10 @@ def list_results():
 def list_reports():
     reports = []
     for p in sorted(_result_dir().glob("*/*_report/analysis_report.html"), reverse=True):
+        # Strip leading "/" so the path can be embedded in a URL segment
         reports.append({
             "name": p.parent.name,
-            "report_path": str(p.relative_to(ROOT)).replace("\\", "/"),
+            "report_path": str(p).lstrip("/"),
         })
     return {"reports": reports}
 
@@ -223,8 +224,10 @@ def list_reports():
 
 @page_router.get("/report-files/{file_path:path}")
 def serve_report_file(file_path: str):
-    target = (ROOT / file_path).resolve()
-    if not str(target).startswith(str(ROOT.resolve())):
+    # Restore the leading "/" that was stripped for URL embedding
+    target = Path("/" + file_path).resolve()
+    safe = {str(_result_dir().resolve()), str(_temp_dir().resolve()), str(ROOT.resolve())}
+    if not any(str(target).startswith(r) for r in safe):
         raise HTTPException(403)
     if not target.exists() or not target.is_file():
         raise HTTPException(404)
@@ -235,9 +238,9 @@ def serve_report_file(file_path: str):
 def view_report():
     r = _latest_report()
     if not r:
-        return HTMLResponse("<p style='padding:2rem;font-family:sans-serif'>暂无报告，请先运行 Step 19。</p>",
+        return HTMLResponse("<p style='padding:2rem;font-family:sans-serif'>No report found. Run Step 19 first.</p>",
                             status_code=404)
-    return RedirectResponse(f"/meth/report-files/{str(r.relative_to(ROOT)).replace(chr(92), '/')}")
+    return RedirectResponse(f"/meth/report-files/{str(r).lstrip('/')}")
 
 
 @page_router.get("/", response_class=HTMLResponse)
