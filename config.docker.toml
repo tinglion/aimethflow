@@ -1,124 +1,237 @@
-# Docker 容器专用配置（路径已改为容器内挂载路径）
-# 对应 docker-compose.yml 的 volume 映射
+# AIMethFlow configuration file (Docker container only; paths use container mount paths)
+# Corresponds to volume mappings in docker-compose.yml
 name = "AIMethFlow"
 version = "1.0.0"
 
+# Data directory configuration
 [data]
+# Root data directory
 root_dir = "/mnt"
+# Tissue sample data directory
 tissue_dir = "/mnt/OC_tissue"
+# Plasma sample data directory
 plasma_dir = "/mnt/OC_plasma"
-sample_info_excel = "卵巢癌fq编号与样本信息对应表v3.xlsx"
+# Sample info Excel file path
+sample_info_excel = "ovarian_fq_series_samples_v3.xlsx"
+# Probe panel BED file path
 probe_panel_bed = "panel_B10308.bed"
+# Candidate regions file path
 candidate_regions = "OC_tissue_88_regions.hg38.txt"
 
+# Directory configuration
 [directories]
+# Temporary file directory
 temp_dir = "/mnt/temp"
+# Result file directory
 result_dir = "/mnt/result"
+# Log file directory
 log_dir = "/mnt/result/logs"
+# Reference data directory
 data_dir = "/mnt/data"
 
+# FastQ analysis configuration
 [fastq]
+# Progress reporting interval (number of reads)
 progress_interval = 1000000
+# Sampling size
 sample_size = 1000
+# Random seed
 random_seed = 42
 
+# Methylation extraction configuration
 [extraction]
+# Minimum methylation quality score
 min_quality = 20
+# Minimum coverage depth
 min_depth = 10
+# Reference genome path
 reference_genome = "/mnt/ref/hg38.fa"
 
+# Differential methylation analysis configuration
 [diff_methylation]
+# Methylation difference threshold
 threshold = 0.2
+# Statistical significance level
 p_value = 0.05
+# Minimum coverage depth
 min_depth = 20
 
+# Visualization configuration
 [visualization]
+# Plot types: density, scatter, heatmap
 plot_types = ["density", "scatter", "heatmap"]
+# Figure width
 fig_width = 12
+# Figure height
 fig_height = 8
+# DPI
 dpi = 300
+# Font size
 font_size = 12
 
+# Methylation data filtering configuration
 [filtering]
+# Repeat element BED file path
 repeat_bed = "/mnt/ref/hg38.repeat.bed"
+# Promoter region BED file path
 promoter_bed = "/mnt/ref/hg38_upstream_2k_st.bed.gz"
+# Minimum depth
 min_depth = 5
+# Maximum depth
 max_depth = 50
 
-[plasma]
+# Tissue sample targeted methylation analysis configuration
+[tissue]
+# Aligner: "bismark" / "bwameth" (configured independently from [plasma] aligner)
 aligner = "bwameth"
+# Sheet name in sample info Excel (used for benign/malignant grouping)
+excel_sheet = "tissue"
+
+# Plasma cfDNA targeted methylation analysis configuration
+[plasma]
+# Aligner: "bismark" (accurate, slow; use for initial validation or when OT-OB directionality report is needed)
+#          "bwameth" (3-5x faster; recommended for batch analysis of 100+ samples)
+aligner = "bwameth"
+# Sheet name in sample info Excel (used for benign/malignant grouping)
+excel_sheet = "plasma"
+# UMI settings (6N at R2 5' end)
 umi_length = 6
 umi_location = "read2"
-trim_front1 = 12
-trim_front2 = 12
-trim_tail2 = 5
-min_length = 35
-min_quality = 20
-non_directional = false
-nOT = "0,0,0,20"
-nOB = "0,0,17,0"
+# Trimming parameters
+trim_front1 = 12        # Bases to trim from R1 5' end (low-complexity oligo)
+trim_front2 = 12        # Bases to trim from R2 5' end (oligo after UMI extraction)
+trim_tail2 = 5          # Bases to trim from R2 3' end (poly-C bias; adjust based on M-bias plot)
+min_length = 35         # Minimum read length after filtering
+min_quality = 20        # Minimum base quality score (Q value)
+# Alignment parameters
+non_directional = false # Library strand directionality (adjust after M-bias confirmation)
+# MethylDackel extract positional bias correction
+# Format: "R1_5',R1_3',R2_5',R2_3'" — number of bases to trim from each read end
+# Options:
+#   "auto"    — read from mbias_auto_trim.json written by --step mbias (recommended)
+#   "0,0,0,0" — no clipping (default when mbias has not been run)
+#   explicit  — e.g. "0,0,0,20"; always used as-is, mbias_auto_trim.json is ignored
+nOT = "auto"            # OT strand (auto-detected: 0,0,0,111 → manually tuned to 0,0,0,20)
+nOB = "auto"            # OB strand (auto-detected: 0,0,0,17,0)
+mbias_trim_percentile = 50
+# Alignment quality filter
 min_mapq = 40
+# Region coverage depth filter
 min_cpg_per_region = 3
 min_reads_per_region = 5
+# Methylated read threshold (strategy B, consistent with tissue)
 methylated_read_threshold = 0.60
 low_confidence_threshold = 0.40
+# Differential analysis thresholds
 diff_p_value = 0.05
 diff_delta_beta = 0.10
 
+# Parallel thread/process configuration (all step thread counts managed here)
 [threads]
+# fastp QC thread count
 fastp = 8
+# bwameth/bwa-mem alignment thread count
 bwameth = 8
+# samtools sort thread count (-@ parameter; actual threads used = sort_threads + 1)
 samtools_sort = 4
+# samtools sort per-thread memory limit
 samtools_sort_mem = "8G"
+# MethylDackel thread count (mbias / extract)
 methyldackel = 4
+# umi_tools dedup does not support multithreading; this setting is reserved
 umi_tools = 1
 
+# Tool path configuration
 [tools]
-# venv 安装路径（Docker 内固定）
+# venv installation path (fixed inside Docker)
 conda_env_bin = "/opt/conda/envs/meth/bin"
+# umi_tools fallback path
 umi_tools_fallback = "/opt/conda/envs/meth/bin/umi_tools"
 
+# Intermediate file cleanup strategy (whether to delete outputs from previous steps after each step completes)
+# All files are retained by default to reduce re-run costs; enable as needed when disk space is tight
 [cleanup]
+# After dedup, delete sorted BAM produced by align step (*.bwameth_pe.sorted.bam)
 delete_after_dedup = false
+# After target, delete BAM produced by dedup step (*.dedup.bam)
 delete_after_target = false
 
+# Machine learning classifier configuration (Step 14 feature selection + Step 15 diagnostic classification)
 [ml]
+# Feature selection mode: "union" (union of LASSO and RF, default) / "lasso" / "rf"
 feature_selection_mode = "union"
+# Minimum coverage threshold: DMC sites are retained only if covered in >= this fraction of samples (0~1)
 min_feature_coverage = 0.5
-sample_wilcox_p   = 0.05
-sample_delta_beta = 0.10
-sample_wilcox_p_88   = 0.05
-sample_delta_beta_88 = 0.1
+# Sample-level Wilcoxon pre-filtering thresholds (applied before LASSO/RF to filter spurious high |Δβ| sites from merged bedGraph)
+sample_wilcox_p   = 0.05   # p-value threshold (non-88-region sites, standard)
+sample_delta_beta = 0.10   # Sample-level |Δβ| threshold (non-88-region sites, standard)
+sample_wilcox_p_88   = 0.05   # p-value threshold (sites within 88 tissue candidate regions, relaxed prior)
+sample_delta_beta_88 = 0.1    # |Δβ| threshold (sites within 88 tissue candidate regions, relaxed prior)
+# Maximum number of input features for classifier (0 = no limit; recommend ~n_samples/10 to prevent overfitting)
 max_features_clf = 20
+# LASSO (L1 logistic) cross-validation folds
 lasso_cv_folds = 5
+# Random forest number of trees (used for both feature selection and classification)
 rf_n_estimators = 500
+# RF minimum feature importance threshold (0 = retain all features with importance > 0)
 rf_min_importance = 0.0
+# Logistic regression regularization parameter C (larger = weaker regularization)
 lr_C = 1.0
+# SVM regularization parameter C
 svm_C = 1.0
+# XGBoost parameters
 xgb_n_estimators = 200
 xgb_max_depth = 4
 xgb_learning_rate = 0.1
+# LightGBM parameters
 lgbm_n_estimators = 200
 lgbm_max_depth = 4
 lgbm_learning_rate = 0.1
+# Sample outlier detection parameters
+# Minimum sample coverage: triggers coverage outlier flag when fraction of CpG sites covered < this value
 outlier_coverage_min = 0.30
+# PCA within-group distance z-score threshold: exceeding this triggers PCA outlier flag
 outlier_pca_z = 2.5
+# Minimum fraction of samples with >= 10x sequencing depth at panel sites (sites below this are forcibly removed from final panel)
 min_10x_coverage_rate = 0.80
+# Sample IDs confirmed for exclusion (fill in after reviewing outlier_report.csv)
 exclude_samples = ['B10013', 'B10022', 'B10018', 'B10268']
 
+# Site annotation configuration (Step 17)
 [annotation]
+# Upstream/downstream window around each CpG site for EWAS Catalog lookup (bp)
 ewas_window = 500
+# Ensembl gene overlap lookup window (bp)
 gene_window = 2000
+# API call interval (seconds) to avoid rate limit
 api_delay = 0.25
+# HTTP request timeout (seconds)
 api_timeout = 15
+# Local hg38 CpG island BED file path (leave empty to auto-download from UCSC)
 cpgi_bed = ""
+# Whether to query EWAS Atlas (CNCB NGDC) for positional associations
 ewas_atlas = true
+# Whether to search PubMed: "{gene} plasma methylation cancer"
 pubmed_search = true
+# NCBI API key (optional; providing it raises rate limit from 3 to 10 req/s; can be left empty)
 ncbi_api_key = ""
+# Maximum number of PubMed results returned per gene
 pubmed_max_hits = 20
 
+# Temporal validation configuration (Step 17 — plasma mode only)
+[temporal_validate]
+# Samples collected before this date go to the train set; on/after → validation set
+cutoff_date = "2024-07-01"
+# Number of top features (by LOO-CV selection frequency) to use for training
+top_n_features = 20
+
+# Logging configuration
 [logging]
+# Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
 level = "INFO"
+# Log format
 format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+# Whether to save logs to file
 save_to_file = true
+# Whether to output logs to console
 console_output = true

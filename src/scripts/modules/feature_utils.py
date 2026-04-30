@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """
-feature_utils.py - 特征选择模块（Step 14）
+feature_utils.py - Feature selection module (Step 14)
 
-从每个样本的 _CpG.bedGraph 文件构建特征矩阵，
-使用 LASSO（L1 logistic）+ 随机森林重要性进行特征筛选，
-输出 panel_cpg.csv（入选位点列表）和 feature_importance.csv。
+Builds a feature matrix from per-sample _CpG.bedGraph files and runs
+LASSO (L1 logistic) + Random Forest feature selection.
 
-依赖：scikit-learn、numpy、pandas
-安装：pip install scikit-learn matplotlib seaborn
+Outputs:
+    feature_importance.csv  — LASSO coefficient + RF importance per site
+    panel_cpg.csv           — Selected panel CpG sites (after coverage QC)
+    panel_cpg_depth.csv     — Per-site depth statistics
+    feature_matrix.npz      — Full feature matrix (pre-panel, for classify step)
+    wilcoxon_stats.csv      — Per-site Wilcoxon test statistics
+
+Dependencies: scikit-learn, numpy, pandas, scipy
 """
 
 import os
@@ -20,14 +25,14 @@ from utils.logger import logger
 
 
 # ──────────────────────────────────────────────────────
-# 区域归属检查
+# Region membership check
 # ──────────────────────────────────────────────────────
 
 def _check_region_membership(feature_names, candidate_regions_file):
     """
-    检查每个 CpG 位点（格式 "chr:pos"）是否落在 88 个组织候选区域内。
-
-    使用 bisect 二分查找，复杂度 O(n_features × log(n_regions_per_chrom))。
+    Check whether each CpG site (format "chr:pos") falls within the 88
+    tissue candidate regions.  Uses bisect binary search:
+    O(n_features × log(n_regions_per_chrom)).
 
     Returns:
         np.ndarray(bool), shape (n_features,)
@@ -37,7 +42,7 @@ def _check_region_membership(feature_names, candidate_regions_file):
     if not candidate_regions_file or not os.path.exists(candidate_regions_file):
         return in_region
 
-    # 按染色体构建排序区间列表
+    # Build sorted interval lists per chromosome
     regions = defaultdict(list)
     with open(candidate_regions_file, encoding="utf-8") as f:
         for line in f:
@@ -50,7 +55,7 @@ def _check_region_membership(feature_names, candidate_regions_file):
     for chrom in regions:
         regions[chrom].sort()
 
-    # 为每条染色体提取起始坐标数组（用于 bisect）
+    # Extract start arrays for bisect
     starts_map = {chrom: [r[0] for r in rs] for chrom, rs in regions.items()}
 
     for i, name in enumerate(feature_names):
@@ -70,31 +75,31 @@ def _check_region_membership(feature_names, candidate_regions_file):
 
 
 # ──────────────────────────────────────────────────────
-# 特征矩阵构建
+# Feature matrix construction
 # ──────────────────────────────────────────────────────
 
 def build_feature_matrix(workdir, result_dir, benign_samples, malignant_samples, config=None):
     """
-    从每个样本的 _CpG.bedGraph 构建特征矩阵及深度矩阵。
+    Build feature matrix and depth matrix from per-sample _CpG.bedGraph files.
 
-    候选位点由数据驱动发现：在 ≥ min_feature_coverage 比例的样本中有深度覆盖的 CpG。
-    不再依赖 diff_methylation.txt，直接从个体 bedGraph 聚合候选集。
-    同时标注每个位点是否属于 88 个组织候选区域（用于后续分层 Wilcoxon 筛选）。
+    Candidate sites are data-driven: CpGs covered in >= min_feature_coverage
+    fraction of all samples.  Each site is also annotated with whether it falls
+    inside the 88 tissue candidate regions (used for stratified Wilcoxon filtering).
 
     Args:
-        workdir:           临时目录（含 {sample}_CpG.bedGraph）
-        result_dir:        结果目录（含 diff_methylation.txt，仅供参考/日志）
-        benign_samples:    良性样本 ID 列表
-        malignant_samples: 恶性样本 ID 列表
-        config:            配置对象
+        workdir:           Temp dir containing {sample}_CpG.bedGraph files
+        result_dir:        Result dir (diff_methylation.txt read for info only)
+        benign_samples:    List of benign sample IDs
+        malignant_samples: List of malignant sample IDs
+        config:            Config dict
 
     Returns:
-        X:             np.ndarray (n_samples, n_features)，meth 值 0-1，NaN 表示无覆盖
-        y:             np.ndarray (n_samples,)，0=良性 1=恶性
+        X:             np.ndarray (n_samples, n_features), methylation 0-1, NaN = no coverage
+        y:             np.ndarray (n_samples,), 0=benign 1=malignant
         sample_ids:    list[str]
-        feature_names: list[str]，格式 "chr:pos"
-        D:             np.ndarray (n_samples, n_features)，深度，0 表示无覆盖
-        region_in_88:  np.ndarray(bool) (n_features,)，是否属于 88 个组织候选区域
+        feature_names: list[str], format "chr:pos"
+        D:             np.ndarray (n_samples, n_features), depth, 0 = no coverage
+        region_in_88:  np.ndarray(bool) (n_features,), True if in 88 candidate regions
     """
     ml_cfg = (config or {}).get("ml", {})
     min_coverage = ml_cfg.get("min_feature_coverage", 0.5)
@@ -103,9 +108,7 @@ def build_feature_matrix(workdir, result_dir, benign_samples, malignant_samples,
                   [(sid, 1) for sid in malignant_samples]
     n_samples = len(all_samples)
 
-    # ── Pass 1: 读取所有样本的 bedGraph，聚合位点覆盖计数 ──
-    # pos_count: (chrom, pos) → 覆盖该位点的样本数
-    # raw_data: sample_id → {(chrom, pos): (meth_pct, depth)}
+    # ── Pass 1: read all bedGraphs, aggregate site coverage counts ──
     pos_count = {}
     raw_data = {}
 
@@ -113,7 +116,7 @@ def build_feature_matrix(workdir, result_dir, benign_samples, malignant_samples,
     for sample_id, _ in all_samples:
         bedgraph = os.path.join(workdir, f"{sample_id}_CpG.bedGraph")
         if not os.path.exists(bedgraph):
-            logger.warning(f"  bedGraph不存在，跳过: {bedgraph}")
+            logger.warning(f"  bedGraph not found, skipping: {bedgraph}")
             missing_samples.append(sample_id)
             raw_data[sample_id] = {}
             continue
@@ -135,9 +138,9 @@ def build_feature_matrix(workdir, result_dir, benign_samples, malignant_samples,
         raw_data[sample_id] = sd
 
     if missing_samples:
-        logger.warning(f"  {len(missing_samples)} 个样本无bedGraph: {missing_samples}")
+        logger.warning(f"  {len(missing_samples)} sample(s) missing bedGraph: {missing_samples}")
 
-    # ── 按覆盖率过滤候选位点 ──
+    # ── Filter candidate sites by coverage rate ──
     min_count = max(1, int(round(n_samples * min_coverage)))
     candidate_positions = sorted(
         [(chrom, pos) for (chrom, pos), cnt in pos_count.items() if cnt >= min_count],
@@ -145,22 +148,22 @@ def build_feature_matrix(workdir, result_dir, benign_samples, malignant_samples,
     )
     n_features = len(candidate_positions)
 
-    # 与 diff_methylation.txt 对比（仅日志，不影响候选集）
+    # Compare against diff_methylation.txt (informational only)
     diff_file = os.path.join(result_dir, "diff_methylation.txt")
     if os.path.exists(diff_file):
         try:
             _ddf = pd.read_csv(diff_file, sep="\t", header=None,
                                names=["chrom", "pos", "m1", "m2", "diff"])
             _ddf = _ddf[pd.to_numeric(_ddf["pos"], errors="coerce").notna()]
-            logger.info(f"  数据驱动候选位点: 总覆盖 {len(pos_count)} 个，"
-                        f"≥{min_coverage:.0%}样本覆盖 → {n_features} 个  "
-                        f"(diff_methylation.txt DMC: {len(_ddf)} 个，仅供参考)")
+            logger.info(f"  Data-driven candidates: {len(pos_count)} total covered sites, "
+                        f">={min_coverage:.0%} sample coverage → {n_features} sites  "
+                        f"(diff_methylation.txt DMC: {len(_ddf)}, for reference only)")
         except Exception:
-            logger.info(f"  数据驱动候选位点: 总覆盖 {len(pos_count)} 个，"
-                        f"≥{min_coverage:.0%}样本覆盖 → {n_features} 个")
+            logger.info(f"  Data-driven candidates: {len(pos_count)} total covered sites, "
+                        f">={min_coverage:.0%} sample coverage → {n_features} sites")
     else:
-        logger.info(f"  数据驱动候选位点: 总覆盖 {len(pos_count)} 个，"
-                    f"≥{min_coverage:.0%}样本覆盖 → {n_features} 个")
+        logger.info(f"  Data-driven candidates: {len(pos_count)} total covered sites, "
+                    f">={min_coverage:.0%} sample coverage → {n_features} sites")
 
     if n_features == 0:
         y = np.array([label for _, label in all_samples])
@@ -171,7 +174,7 @@ def build_feature_matrix(workdir, result_dir, benign_samples, malignant_samples,
     feature_names = [f"{chrom}:{pos}" for chrom, pos in candidate_positions]
     pos_index = {cp: i for i, cp in enumerate(candidate_positions)}
 
-    # ── Pass 2: 填充特征矩阵 ──
+    # ── Pass 2: fill feature matrix ──
     X = np.full((n_samples, n_features), np.nan)
     D = np.zeros((n_samples, n_features), dtype=np.int32)
     y = np.array([label for _, label in all_samples])
@@ -185,23 +188,23 @@ def build_feature_matrix(workdir, result_dir, benign_samples, malignant_samples,
                 X[i, j] = meth_pct / 100.0
                 D[i, j] = depth
 
-    # ── 88 区域归属标注 ──
+    # ── Annotate 88-region membership ──
     candidate_regions_file = (config or {}).get("data", {}).get("candidate_regions", "")
     region_in_88 = _check_region_membership(feature_names, candidate_regions_file)
     n_in_88  = int(region_in_88.sum())
     n_out_88 = n_features - n_in_88
-    logger.info(f"  88 组织区域内: {n_in_88} 个  区域外: {n_out_88} 个  "
-                f"(共 {n_features} 个候选位点)")
+    logger.info(f"  In 88 tissue regions: {n_in_88}  Outside: {n_out_88}  "
+                f"(total {n_features} candidate sites)")
 
-    logger.info(f"  特征矩阵: {X.shape[0]} 样本 × {X.shape[1]} 特征  "
-                f"(良性={int(sum(y==0))}, 恶性={int(sum(y==1))})")
-    logger.info(f"  缺失值比例: {np.isnan(X).mean():.2%}")
+    logger.info(f"  Feature matrix: {X.shape[0]} samples × {X.shape[1]} features  "
+                f"(benign={int(sum(y==0))}, malignant={int(sum(y==1))})")
+    logger.info(f"  Missing rate: {np.isnan(X).mean():.2%}")
 
     return X, y, sample_ids, feature_names, D, region_in_88
 
 
 def _impute(X):
-    """按列中位数插补 NaN。"""
+    """Impute NaN with column median."""
     X_imp = X.copy()
     col_medians = np.nanmedian(X_imp, axis=0)
     for j in range(X_imp.shape[1]):
@@ -211,18 +214,18 @@ def _impute(X):
 
 
 # ──────────────────────────────────────────────────────
-# LASSO 特征选择（L1 正则化逻辑回归）
+# LASSO feature selection (L1 regularised logistic)
 # ──────────────────────────────────────────────────────
 
 def run_lasso_selection(X, y, config=None):
     """
-    使用带 L1 惩罚的逻辑回归（LogisticRegressionCV）选择特征。
+    Select features using L1-penalised logistic regression (LogisticRegressionCV).
 
-    先插补 NaN，再标准化，再用交叉验证选择最优正则化强度。
+    Imputes NaN → standardises → cross-validates to find optimal C.
 
     Returns:
-        selected_indices: np.ndarray，非零系数的特征列索引
-        coefs:            np.ndarray，全部特征的系数（零=未选中）
+        selected_indices: np.ndarray, column indices with non-zero coefficients
+        coefs:            np.ndarray, full coefficient vector (0 = not selected)
     """
     from sklearn.linear_model import LogisticRegressionCV
     from sklearn.preprocessing import StandardScaler
@@ -245,24 +248,24 @@ def run_lasso_selection(X, y, config=None):
     )
     clf.fit(X_scaled, y)
 
-    coefs = clf.coef_[0]  # shape: (n_features,)
+    coefs = clf.coef_[0]
     selected_indices = np.where(coefs != 0)[0]
-    logger.info(f"  LASSO 选择: {len(selected_indices)}/{len(coefs)} 个特征  "
-                f"(最优C={clf.C_[0]:.4f})")
+    logger.info(f"  LASSO: {len(selected_indices)}/{len(coefs)} features selected  "
+                f"(best C={clf.C_[0]:.4f})")
     return selected_indices, coefs
 
 
 # ──────────────────────────────────────────────────────
-# 随机森林特征重要性
+# Random Forest feature importance
 # ──────────────────────────────────────────────────────
 
 def run_rf_importance(X, y, config=None):
     """
-    使用随机森林计算特征重要性，返回重要性 > min_importance 的特征索引。
+    Compute feature importances with Random Forest.
 
     Returns:
-        selected_indices: np.ndarray，重要性达标的特征列索引
-        importances:      np.ndarray，全部特征的重要性分数
+        selected_indices: np.ndarray, indices with importance > min_importance
+        importances:      np.ndarray, full importance scores
     """
     from sklearn.ensemble import RandomForestClassifier
 
@@ -281,33 +284,35 @@ def run_rf_importance(X, y, config=None):
 
     importances = rf.feature_importances_
     selected_indices = np.where(importances > min_importance)[0]
-    logger.info(f"  RF 选择: {len(selected_indices)}/{len(importances)} 个特征  "
+    logger.info(f"  RF: {len(selected_indices)}/{len(importances)} features selected  "
                 f"(min_importance={min_importance})")
     return selected_indices, importances
 
 
 # ──────────────────────────────────────────────────────
-# 样本异常检测
+# Sample outlier detection
 # ──────────────────────────────────────────────────────
 
 def detect_sample_outliers(X, y, sample_ids, config=None):
     """
-    多角度识别潜在异常样本。不自动排除；结果供用户判断后写入 exclude_samples。
+    Identify potentially abnormal samples from multiple angles.
+    Does NOT automatically exclude them — results are written to
+    outlier_report.csv for the user to review.
 
-    三种检测方法（需 ≥2 个同时触发才标记为 suspect）：
-      1. 覆盖率：NaN 占比 > (1 - outlier_coverage_min)
-      2. 组内 PCA 距离：PC1-2 欧氏距离的组内 z-score > outlier_pca_z
-      3. Isolation Forest：组内异常分数排在后 25%
+    Three detection methods (sample flagged as suspect if >= 2 trigger):
+      1. Coverage: NaN fraction > (1 - outlier_coverage_min)
+      2. Intra-group PCA distance: z-score > outlier_pca_z
+      3. Isolation Forest: bottom 25% anomaly score within group
 
     Args:
-        X:          (n_samples, n_features)，NaN 表示无覆盖
-        y:          (n_samples,)，0=良性 1=恶性
+        X:          (n_samples, n_features), NaN = no coverage
+        y:          (n_samples,), 0=benign 1=malignant
         sample_ids: list[str]
-        config:     配置对象
+        config:     config dict
 
     Returns:
-        df:          pd.DataFrame，包含各项指标，已排序（suspect 优先）
-        suspect_ids: list[str]，疑似异常样本 ID
+        df:          pd.DataFrame with per-sample metrics, sorted (suspect first)
+        suspect_ids: list[str], suspected outlier sample IDs
     """
     try:
         from sklearn.decomposition import PCA
@@ -315,7 +320,7 @@ def detect_sample_outliers(X, y, sample_ids, config=None):
         from sklearn.ensemble import IsolationForest
         import pandas as pd
     except ImportError as e:
-        logger.warning(f"detect_sample_outliers: 缺少依赖 {e}，跳过异常检测")
+        logger.warning(f"detect_sample_outliers: missing dependency {e}, skipping")
         return pd.DataFrame(), []
 
     ml_cfg = (config or {}).get("ml", {})
@@ -325,9 +330,9 @@ def detect_sample_outliers(X, y, sample_ids, config=None):
     n_samples, n_features = X.shape
     rows = []
 
-    nan_frac = np.isnan(X).mean(axis=1)          # shape: (n_samples,)
+    nan_frac = np.isnan(X).mean(axis=1)
 
-    # 组内 PCA + Isolation Forest（分 benign / malignant 各自计算）
+    # Intra-group PCA + Isolation Forest (computed separately per group)
     pca_z_scores = np.full(n_samples, np.nan)
     iforest_flag = np.zeros(n_samples, dtype=bool)
 
@@ -337,41 +342,38 @@ def detect_sample_outliers(X, y, sample_ids, config=None):
             continue
 
         X_grp = X[grp_idx].copy()
-        # 用列中位数插补 NaN，避免 PCA/IF 报错
         col_meds = np.nanmedian(X_grp, axis=0)
         col_meds = np.where(np.isnan(col_meds), 0.0, col_meds)
         for j in range(X_grp.shape[1]):
             mask = np.isnan(X_grp[:, j])
             X_grp[mask, j] = col_meds[j]
 
-        # 标准化
         scaler = StandardScaler()
         X_sc = scaler.fit_transform(X_grp)
 
-        # ── 方法 2：PCA 组内距离 z-score ──
+        # Method 2: PCA intra-group distance z-score
         n_components = min(2, len(grp_idx) - 1, n_features)
         if n_components >= 1:
             pca = PCA(n_components=n_components, random_state=42)
-            coords = pca.fit_transform(X_sc)          # (n_grp, n_components)
-            dists  = np.linalg.norm(coords, axis=1)   # 到原点的欧氏距离
+            coords = pca.fit_transform(X_sc)
+            dists  = np.linalg.norm(coords, axis=1)
             mu, sd = dists.mean(), dists.std(ddof=0)
             z = (dists - mu) / (sd + 1e-10)
             pca_z_scores[grp_idx] = z
 
-        # ── 方法 3：Isolation Forest ──
+        # Method 3: Isolation Forest
         if len(grp_idx) >= 8:
-            contamination = 0.25
             iforest = IsolationForest(
-                n_estimators=200, contamination=contamination,
+                n_estimators=200, contamination=0.25,
                 random_state=42
             )
-            pred_if = iforest.fit_predict(X_sc)       # -1 = outlier
+            pred_if = iforest.fit_predict(X_sc)
             iforest_flag[grp_idx] = (pred_if == -1)
 
-    # ── 综合打分 ──
-    flag_cov  = nan_frac > (1.0 - coverage_min)           # 方法 1
-    flag_pca  = pca_z_scores > pca_z_thr                  # 方法 2
-    flag_if   = iforest_flag                               # 方法 3
+    # Combine flags
+    flag_cov = nan_frac > (1.0 - coverage_min)
+    flag_pca = pca_z_scores > pca_z_thr
+    flag_if  = iforest_flag
 
     n_flags = flag_cov.astype(int) + flag_pca.astype(int) + flag_if.astype(int)
     suspect  = n_flags >= 2
@@ -391,75 +393,123 @@ def detect_sample_outliers(X, y, sample_ids, config=None):
         })
 
     df = pd.DataFrame(rows).sort_values(["suspect", "n_flags"], ascending=[False, False])
-
     suspect_ids = [r["sample_id"] for r in rows if r["suspect"]]
 
     n_suspect = len(suspect_ids)
-    logger.info(f"  样本异常检测: {n_samples} 个样本，"
-                f"疑似异常 {n_suspect} 个（≥2 项指标触发）")
+    logger.info(f"  Sample outlier detection: {n_samples} samples, "
+                f"{n_suspect} suspect (>= 2 flags triggered)")
     if suspect_ids:
-        logger.info(f"  疑似异常样本: {suspect_ids}")
-        logger.info(f"  可将确认异常的样本 ID 添加到 config.toml [ml] exclude_samples = [...]")
+        logger.info(f"  Suspect samples: {suspect_ids}")
+        logger.info("  Add confirmed IDs to config.toml [ml] exclude_samples = [...]")
     else:
-        logger.info(f"  未发现疑似异常样本")
+        logger.info("  No suspect samples detected")
 
     return df, suspect_ids
 
 
 # ──────────────────────────────────────────────────────
-# 主入口：Step 14
+# Main entry point: Step 14
 # ──────────────────────────────────────────────────────
 
-def select_features(workdir, result_dir, config, benign_samples, malignant_samples):
+def select_features(workdir, result_dir, config, benign_samples, malignant_samples,
+                    extra_exclude_ids=None):
     """
-    Step 14 主函数：从 bedGraph + diff_methylation.txt 构建特征矩阵，
-    运行 LASSO + RF 特征选择，输出结果文件。
-
-    输出（保存到 result_dir）：
-        feature_importance.csv — 每个 DMC 位点的 LASSO 系数 + RF 重要性
-        panel_cpg.csv          — 最终入选的特征位点列表
-        feature_matrix.npz     — 特征矩阵（供 classify 步骤复用）
+    Step 14 main function: build feature matrix from bedGraph files,
+    run LASSO + RF feature selection, write result files.
 
     Args:
-        workdir:           临时目录
-        result_dir:        结果目录
-        config:            配置对象
-        benign_samples:    良性样本 ID 列表
-        malignant_samples: 恶性样本 ID 列表
+        extra_exclude_ids: sample IDs to exclude from feature selection (but NOT from
+                           the saved feature_matrix.npz, which classifiers need in full).
+                           Typically the suspect_ids list from Step 13 outlier_detect.
+
+    Outputs (saved to result_dir):
+        feature_importance.csv — LASSO coef + RF importance per site
+        panel_cpg.csv          — Selected panel sites
+        feature_matrix.npz     — Feature matrix (for classify step; all samples)
+
+    Args:
+        workdir:           Temp directory
+        result_dir:        Result directory
+        config:            Config dict
+        benign_samples:    List of benign sample IDs
+        malignant_samples: List of malignant sample IDs
 
     Returns:
-        panel_features: list[str]，入选的特征名列表
-        importance_df:  pd.DataFrame，特征重要性表
+        panel_features: list[str], selected feature names
+        importance_df:  pd.DataFrame, feature importance table
     """
-    logger.info(f"开始特征选择  (良性={len(benign_samples)}, 恶性={len(malignant_samples)})")
+    logger.info(f"Starting feature selection  "
+                f"(benign={len(benign_samples)}, malignant={len(malignant_samples)})")
 
-    # 1. 构建特征矩阵（含深度矩阵 D 和 88 区域归属）
-    X, y, sample_ids, feature_names, D, region_in_88 = build_feature_matrix(
-        workdir, result_dir, benign_samples, malignant_samples, config
-    )
+    # 1. Build feature matrix — load from cache if outlier_detect (Step 13) already ran,
+    #    otherwise build from bedGraph files.
+    fm_path = os.path.join(result_dir, "feature_matrix.npz")
+    if os.path.exists(fm_path):
+        logger.info(f"  Loading cached feature matrix: {fm_path}")
+        _fm = np.load(fm_path, allow_pickle=True)
+        X            = _fm["X"]
+        y            = _fm["y"]
+        sample_ids   = list(_fm["sample_ids"])
+        feature_names = list(_fm["feature_names"])
+        _D_raw       = _fm["D"] if "D" in _fm else None
+        if _D_raw is not None and _D_raw.shape[0] == X.shape[0]:
+            D        = _D_raw
+        else:
+            if _D_raw is not None:
+                logger.warning(
+                    f"  Cached D shape {_D_raw.shape} does not match X shape {X.shape} "
+                    f"— depth matrix will be recomputed from bedGraph files."
+                )
+            D = np.zeros((X.shape[0], X.shape[1]))
+        region_in_88 = (_fm["region_in_88"] if "region_in_88" in _fm
+                        else np.zeros(X.shape[1], dtype=bool))
+        logger.info(f"  Cached: {X.shape[0]} samples × {X.shape[1]} features")
+    else:
+        X, y, sample_ids, feature_names, D, region_in_88 = build_feature_matrix(
+            workdir, result_dir, benign_samples, malignant_samples, config
+        )
 
     if X.shape[1] == 0:
-        logger.error("特征矩阵为空（无有效 DMC 位点），跳过特征选择")
+        logger.error("Feature matrix is empty (no valid CpG sites) — skipping feature selection")
         return [], pd.DataFrame()
 
-    # 1.5. 样本级 Wilcoxon 预筛选
-    #   diff_methylation.txt 是对合并 bedGraph 做的比较，组间均值差异虚高（组内噪声被平均掉）。
-    #   这一步在个体样本层面做 Mann-Whitney U 检验，去掉在样本级实际无区分度的位点，
-    #   只保留同时满足 p<sample_wilcox_p 且 样本级 |Δβ|>sample_delta_beta 的位点。
+    # 1.5a. Keep references to the FULL matrix so feature_matrix.npz always covers all samples.
+    #        Classifiers (Step 15+) load the full matrix and apply their own exclusions.
+    X_save          = X
+    y_save          = y
+    sample_ids_save = list(sample_ids)
+    D_save          = D          # full matrix, before exclusion filtering
+
+    # 1.5b. Exclude outlier samples from the selection computation (Wilcoxon / LASSO / RF).
+    #        These samples will still appear in the saved feature_matrix.npz.
+    if extra_exclude_ids:
+        excl_set = set(extra_exclude_ids)
+        keep_mask = np.array([sid not in excl_set for sid in sample_ids])
+        n_excl = int((~keep_mask).sum())
+        if n_excl:
+            excl_list = [sid for sid, k in zip(sample_ids, keep_mask) if not k]
+            logger.info(f"  Excluding {n_excl} outlier sample(s) from selection: {excl_list}")
+            X          = X[keep_mask]
+            y          = y[keep_mask]
+            D          = D[keep_mask]
+            sample_ids = [sid for sid, k in zip(sample_ids, keep_mask) if k]
+
+    # 1.5. Sample-level Wilcoxon pre-filter
+    #   diff_methylation.txt compares merged bedGraphs, so between-group mean differences
+    #   are inflated (within-group noise is averaged away).
+    #   This step runs Mann-Whitney U per site at the individual-sample level,
+    #   keeping only sites that pass both p < wilcox_p AND |Δβ| >= wilcox_delta.
     ml_cfg_pre = (config or {}).get("ml", {})
     wilcox_p     = ml_cfg_pre.get("sample_wilcox_p",     0.05)
     wilcox_delta = ml_cfg_pre.get("sample_delta_beta",   0.10)
 
-    # 保存全量 Wilcoxon 统计（所有进入筛选的位点，供报告诊断用）
-    feature_names_all = list(feature_names)   # 筛选前的完整列表
-    X_all = X.copy()   # 覆盖率过滤后、Wilcoxon 前的完整特征矩阵（供 nested CV 使用）
-    D_all = D.copy()
-    region_in_88_all = region_in_88.copy()   # 与 X_all/feature_names_all 对齐
+    # Preserve pre-Wilcoxon arrays for depth stats (selection subset)
+    feature_names_all = list(feature_names)
+    region_in_88_all = region_in_88.copy()
 
-    ml_cfg_pre = (config or {}).get("ml", {})
-    wilcox_p       = ml_cfg_pre.get("sample_wilcox_p",      0.05)   # 非 88 区域标准阈值
+    wilcox_p       = ml_cfg_pre.get("sample_wilcox_p",      0.05)   # standard threshold
     wilcox_delta   = ml_cfg_pre.get("sample_delta_beta",    0.10)
-    wilcox_p_88    = ml_cfg_pre.get("sample_wilcox_p_88",   0.10)   # 88 区域宽松阈值
+    wilcox_p_88    = ml_cfg_pre.get("sample_wilcox_p_88",   0.10)   # relaxed for 88-region sites
     wilcox_delta_88 = ml_cfg_pre.get("sample_delta_beta_88", 0.05)
 
     try:
@@ -467,10 +517,10 @@ def select_features(workdir, result_dir, config, benign_samples, malignant_sampl
         _HAS_SCIPY = True
     except ImportError:
         _HAS_SCIPY = False
-        logger.warning("scipy 未安装，跳过样本级 Wilcoxon 预筛选")
+        logger.warning("scipy not installed — skipping sample-level Wilcoxon pre-filter")
 
     if _HAS_SCIPY:
-        X_imp_pre = _impute(X)   # 用列中位数插补，仅用于统计检验
+        X_imp_pre = _impute(X)
         pvals  = np.ones(X.shape[1])
         deltas = np.zeros(X.shape[1])
         b_means = np.zeros(X.shape[1])
@@ -489,9 +539,9 @@ def select_features(workdir, result_dir, config, benign_samples, malignant_sampl
             b_means[j] = float(np.mean(X_imp_pre[y == 0, j]))
             m_means[j] = float(np.mean(X_imp_pre[y == 1, j]))
 
-        # ── 分层 Wilcoxon 阈值 ──
-        # 88 组织区域位点：宽松（先验知识保底）
-        # 其余位点：标准阈值（数据驱动发现）
+        # ── Stratified Wilcoxon thresholds ──
+        # 88-region sites: relaxed (prior knowledge)
+        # Other sites:     standard data-driven threshold
         p_thresh = np.where(region_in_88, wilcox_p_88,    wilcox_p)
         d_thresh = np.where(region_in_88, wilcox_delta_88, wilcox_delta)
         wilcox_mask = (pvals < p_thresh) & (deltas >= d_thresh)
@@ -501,18 +551,18 @@ def select_features(workdir, result_dir, config, benign_samples, malignant_sampl
         n_pass_88 = int((wilcox_mask & region_in_88).sum())
         n_pass_ot = int((wilcox_mask & ~region_in_88).sum())
 
-        logger.info(f"样本级 Wilcoxon 分层筛选结果: {n_pass}/{X.shape[1]} 通过")
-        logger.info(f"  88区域内 ({n_in88}个, p<{wilcox_p_88}, |Δβ|≥{wilcox_delta_88}): "
-                    f"{n_pass_88} 通过")
-        logger.info(f"  88区域外 ({X.shape[1]-n_in88}个, p<{wilcox_p}, |Δβ|≥{wilcox_delta}): "
-                    f"{n_pass_ot} 通过")
-        logger.info(f"  样本级 |Δβ| — 均值={deltas.mean():.3f}  "
-                    f"中位数={float(np.median(deltas)):.3f}  最大={deltas.max():.3f}")
-        logger.info(f"  p 值        — 中位数={float(np.median(pvals)):.3f}  "
+        logger.info(f"Stratified Wilcoxon results: {n_pass}/{X.shape[1]} sites pass")
+        logger.info(f"  In 88 regions  ({n_in88} sites, p<{wilcox_p_88}, |Δβ|≥{wilcox_delta_88}): "
+                    f"{n_pass_88} pass")
+        logger.info(f"  Outside 88 regions ({X.shape[1]-n_in88} sites, p<{wilcox_p}, |Δβ|≥{wilcox_delta}): "
+                    f"{n_pass_ot} pass")
+        logger.info(f"  Sample-level |Δβ| — mean={deltas.mean():.3f}  "
+                    f"median={float(np.median(deltas)):.3f}  max={deltas.max():.3f}")
+        logger.info(f"  p-values — median={float(np.median(pvals)):.3f}  "
                     f"<0.05: {int((pvals<0.05).sum())}  <0.10: {int((pvals<0.10).sum())}  "
                     f"<0.20: {int((pvals<0.20).sum())}")
 
-        # 边界位点（接近本档阈值但未通过）
+        # Sites close to threshold (borderline)
         near_mask = (~wilcox_mask) & (
             (deltas >= d_thresh * 0.8) | (pvals < p_thresh * 2.0)
         )
@@ -521,31 +571,32 @@ def select_features(workdir, result_dir, config, benign_samples, malignant_sampl
             bl_deltas = deltas[near_mask]
             bl_pvals  = pvals[near_mask]
             top_bl = sorted(zip(bl_names, bl_deltas, bl_pvals), key=lambda x: -x[1])[:5]
-            logger.info("  接近阈值（未通过）位点示例:")
+            logger.info("  Borderline sites (near threshold, did not pass):")
             for nm, dd, pp in top_bl:
                 logger.info(f"    {nm}  |Δβ|={dd:.3f}  p={pp:.4f}")
 
-        # 保存全量 Wilcoxon 统计表（含区域归属）
+        # Save full Wilcoxon stats table
         wilcox_df = pd.DataFrame({
-            "feature":        feature_names_all,
-            "in_88_regions":  region_in_88_all,
-            "benign_mean":    b_means.round(4),
-            "malignant_mean": m_means.round(4),
-            "sample_delta":   deltas.round(4),
-            "wilcox_pval":    pvals.round(6),
-            "p_threshold":    p_thresh.round(4),
+            "feature":         feature_names_all,
+            "in_88_regions":   region_in_88_all,
+            "benign_mean":     b_means.round(4),
+            "malignant_mean":  m_means.round(4),
+            "sample_delta":    deltas.round(4),
+            "wilcox_pval":     pvals.round(6),
+            "p_threshold":     p_thresh.round(4),
             "delta_threshold": d_thresh.round(4),
-            "pass_wilcox":    wilcox_mask,
+            "pass_wilcox":     wilcox_mask,
         }).sort_values("sample_delta", ascending=False)
         wpath = os.path.join(result_dir, "wilcoxon_stats.csv")
         wilcox_df.to_csv(wpath, index=False)
-        logger.info(f"  全量 Wilcoxon 统计已保存: {wpath}")
+        logger.info(f"  Wilcoxon stats saved: {wpath}")
 
         if n_pass == 0:
-            logger.warning("分层 Wilcoxon 后无位点通过；全量放宽至 p<0.20 / |Δβ|≥0.05 重试")
+            logger.warning("No sites pass stratified Wilcoxon; retrying with relaxed thresholds "
+                           "p<0.20 / |Δβ|>=0.05")
             wilcox_mask = (pvals < 0.20) & (deltas >= 0.05)
             n_pass = int(wilcox_mask.sum())
-            logger.info(f"  放宽后: {n_pass} 个位点通过")
+            logger.info(f"  After relaxation: {n_pass} sites pass")
 
         if n_pass > 0:
             X             = X[:, wilcox_mask]
@@ -562,18 +613,18 @@ def select_features(workdir, result_dir, config, benign_samples, malignant_sampl
         deltas_kept = np.zeros(X.shape[1])
 
     if X.shape[1] == 0:
-        logger.error("Wilcoxon 筛选后特征矩阵为空，跳过特征选择")
+        logger.error("Feature matrix empty after Wilcoxon filter — skipping feature selection")
         return [], pd.DataFrame()
 
-    # 2. LASSO 特征选择
-    logger.info("运行 LASSO (L1 logistic) 特征选择...")
+    # 2. LASSO feature selection
+    logger.info("Running LASSO (L1 logistic) feature selection...")
     lasso_indices, lasso_coefs = run_lasso_selection(X, y, config)
 
-    # 3. RF 特征重要性
-    logger.info("运行随机森林特征重要性分析...")
+    # 3. RF feature importance
+    logger.info("Running Random Forest feature importance...")
     rf_indices, rf_importances = run_rf_importance(X, y, config)
 
-    # 4. 合并特征选择结果
+    # 4. Combine selection results
     ml_cfg = (config or {}).get("ml", {})
     selection_mode = ml_cfg.get("feature_selection_mode", "union")
 
@@ -581,18 +632,18 @@ def select_features(workdir, result_dir, config, benign_samples, malignant_sampl
         final_indices = lasso_indices
     elif selection_mode == "rf":
         final_indices = rf_indices
-    else:  # "union"（默认）
+    else:  # "union" (default)
         final_indices = np.unique(np.concatenate([lasso_indices, rf_indices]))
 
-    panel_features  = [feature_names[i]      for i in final_indices]
-    panel_in_88     = [bool(region_in_88[i]) for i in final_indices]
-    logger.info(f"最终入选特征: {len(panel_features)} 个  (mode={selection_mode})")
-    logger.info(f"  ★=88组织区域内  ○=区域外")
+    panel_features = [feature_names[i]      for i in final_indices]
+    panel_in_88    = [bool(region_in_88[i]) for i in final_indices]
+    logger.info(f"Final panel features: {len(panel_features)}  (mode={selection_mode})")
+    logger.info(f"  ★ = in 88 tissue regions   ○ = outside")
     for feat, in88 in sorted(zip(panel_features, panel_in_88), key=lambda x: x[0]):
         marker = "★" if in88 else "○"
         logger.info(f"    {marker} {feat}")
 
-    # 5. Build importance DataFrame (panel_selected updated after coverage QC below)
+    # 5. Build importance DataFrame
     lasso_selected = np.zeros(len(feature_names), dtype=bool)
     lasso_selected[lasso_indices] = True
     rf_selected = np.zeros(len(feature_names), dtype=bool)
@@ -612,23 +663,32 @@ def select_features(workdir, result_dir, config, benign_samples, malignant_sampl
         "panel_selected":    panel_selected,
     }).sort_values("rf_importance", ascending=False)
 
-    # 6. Compute depth stats for panel sites; apply ≥10x coverage QC hard filter
+    # 6. Compute depth stats; apply >=10x coverage QC hard filter
     ml_cfg2     = (config or {}).get("ml", {})
     min_10x_cov = ml_cfg2.get("min_10x_coverage_rate", 0.80)
 
-    D_panel        = D[:, final_indices]       # shape: (n_samples, n_panel)
+    D_panel         = D[:, final_indices]
     n_samples_total = D_panel.shape[0]
 
-    site_mean      = D_panel.mean(axis=0)
-    site_median    = np.median(D_panel, axis=0)
-    site_p10       = np.percentile(D_panel, 10, axis=0)
-    site_p90       = np.percentile(D_panel, 90, axis=0)
-    site_min       = D_panel.min(axis=0)
-    site_max       = D_panel.max(axis=0)
-    site_n_cov     = (D_panel > 0).sum(axis=0)
-    site_n_10x     = (D_panel >= 10).sum(axis=0)
-    cov_rate_10x   = site_n_10x / n_samples_total
-    pass_cov_qc    = cov_rate_10x >= min_10x_cov
+    site_mean    = D_panel.mean(axis=0)
+    site_median  = np.median(D_panel, axis=0)
+    site_p10     = np.percentile(D_panel, 10, axis=0)
+    site_p90     = np.percentile(D_panel, 90, axis=0)
+    site_min     = D_panel.min(axis=0)
+    site_max     = D_panel.max(axis=0)
+    site_n_cov   = (D_panel > 0).sum(axis=0)
+    site_n_10x   = (D_panel >= 10).sum(axis=0)
+    cov_rate_10x = site_n_10x / n_samples_total
+
+    _depth_available = D_panel.sum() > 0
+    if not _depth_available:
+        logger.warning(
+            "  Depth matrix is all zeros (stale feature_matrix.npz from a previous run). "
+            ">=10x coverage filter skipped — delete feature_matrix.npz and re-run to rebuild."
+        )
+        pass_cov_qc = np.ones(len(panel_features), dtype=bool)
+    else:
+        pass_cov_qc = cov_rate_10x >= min_10x_cov
 
     depth_df = pd.DataFrame({
         "feature":           panel_features,
@@ -648,46 +708,51 @@ def select_features(workdir, result_dir, config, benign_samples, malignant_sampl
     n_removed_cov = int((~pass_cov_qc).sum())
     if n_removed_cov > 0:
         logger.warning(
-            f"  ≥10x覆盖过滤 (阈值 {min_10x_cov:.0%}): 移除 {n_removed_cov} 个低覆盖位点"
+            f"  >=10x coverage filter (threshold {min_10x_cov:.0%}): "
+            f"removed {n_removed_cov} low-coverage sites"
         )
         fail_rows = depth_df[~pass_cov_qc][["feature", "coverage_rate_10x"]].head(10)
         for _, row in fail_rows.iterrows():
-            logger.debug(f"    移除: {row['feature']}  10x_rate={row['coverage_rate_10x']:.2%}")
+            logger.debug(f"    removed: {row['feature']}  10x_rate={row['coverage_rate_10x']:.2%}")
         panel_features = [f for f, p in zip(panel_features, pass_cov_qc) if p]
     else:
         logger.info(
-            f"  ≥10x覆盖过滤 (阈值 {min_10x_cov:.0%}): 全部 {len(panel_features)} 个位点通过"
+            f"  >=10x coverage filter (threshold {min_10x_cov:.0%}): "
+            f"all {len(panel_features)} sites pass"
         )
 
-    # Update panel_selected to reflect coverage QC outcome
+    # Update panel_selected to reflect coverage QC
     panel_set = set(panel_features)
     importance_df["panel_selected"] = importance_df["feature"].isin(panel_set)
 
-    # 7. Save feature importance (after coverage QC so panel_selected is final)
+    # 7. Save feature importance (panel_selected is now final)
     imp_path = os.path.join(result_dir, "feature_importance.csv")
     importance_df.to_csv(imp_path, index=False)
-    logger.info(f"  特征重要性已保存: {imp_path}")
+    logger.info(f"  Feature importance saved: {imp_path}")
 
     # 8. Save panel CpG site list (coverage-QC-filtered)
     panel_df = pd.DataFrame({"feature": panel_features})
     panel_path = os.path.join(result_dir, "panel_cpg.csv")
     panel_df.to_csv(panel_path, index=False)
-    logger.info(f"  Panel CpG位点已保存: {panel_path} ({len(panel_features)} 个，≥10x覆盖过滤后)")
+    logger.info(f"  Panel CpG sites saved: {panel_path} ({len(panel_features)} sites after >=10x filter)")
 
-    # 9. Save full feature matrix (pre-panel, for nested CV in classify)
+    # 9. Save full feature matrix (pre-panel, for nested CV in classify).
+    #    Use X_save / y_save / sample_ids_save so ALL samples (including any
+    #    outliers excluded from the selection computation) are present for classifiers.
     fm_path = os.path.join(result_dir, "feature_matrix.npz")
     np.savez(fm_path,
-             X=X_all, y=y,
-             sample_ids=np.array(sample_ids, dtype=object),
+             X=X_save, y=y_save,
+             sample_ids=np.array(sample_ids_save, dtype=object),
              feature_names=np.array(feature_names_all, dtype=object),
-             D=D_all,
+             D=D_save,
              region_in_88=region_in_88_all)
-    logger.info(f"  特征矩阵已保存 (全量 {X_all.shape[1]} 特征，Wilcoxon 前，含区域归属): {fm_path}")
+    logger.info(f"  Feature matrix saved ({X_save.shape[0]} samples × "
+                f"{X_save.shape[1]} features, pre-Wilcoxon): {fm_path}")
 
     # 10. Save depth stats
     depth_path = os.path.join(result_dir, "panel_cpg_depth.csv")
     depth_df.to_csv(depth_path, index=False)
-    logger.info(f"  Panel位点深度统计已保存: {depth_path}")
+    logger.info(f"  Panel depth stats saved: {depth_path}")
 
     overall_mean   = float(site_mean.mean())
     overall_median = float(np.median(site_median))
@@ -695,8 +760,9 @@ def select_features(workdir, result_dir, config, benign_samples, malignant_sampl
     low10_count = int((site_mean < 10).sum())
     ge20_count  = int((site_mean >= 20).sum())
     n_pass_10x  = int(pass_cov_qc.sum())
-    logger.info(f"  Panel深度摘要: 均值={overall_mean:.1f}x  中位数={overall_median:.1f}x  "
-                f"平均深度<5x: {low5_count}个  <10x: {low10_count}个  ≥20x: {ge20_count}个")
-    logger.info(f"  ≥10x样本覆盖率≥{min_10x_cov:.0%}: {n_pass_10x}/{len(depth_df)} 个位点通过")
+    logger.info(f"  Panel depth summary: mean={overall_mean:.1f}x  median={overall_median:.1f}x  "
+                f"mean<5x: {low5_count}  <10x: {low10_count}  >=20x: {ge20_count}")
+    logger.info(f"  Sites with >=10x coverage in >={min_10x_cov:.0%} of samples: "
+                f"{n_pass_10x}/{len(depth_df)}")
 
     return panel_features, importance_df

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-modules包初始化文件
+modules package init
 """
 
 from .file_utils import detect_file_type, find_files

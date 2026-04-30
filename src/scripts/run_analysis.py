@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-run_analysis.py - 执行完整的甲基化分析流程
+run_analysis.py - Full methylation analysis pipeline
 
-支持两种运行模式：
-  【全流程模式】一次性运行所有步骤（默认）
-  【分步模式】  指定单个步骤运行，通过状态文件在步骤间传递数据
+Two execution modes:
+  [Full pipeline]  Run all steps in sequence (default)
+  [Step mode]      Run a single named step; state is persisted between steps
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-基本用法:
-  python src/scripts/run_analysis.py --plasma <文件/文件夹>
+Basic usage:
+  python src/scripts/run_analysis.py --plasma <file/folder>
 
-分步执行（血浆流程全部 8 步）:
-  # 第1步：fastp + UMI提取 → 生成 workdir，打印路径
-  python src/scripts/run_analysis.py --plasma --step preprocess <文件夹>
+Step-by-step (plasma pipeline):
+  # Step 1: fastp + UMI extraction → creates workdir, prints path
+  python src/scripts/run_analysis.py --plasma --step preprocess <folder>
 
-  # 后续各步骤：通过 --workdir 指定上一步生成的目录
+  # Subsequent steps: pass the workdir created above
   python src/scripts/run_analysis.py --plasma --step align     --workdir temp/20240101_120000
   python src/scripts/run_analysis.py --plasma --step dedup     --workdir temp/20240101_120000
   python src/scripts/run_analysis.py --plasma --step target    --workdir temp/20240101_120000
@@ -27,27 +27,29 @@ run_analysis.py - 执行完整的甲基化分析流程
   python src/scripts/run_analysis.py --plasma --step feature_select  --workdir temp/20240101_120000
   python src/scripts/run_analysis.py --plasma --step classify        --workdir temp/20240101_120000
 
-  # 查看步骤定义和当前状态
+  # List step definitions and completion status
   python src/scripts/run_analysis.py --list-steps
   python src/scripts/run_analysis.py --list-steps --workdir temp/20240101_120000
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-步骤说明:
-  preprocess  4   fastp质控 + UMI提取（血浆：--umi --trim_front）
-  align       5   Bismark双端比对（bismark --genome）
-  dedup       6   UMI去重（umi_tools dedup --paired）
-  target      7   On-target过滤（bedtools intersect -abam panel.bed）
-  mbias       7.5 M-bias检查（MethylDackel mbias），确认tail2裁剪参数
-  extract     8   甲基化信息提取（bismark_methylation_extractor）
-  filter      9   甲基化数据过滤 + 候选区域过滤
-  diff        10  差异甲基化分析
-  visualize      11  Plots: density / scatter / heatmap
-  report         19  Generate HTML + JSON report (all optional sections auto-embedded)
-  feature_select 14  Feature selection (LASSO + RF union; ≥10× coverage QC)
-  outlier_detect 14.5 Sample outlier detection (coverage / PCA z-score / Isolation Forest)
-  classify       15  Diagnostic classifiers LOO-CV: LR / SVM / RF / XGBoost / LightGBM
-  annotate       17  Site annotation (Ensembl + EWAS Catalog+Atlas + CpG island + PubMed)
-  external_validate 18  Cross-validation: GSE40279 blood baseline + TCGA-OV tumour signal
+Steps:
+  preprocess         4    fastp QC + UMI extraction (plasma: --umi --trim_front)
+  align              5    bwameth paired-end alignment
+  dedup              6    UMI-aware deduplication (umi_tools dedup --paired)
+  target             7    On-target filter (bedtools intersect -abam panel.bed)
+  mbias              8    M-bias check (MethylDackel mbias); confirm nOT/nOB trim params
+  extract            9    Methylation extraction (MethylDackel → CpG bedGraph)
+  filter             10   Depth/repeat filter + candidate-region filter
+  diff               11   Differential methylation analysis
+  visualize          12   Plots: density / scatter / heatmap
+  outlier_detect     13   Sample outlier detection (coverage / PCA z-score / Isolation Forest)
+  feature_select     14   Feature selection (LASSO + RF union; outliers excluded; ≥10× coverage QC)
+  classify           15   Diagnostic classifiers LOO-CV: LR / SVM / RF / XGBoost / LightGBM
+  subtype_classify   16   Subtype multi-class LOO-CV: RF + SVM OvR
+  temporal_validate  17   Temporal split validation (plasma only): train <2024-07-01, test >=2024-07-01
+  annotate           18   Site annotation (Ensembl + EWAS Catalog+Atlas + CpG island + PubMed)
+  external_validate  19   Cross-validation: GSE40279 blood baseline + TCGA-OV tumour signal
+  report             20   Generate HTML + JSON report (all optional sections auto-embedded)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
@@ -57,10 +59,9 @@ import argparse
 import logging
 import shutil
 
-# 加载配置（早于其他模块，以便注入 PATH）
-# 注意：load_config 在此处尚未 import，使用 toml 直接加载
+
+# Inject conda env bin into PATH before importing other modules
 def _inject_conda_path():
-    """将 conda meth 环境的 bin 目录注入到 PATH，确保子进程能找到工具。"""
     import toml
     _cfg_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
         os.path.abspath(__file__)))), "config.toml")
@@ -74,7 +75,6 @@ def _inject_conda_path():
 
 _inject_conda_path()
 
-# 导入各个模块的函数
 from utils.logger import setup_logger
 from utils.config import load_config, get_output_dirs, create_output_dirs
 from scripts.modules import (
@@ -95,10 +95,8 @@ from scripts.modules import (
 )
 from methylation.sample_grouping import resolve_patient_files
 
-# 加载配置文件
 config = load_config()
 
-# 生成日志文件路径
 log_dir = config["directories"]["log_dir"]
 os.makedirs(log_dir, exist_ok=True)
 log_file = f"{log_dir}/analysis_{time.strftime('%Y%m%d_%H%M%S')}.log"
@@ -106,93 +104,94 @@ logger = setup_logger(log_file=log_file, console_level=logging.INFO, file_level=
 
 
 def check_presets():
-    """
-    检查分析前的预设信息
+    """Verify reference files and required tools before starting the pipeline."""
+    logger.info("Checking pipeline prerequisites")
 
-    Returns:
-        bool: 预设信息检查是否通过
-    """
-    logger.info("开始检查预设信息")
-
-    # 1. 检查探针区域文件
+    # 1. Probe panel BED
     probe_panel = config.get("data", {}).get("probe_panel_bed")
     if probe_panel:
         if not os.path.exists(probe_panel):
-            logger.error(f"探针区域文件不存在: {probe_panel}")
-            logger.warning("将跳过靶向区域提取步骤")
+            logger.error(f"Probe panel BED not found: {probe_panel}")
+            logger.warning("On-target filter step will be skipped")
         else:
-            logger.info(f"探针区域文件: {probe_panel}")
+            logger.info(f"Probe panel: {probe_panel}")
     else:
-        logger.warning("未配置探针区域文件，跳过靶向区域提取")
+        logger.warning("No probe_panel_bed configured — on-target filter will be skipped")
 
-    # 2. 检查参考基因组
+    # 2. Reference genome
     reference_genome = config.get("extraction", {}).get("reference_genome")
     if not reference_genome or not os.path.exists(reference_genome):
-        logger.error(f"参考基因组不存在: {reference_genome}")
+        logger.error(f"Reference genome not found: {reference_genome}")
         return False
-    logger.info(f"参考基因组: {reference_genome}")
+    logger.info(f"Reference genome: {reference_genome}")
 
-    # 3. 检查Bismark索引（bismark_genome_preparation 生成 Bisulfite_Genome/CT_conversion/BS_CT.*.bt2）
-    bismark_index = os.path.dirname(reference_genome)
-    bismark_index_file = os.path.join(
-        bismark_index, "Bisulfite_Genome", "CT_conversion", "BS_CT.1.bt2"
-    )
-    if not os.path.exists(bismark_index_file):
-        logger.warning(f"Bismark索引未找到: {bismark_index_file}")
-        logger.warning("请先运行: bismark_genome_preparation --bowtie2 " + bismark_index)
+    # 3. Tool checks (aligner-dependent)
+    aligner = config.get("plasma", {}).get("aligner", "bismark")
+    if aligner == "bwameth":
+        required_tools = ["fastp", "bwameth", "samtools", "bedtools", "MethylDackel"]
     else:
-        logger.info(f"Bismark索引: {bismark_index}/Bisulfite_Genome/")
+        bismark_index = os.path.dirname(reference_genome)
+        bismark_index_file = os.path.join(
+            bismark_index, "Bisulfite_Genome", "CT_conversion", "BS_CT.1.bt2"
+        )
+        if not os.path.exists(bismark_index_file):
+            logger.warning(f"Bismark index not found: {bismark_index_file}")
+            logger.warning("Run first: bismark_genome_preparation --bowtie2 " + bismark_index)
+        else:
+            logger.info(f"Bismark index: {bismark_index}/Bisulfite_Genome/")
+        required_tools = ["fastp", "bismark", "deduplicate_bismark", "samtools", "bedtools", "MethylDackel"]
 
-    # 4. 检查必要的工具（血浆模式必须: fastp, bismark, deduplicate_bismark, samtools, bedtools, MethylDackel, umi_tools）
-    required_tools = ["fastp", "bismark", "deduplicate_bismark", "samtools", "bedtools", "MethylDackel"]
-    # umi_tools 可能在 meth env 外，单独检测
+    # umi_tools may live outside the conda env — detect separately
     umi_tools_bin = shutil.which("umi_tools") or config.get("tools", {}).get("umi_tools_fallback", "")
     if umi_tools_bin and os.path.isfile(umi_tools_bin):
         logger.info(f"umi_tools: {umi_tools_bin}")
-        # 确保 umi_tools 所在目录也在 PATH 中
         umi_dir = os.path.dirname(umi_tools_bin)
         if umi_dir and umi_dir not in os.environ.get("PATH", ""):
             os.environ["PATH"] = umi_dir + ":" + os.environ.get("PATH", "")
     else:
-        logger.warning("umi_tools 未找到 — 血浆模式去重将回退到 deduplicate_bismark（不推荐）")
+        logger.warning("umi_tools not found — plasma dedup will fall back to deduplicate_bismark (not recommended)")
 
     missing_tools = []
     for tool in required_tools:
         if shutil.which(tool):
-            logger.info(f"工具 {tool}: {shutil.which(tool)}")
+            logger.info(f"Tool {tool}: {shutil.which(tool)}")
         else:
-            logger.warning(f"工具 {tool} 未安装或不在PATH中")
+            logger.warning(f"Tool {tool} not installed or not in PATH")
             missing_tools.append(tool)
 
     if missing_tools:
-        logger.warning(f"以下工具未找到: {', '.join(missing_tools)}")
+        logger.warning(f"Missing tools: {', '.join(missing_tools)}")
 
-    logger.info("预设信息检查完成")
+    logger.info("Prerequisite check complete")
     return True
 
 
 # ──────────────────────────────────────────────
-# 分步执行：步骤定义与状态文件
+# Step definitions and state management
 # ──────────────────────────────────────────────
 
-# 步骤有序列表：(step_key, display_num, english_description, depends_on)
+# (step_key, display_num, description, depends_on)
 PIPELINE_STEPS = [
-    ("preprocess",        "4",    "fastp QC + UMI extraction (R2 5' 6N)",                         "—"),
-    ("align",             "5",    "bwameth alignment → sorted BAM (hg38)",                        "preprocess"),
-    ("dedup",             "6",    "UMI-aware dedup (umi_tools dedup --paired)",                   "align"),
-    ("target",            "7",    "On-target filter (bedtools intersect panel.bed)",               "dedup"),
-    ("mbias",             "7.5",  "M-bias check (MethylDackel mbias); review nOT/nOB SVGs",       "target"),
-    ("extract",           "8",    "Methylation extraction (MethylDackel → CpG bedGraph)",         "mbias"),
-    ("filter",            "9",    "Depth+repeat filter; candidate-region filter (88 regions)",     "extract"),
-    ("diff",              "10",   "Differential methylation: merged bedGraphs, |Δβ| ≥ 0.2",      "filter"),
-    ("visualize",         "11",   "Plots: density / scatter / heatmap (candidate regions)",        "diff"),
-    ("feature_select",    "14",   "Feature selection: LASSO(L1) ∪ RF; ≥10× sample coverage QC",  "diff"),
-    ("outlier_detect",    "14.5", "Sample QC: coverage fraction / PCA z / Isolation Forest",      "feature_select"),
-    ("classify",          "15",   "Classifiers LOO-CV: LR / SVM / RF / XGBoost / LightGBM",      "feature_select"),
-    ("subtype_classify",  "16",   "Subtype LOO-CV (malignant+borderline): RF + SVM OvR",          "classify"),
-    ("annotate",          "17",   "Site annotation: gene / CpG island / EWAS Catalog+Atlas",      "feature_select"),
-    ("external_validate", "18",   "Cross-validation: GSE40279 blood baseline + TCGA-OV signal",   "feature_select"),
-    ("report",            "19",   "HTML + JSON report (annotation + ext-validate auto-embedded)",  "diff"),
+    ("data_check",         "1",   "Validate config: sample Excel, ref genome, panel BED, FASTQs",  "—"),
+    ("ref_index",          "2",   "Build/verify bwameth hg38 c2t index (~17 GB, one-time setup)",  "—"),
+    ("panel_derive",       "3",   "Derive panel BED (reuse dedup BAMs via --workdir, or --fq)",   "ref_index/dedup"),
+    ("preprocess",         "4",   "fastp QC + UMI extraction (R2 5' 6N)",                         "—"),
+    ("align",              "5",   "bwameth alignment → sorted BAM (hg38)",                        "preprocess"),
+    ("dedup",              "6",   "UMI-aware dedup (umi_tools dedup --paired)",                   "align"),
+    ("target",             "7",   "On-target filter (bedtools intersect panel.bed)",               "dedup"),
+    ("mbias",              "8",   "M-bias check (MethylDackel mbias); review nOT/nOB SVGs",       "target"),
+    ("extract",            "9",   "Methylation extraction (MethylDackel → CpG bedGraph)",         "mbias"),
+    ("filter",             "10",  "Depth+repeat filter; candidate-region filter (88 regions)",     "extract"),
+    ("diff",               "11",  "Differential methylation: merged bedGraphs, |Δβ| ≥ 0.2",      "filter"),
+    ("visualize",          "12",  "Plots: density / scatter / heatmap (candidate regions)",        "diff"),
+    ("outlier_detect",     "13",  "Sample QC: coverage fraction / PCA z / Isolation Forest",       "diff"),
+    ("feature_select",     "14",  "Feature selection: LASSO(L1) ∪ RF; outliers excluded; ≥10× QC", "outlier_detect"),
+    ("classify",           "15",  "Classifiers LOO-CV: LR / SVM / RF / XGBoost / LightGBM",       "feature_select"),
+    ("subtype_classify",   "16",  "Subtype LOO-CV (malignant+borderline): RF + SVM OvR",          "classify"),
+    ("temporal_validate",  "17",  "Temporal split validation (plasma only): train/test by date",  "classify"),
+    ("annotate",           "18",  "Site annotation: gene / CpG island / EWAS Catalog+Atlas",      "feature_select"),
+    ("external_validate",  "19",  "Cross-validation: GSE40279 blood baseline + TCGA-OV signal",   "feature_select"),
+    ("report",             "20",  "HTML + JSON report (annotation + ext-validate auto-embedded)",  "diff"),
 ]
 STEP_KEYS = [s[0] for s in PIPELINE_STEPS]
 _STATE_FILE = "pipeline_state.json"
@@ -203,7 +202,7 @@ def _state_path(workdir):
 
 
 def _load_state(workdir):
-    """从 workdir 下的 pipeline_state.json 加载上一步的输出。"""
+    """Load step outputs from workdir/pipeline_state.json."""
     import json
     path = _state_path(workdir)
     if os.path.exists(path):
@@ -213,13 +212,34 @@ def _load_state(workdir):
 
 
 def _save_state(workdir, state):
-    """将当前状态写入 workdir/pipeline_state.json（追加更新，不覆盖已有字段）。"""
+    """Merge state into workdir/pipeline_state.json (non-destructive update)."""
     import json
     path = _state_path(workdir)
     existing = _load_state(workdir)
     existing.update(state)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(existing, f, ensure_ascii=False, indent=2)
+
+
+def _run_ref_index(cfg):
+    """Check bwameth c2t index; build it if missing."""
+    ref = cfg.get("extraction", {}).get("reference_genome", "")
+    if not ref:
+        logger.error("reference_genome not set in config — cannot check/build index")
+        return False
+    c2t = ref + ".bwameth.c2t"
+    if os.path.exists(c2t):
+        logger.info(f"✓ bwameth index found: {c2t}")
+        return True
+    logger.warning(f"bwameth c2t index not found: {c2t}")
+    logger.info(f"Building index: bwameth --index {ref}  (this may take 30–60 min)")
+    import subprocess
+    ret = subprocess.run(["bwameth", "--index", ref])
+    if ret.returncode == 0:
+        logger.info("✓ bwameth index built successfully")
+        return True
+    logger.error(f"bwameth --index failed (exit {ret.returncode})")
+    return False
 
 
 def _print_step_list(workdir=None):
@@ -269,57 +289,53 @@ def _print_step_list(workdir=None):
 
 
 def main():
-    """
-    主函数
-    """
-    # ── 解析命令行参数 ──
     parser = argparse.ArgumentParser(
-        description="执行完整的甲基化分析流程（支持全流程或分步执行）",
+        description="AIMethFlow — methylation analysis pipeline (full or step-by-step)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "files", nargs="*",
-        help="FastQ文件或文件夹路径列表（分步模式且已有workdir时可省略）",
+        help="FastQ files or folders (may be omitted in step mode when workdir already exists)",
     )
 
-    # ── 分步执行选项 ──
+    # Step mode
     parser.add_argument(
         "--step", metavar="STEP",
         choices=STEP_KEYS,
-        help=f"只执行指定步骤（可选: {', '.join(STEP_KEYS)}）",
+        help=f"Run a single step (choices: {', '.join(STEP_KEYS)})",
     )
     parser.add_argument(
         "--workdir", metavar="DIR",
-        help="指定已有工作目录以恢复分步执行（会读取该目录下的 pipeline_state.json）",
+        help="Resume step-by-step execution from an existing workdir (reads pipeline_state.json)",
     )
     parser.add_argument(
         "--list-steps", action="store_true",
-        help="列出所有步骤说明及完成状态后退出",
+        help="Print step table with completion status and exit",
     )
 
-    # ── 模式开关 ──
+    # Input / data options
     parser.add_argument(
         "--patient-csv", metavar="CSV",
-        help="患者ID列表文件（每行一个ID），从Excel自动查找对应R1/R2文件，与 files 互斥",
+        help="CSV file with one patient ID per line; R1/R2 paths are resolved from the sample info Excel",
     )
     parser.add_argument(
         "--data-dir", metavar="DIR",
-        help="FastQ数据目录，与 --patient-csv 配合使用，默认读取 config.toml [data] plasma_dir",
+        help="FastQ data directory (used with --patient-csv; defaults to config [data] plasma_dir)",
     )
     parser.add_argument(
         "--temp-dir", metavar="DIR",
-        help="临时文件存放目录（覆盖 config.toml [directories] temp_dir），例如 /mnt/g/temp",
+        help="Override temp directory from config (e.g. /mnt/g/temp)",
     )
     parser.add_argument(
-        "--plasma", action="store_true", default=True,
-        help="启用血浆cfDNA模式（默认已开启）",
+        "--mode", choices=["plasma", "tissue"], default="plasma",
+        help="Pipeline mode: 'plasma' (cfDNA) or 'tissue' (biopsy). Default: plasma",
     )
     parser.add_argument(
         "--group-method", choices=["v1", "v2"], default="v2",
-        help="分组方法: v1（基于索引）或 v2（基于Excel文件）",
+        help="Sample grouping method: v1 (index-based) or v2 (Excel-based)",
     )
 
-    # ── 全流程模式的 skip 开关（分步模式下这些由 --step 隐式控制） ──
+    # Skip flags for full-pipeline mode (step mode ignores these)
     parser.add_argument("--skip-quality",           action="store_true", default=True)
     parser.add_argument("--skip-preprocessing",     action="store_true", default=False)
     parser.add_argument("--skip-alignment",         action="store_true", default=False)
@@ -332,65 +348,65 @@ def main():
     parser.add_argument("--skip-visualization",     action="store_true", default=False)
     parser.add_argument("--skip-report",            action="store_true", default=False)
     parser.add_argument("--clean-temp",             action="store_true", default=False)
-    parser.add_argument("--config",  type=str, help="使用指定的配置文件")
+    parser.add_argument("--config",  type=str, help="Path to a custom config file")
     parser.add_argument("--verbose", action="store_true", default=False)
 
     args = parser.parse_args()
+    mode = args.mode  # "plasma" | "tissue"
 
-    # ── --list-steps ──
     if args.list_steps:
         _print_step_list(args.workdir)
         return
 
-    # ── 自定义配置文件 ──
     global config
     if args.config and os.path.exists(args.config):
         from utils.config import load_config as _load_cfg
         config = _load_cfg(args.config)
 
-    # ── --temp-dir 覆盖临时目录 ──
     if args.temp_dir:
         config["directories"]["temp_dir"] = args.temp_dir
         os.makedirs(args.temp_dir, exist_ok=True)
-        logger.info(f"临时目录已覆盖为: {args.temp_dir}")
+        logger.info(f"Temp dir overridden: {args.temp_dir}")
 
-    # ── 详细输出 ──
     if args.verbose:
         logger.setLevel(logging.DEBUG)
         for h in logger.handlers:
             if getattr(h, "name", None) == "console":
                 h.setLevel(logging.DEBUG)
 
-    # ── 预设检查 ──
     if not check_presets():
-        logger.error("预设信息检查失败，分析终止")
+        logger.error("Prerequisite check failed — aborting")
         return
 
-    # ── 确定工作目录 ──
+    # Early-exit setup steps (no workdir / FASTQ needed)
+    if args.step == "data_check":
+        logger.info("✓  Step [data_check] complete — prerequisites verified above")
+        return
+    if args.step == "ref_index":
+        _run_ref_index(config)
+        return
+
+    # Resolve working directory
     if args.workdir:
         workdir = args.workdir
-        # 目录不存在则创建（首次 preprocess 即可指定 --workdir）
         os.makedirs(workdir, exist_ok=True)
-        # 复用 workdir 的时间戳，使 result_dir 与 workdir 对应同一次运行
-        timestamp = os.path.basename(os.path.normpath(workdir))
+        timestamp  = os.path.basename(os.path.normpath(workdir))
         output_dirs = get_output_dirs(config, timestamp=timestamp)
-        result_dir = output_dirs["result"]
+        result_dir  = output_dirs["result"]
         os.makedirs(result_dir, exist_ok=True)
     else:
-        # 新建目录
         output_dirs = get_output_dirs(config)
         create_output_dirs(output_dirs)
-        workdir = output_dirs["temp"]
+        workdir    = output_dirs["temp"]
         result_dir = output_dirs["result"]
 
-    logger.info(f"工作目录: {workdir}")
+    logger.info(f"Working directory: {workdir}")
 
-    # ── 加载状态（分步恢复） ──
     state = _load_state(workdir)
 
-    # ── 查找输入文件（优先 --patient-csv，其次 files 参数，最后从状态恢复） ──
-    # 只有 preprocess / align 步骤（或全流程模式）才真正需要 fastq 文件
-    _STEPS_NEED_FASTQ = {"preprocess", "align"}
+    # Resolve input files
+    # Only preprocess / align / panel_derive (or full-pipeline start) strictly need FastQ files
+    _STEPS_NEED_FASTQ = {"preprocess", "align", "panel_derive"}
 
     if getattr(args, "patient_csv", None):
         data_dir = getattr(args, "data_dir", None)
@@ -398,7 +414,7 @@ def main():
         bam_files_input = []
         methylation_files_input = []
         if not fastq_files:
-            logger.error(f"--patient-csv 未解析到任何文件，请检查 {args.patient_csv} 及数据目录")
+            logger.error(f"--patient-csv resolved no files — check {args.patient_csv} and data dir")
             return
         _save_state(workdir, {"fastq_files": fastq_files})
     elif args.files:
@@ -413,15 +429,14 @@ def main():
         fastq_files = state.get("fastq_files", [])
         bam_files_input = []
         methylation_files_input = []
-        # 只在需要 fastq 的步骤（或全流程起跑）时报错
         if not fastq_files and (not single_step or single_step in _STEPS_NEED_FASTQ):
-            logger.error("未提供输入文件，且 workdir 中也无已记录的 fastq_files")
+            logger.error("No input files provided and no fastq_files recorded in workdir state")
             return
 
     if fastq_files:
-        logger.info(f"输入 FastQ 文件 ({len(fastq_files)} 个): {fastq_files}")
+        logger.info(f"Input FastQ files ({len(fastq_files)}): {fastq_files}")
 
-    # ── 从状态恢复各步骤输出 ──
+    # Restore per-step outputs from state
     processed_files       = state.get("processed_files", fastq_files)
     bam_files             = state.get("bam_files", bam_files_input)
     deduplicated_files    = state.get("deduplicated_files", bam_files)
@@ -435,9 +450,7 @@ def main():
     benign_samples        = state.get("benign_samples", [])
     malignant_samples     = state.get("malignant_samples", [])
 
-    # ── 判断哪些步骤需要执行 ──
-    # 分步模式：只执行指定步骤；全流程模式：根据 skip_* 标志
-    single_step = args.step  # None → 全流程
+    single_step = args.step  # None → full pipeline
 
     def _should_run(step_key, skip_flag):
         if single_step:
@@ -445,119 +458,142 @@ def main():
         return not skip_flag
 
     # =========================================================
-    # 步骤 4: preprocess
+    # Step 3: panel_derive  (setup step — skipped in full pipeline)
+    # =========================================================
+    if _should_run("panel_derive", True) and fastq_files:
+        logger.info("━━ Step 3: Derive panel BED from FASTQ alignments ━━")
+        from scripts.derive_panel_bed import derive_panel_bed as _derive_panel
+        out_bed = config.get("data", {}).get("probe_panel_bed") or "data/panel_B10308.bed"
+        ok = _derive_panel(fastq_files, out_bed, config=config, workdir=workdir)
+        if ok:
+            _save_state(workdir, {"completed_steps": state.get("completed_steps", []) + ["panel_derive"],
+                                  "panel_bed": out_bed})
+            logger.info(f"✓  Step [panel_derive] complete — {out_bed}")
+        else:
+            logger.error("panel_derive failed")
+        if single_step:
+            return
+
+    # =========================================================
+    # Step 4: preprocess
     # =========================================================
     if _should_run("preprocess", args.skip_preprocessing) and fastq_files:
-        logger.info("━━ 步骤 4: fastp质控 + UMI提取 ━━")
-        processed_files = preprocess_fastq(fastq_files, workdir, plasma=args.plasma, config=config)
+        logger.info("━━ Step 4: fastp QC + UMI extraction ━━")
+        processed_files = preprocess_fastq(fastq_files, workdir, plasma=(mode == "plasma"), config=config)
         if processed_files:
             _save_state(workdir, {"processed_files": processed_files,
                                   "completed_steps": state.get("completed_steps", []) + ["preprocess"]})
             state["processed_files"] = processed_files
-            logger.info(f"  → 预处理输出: {processed_files}")
+            logger.info(f"  → Preprocessed: {processed_files}")
         else:
-            logger.error("预处理失败，processed_files 为空")
+            logger.error("Preprocessing failed — processed_files is empty")
             if single_step:
                 return
     elif not single_step:
-        logger.info("4. 跳过数据预处理")
+        logger.info("4. Skipping preprocessing")
 
     # =========================================================
-    # 步骤 5: align
+    # Step 5: align
     # =========================================================
     if _should_run("align", args.skip_alignment) and processed_files and not bam_files:
-        logger.info("━━ 步骤 5: bwameth 双端比对 ━━")
-        bam_files = align_methylation(processed_files, workdir, config, plasma=args.plasma)
+        logger.info("━━ Step 5: bwameth paired-end alignment ━━")
+        bam_files = align_methylation(processed_files, workdir, config, plasma=(mode == "plasma"))
         if bam_files:
             _save_state(workdir, {"bam_files": bam_files,
                                   "completed_steps": state.get("completed_steps", []) + ["align"]})
             state["bam_files"] = bam_files
-            logger.info(f"  → 比对输出: {bam_files}")
+            logger.info(f"  → BAM files: {bam_files}")
         else:
-            logger.error("比对失败，bam_files 为空")
+            logger.error("Alignment failed — bam_files is empty")
             if single_step:
                 return
     elif single_step and bam_files:
-        # 单步模式：bam_files 已从 pipeline_state.json 恢复，说明 align 已完成，跳过
-        logger.info(f"✓ align 已完成，跳过重复比对（共 {len(bam_files)} 个BAM已记录在状态文件中）")
+        logger.info(f"✓ align already done — {len(bam_files)} BAM(s) in state, skipping")
     elif not single_step:
-        logger.info("5. 跳过甲基化序列比对" if not bam_files else "5. 使用已有BAM文件")
+        logger.info("5. Skipping alignment" if not bam_files else "5. Using existing BAM files")
 
     # =========================================================
-    # 步骤 6: dedup
+    # Step 6: dedup
     # =========================================================
     if _should_run("dedup", args.skip_deduplication) and bam_files:
-        logger.info("━━ 步骤 6: UMI去重 ━━")
-        deduplicated_files = deduplicate_bam(bam_files, workdir, plasma=args.plasma, config=config)
+        logger.info("━━ Step 6: UMI-aware deduplication ━━")
+        deduplicated_files = deduplicate_bam(bam_files, workdir, plasma=(mode == "plasma"), config=config)
         if deduplicated_files:
             _save_state(workdir, {"deduplicated_files": deduplicated_files,
                                   "completed_steps": state.get("completed_steps", []) + ["dedup"]})
             state["deduplicated_files"] = deduplicated_files
-            logger.info(f"  → 去重输出: {deduplicated_files}")
+            logger.info(f"  → Deduplicated: {deduplicated_files}")
         else:
-            logger.error("去重失败，deduplicated_files 为空")
+            logger.error("Deduplication failed — deduplicated_files is empty")
             if single_step:
                 return
     elif not single_step:
-        logger.info("6. 跳过PCR重复去除")
+        logger.info("6. Skipping deduplication")
 
     # =========================================================
-    # 步骤 7: target
+    # Step 7: target
     # =========================================================
     if _should_run("target", args.skip_target_extraction) and deduplicated_files:
-        logger.info("━━ 步骤 7: On-target过滤 ━━")
+        logger.info("━━ Step 7: On-target filter ━━")
         target_files = extract_target_regions(deduplicated_files, workdir, config)
         if target_files:
             _save_state(workdir, {"target_files": target_files,
                                   "completed_steps": state.get("completed_steps", []) + ["target"]})
             state["target_files"] = target_files
-            logger.info(f"  → On-target输出: {target_files}")
+            logger.info(f"  → On-target BAMs: {target_files}")
         else:
-            logger.warning("on-target过滤未生成输出，后续步骤使用去重后BAM")
+            logger.warning("On-target filter produced no output — subsequent steps will use deduplicated BAMs")
     elif not single_step:
-        logger.info("7. 跳过靶向区域提取")
+        logger.info("7. Skipping on-target filter")
 
     # =========================================================
-    # 步骤 7.5: mbias
+    # Step 8: mbias
     # =========================================================
-    if _should_run("mbias", False) and args.plasma:
+    if _should_run("mbias", False) and mode == "plasma":
         mbias_input = target_files or deduplicated_files
         if mbias_input:
             reference_genome = config.get("extraction", {}).get("reference_genome")
             if reference_genome and os.path.exists(reference_genome):
-                logger.info("━━ 步骤 7.5: M-bias检查 ━━")
+                logger.info("━━ Step 8: M-bias check ━━")
                 check_mbias(mbias_input, workdir, reference_genome, config=config)
                 _save_state(workdir, {"mbias_done": True,
                                       "completed_steps": state.get("completed_steps", []) + ["mbias"]})
-                logger.info("  → M-bias SVG 已保存至 workdir，请检查 R2 3'端曲线")
+                logger.info("  → M-bias SVGs saved to workdir — review R2 3' bias before extract")
             else:
-                logger.warning("7.5. 跳过M-bias检查（参考基因组不存在）")
+                logger.warning("7.5. Skipping M-bias check (reference genome not found)")
         else:
-            logger.warning("7.5. 跳过M-bias检查（无可用BAM）")
+            logger.warning("7.5. Skipping M-bias check (no BAM available)")
 
     # =========================================================
-    # 步骤 8: extract
+    # Step 9: extract
     # =========================================================
     if _should_run("extract", args.skip_extraction) and not methylation_files_input:
         bam_input = target_files or deduplicated_files
         if bam_input:
-            logger.info("━━ 步骤 8: 甲基化信息提取 ━━")
-            aligner = config.get("plasma", {}).get("aligner", "bismark") if args.plasma else "bismark"
+            logger.info("━━ Step 9: Methylation extraction ━━")
+            if mode == "plasma":
+                aligner = config.get("plasma", {}).get("aligner", "bismark")
+            else:
+                aligner = config.get("tissue", {}).get("aligner", "bismark")
+            logger.info(f"  [Mode: {mode}  Aligner: {aligner}]")
 
-            if args.plasma and aligner == "bwameth":
-                # ── bwameth 路径：MethylDackel extract → 按 Excel 分组 → 合并同组 ──
-                logger.info(f"  [提取工具: MethylDackel（对应 aligner=bwameth）]")
+            if aligner == "bwameth":
+                logger.info("  [Extractor: MethylDackel (aligner=bwameth)]")
                 meth_files = extract_methylation_methyldackel(bam_input, workdir, config)
                 if meth_files:
                     from methylation.sample_grouping import group_methylation_files_v2
-                    benign_files, malignant_files = group_methylation_files_v2(meth_files, "plasma" if args.plasma else "tissue")
-                    logger.info(f"  → 分组：良性 {len(benign_files)} 个，恶性 {len(malignant_files)} 个")
+                    _mode_cfg = config.get(mode, {})
+                    _excel_sheet = _mode_cfg.get("excel_sheet", mode)
+                    logger.info(f"  [Excel sheet: {_excel_sheet}]")
+                    benign_files, malignant_files = group_methylation_files_v2(
+                        meth_files, category=_excel_sheet
+                    )
+                    logger.info(f"  → Grouped: {len(benign_files)} benign, {len(malignant_files)} malignant")
 
                     s1_path = os.path.join(workdir, "sample1_methylation.bedGraph")
                     s2_path = os.path.join(workdir, "sample2_methylation.bedGraph")
 
                     def _sample_id(path):
-                        """从 bedGraph 路径提取纯样本 ID，如 B10002_CpG.bedGraph → B10002。"""
                         return os.path.basename(path).split("_CpG")[0].split(".")[0].split("_")[0]
 
                     if benign_files:
@@ -567,7 +603,7 @@ def main():
                     else:
                         sample1_methylation = meth_files[0]
                         benign_samples = [_sample_id(meth_files[0])]
-                        logger.warning("  → 未找到良性样本，以第1个文件作为 sample1")
+                        logger.warning("  → No benign files found — using first file as sample1")
 
                     if malignant_files:
                         merge_methylation_files(malignant_files, s2_path)
@@ -576,16 +612,16 @@ def main():
                     else:
                         sample2_methylation = meth_files[1] if len(meth_files) > 1 else meth_files[0]
                         malignant_samples = [_sample_id(sample2_methylation)]
-                        logger.warning("  → 未找到恶性样本，以第2个文件作为 sample2")
+                        logger.warning("  → No malignant files found — using second file as sample2")
             else:
-                # ── bismark 路径：bismark_methylation_extractor（经 extract_methylation_info 封装）──
-                logger.info(f"  [提取工具: bismark_methylation_extractor（对应 aligner=bismark）]")
-                precomputed_bams = bam_input if args.plasma else None
+                logger.info("  [Extractor: bismark_methylation_extractor (aligner=bismark)]")
+                precomputed_bams = bam_input if mode == "plasma" else None
                 sample1_methylation, sample2_methylation = extract_methylation_info(
                     workdir, fastq_files,
                     group_method=args.group_method,
                     config=config,
                     bam_files=precomputed_bams,
+                    category=mode,
                 )
 
             _save_state(workdir, {
@@ -599,23 +635,23 @@ def main():
             state["sample2_methylation"] = sample2_methylation
             state["benign_samples"] = benign_samples
             state["malignant_samples"] = malignant_samples
-            logger.info(f"  → 甲基化文件: {sample1_methylation}, {sample2_methylation}")
+            logger.info(f"  → Methylation files: {sample1_methylation}, {sample2_methylation}")
         else:
-            logger.error("无可用BAM文件，无法提取甲基化信息")
+            logger.error("No BAM files available for methylation extraction")
             if single_step:
                 return
     elif methylation_files_input and not single_step:
-        logger.info("8. 使用提供的甲基化数据文件")
+        logger.info("8. Using provided methylation files")
         sample1_methylation = methylation_files_input[0] if methylation_files_input else None
         sample2_methylation = methylation_files_input[1] if len(methylation_files_input) > 1 else sample1_methylation
     elif not single_step:
-        logger.info("8. 跳过甲基化信息提取")
+        logger.info("8. Skipping methylation extraction")
 
     # =========================================================
-    # 步骤 9: filter
+    # Step 10: filter
     # =========================================================
     if _should_run("filter", args.skip_filtering) and (sample1_methylation or sample2_methylation):
-        logger.info("━━ 步骤 9: 甲基化数据过滤 + 候选区域 ━━")
+        logger.info("━━ Step 10: Methylation filtering + candidate regions ━━")
         if sample1_methylation:
             filtered_sample1 = filter_methylation_data(sample1_methylation, workdir, config)
         if sample2_methylation:
@@ -634,156 +670,207 @@ def main():
             "filtered_sample1": filtered_sample1, "filtered_sample2": filtered_sample2,
             "candidate_sample1": candidate_sample1, "candidate_sample2": candidate_sample2,
         })
-        logger.info(f"  → 候选区域文件: {candidate_sample1}, {candidate_sample2}")
+        logger.info(f"  → Candidate region files: {candidate_sample1}, {candidate_sample2}")
     elif not single_step:
-        logger.info("9. 跳过甲基化数据过滤")
+        logger.info("9. Skipping methylation filtering")
 
     # =========================================================
-    # 步骤 10: diff
+    # Step 11: diff
     # =========================================================
     if _should_run("diff", args.skip_diff) and candidate_sample1 and candidate_sample2:
-        logger.info("━━ 步骤 10: 差异甲基化分析 ━━")
+        logger.info("━━ Step 11: Differential methylation analysis ━━")
         perform_diff_analysis(candidate_sample1, candidate_sample2, result_dir)
         _save_state(workdir, {"completed_steps": state.get("completed_steps", []) + ["diff"]})
     elif not single_step:
-        logger.info("10. 跳过差异甲基化分析")
+        logger.info("10. Skipping differential analysis")
 
     # =========================================================
-    # 步骤 11: visualize
+    # Step 12: visualize
     # =========================================================
     if _should_run("visualize", args.skip_visualization):
         vis_input = candidate_sample1 or sample1_methylation
         if vis_input and os.path.exists(vis_input):
-            logger.info("━━ 步骤 11: 可视化图表生成 ━━")
+            logger.info("━━ Step 12: Visualization ━━")
             visualize_results(vis_input, result_dir)
             _save_state(workdir, {"completed_steps": state.get("completed_steps", []) + ["visualize"]})
         else:
-            logger.warning("11. 跳过可视化（无可用甲基化文件）")
+            logger.warning("11. Skipping visualization (no methylation file available)")
     elif not single_step:
-        logger.info("11. 跳过可视化图表生成")
+        logger.info("11. Skipping visualization")
 
     # =========================================================
-    # 步骤 14: feature_select
-    # =========================================================
-    if _should_run("feature_select", False):
-        if benign_samples and malignant_samples:
-            logger.info("━━ 步骤 14: 特征选择 (LASSO + RF) ━━")
-            from scripts.modules.feature_utils import select_features
-            panel_features, _ = select_features(
-                workdir, result_dir, config, benign_samples, malignant_samples
-            )
-            _save_state(workdir, {"completed_steps": state.get("completed_steps", []) + ["feature_select"]})
-            logger.info(f"  → 入选特征: {len(panel_features)} 个，结果保存在 {result_dir}")
-        else:
-            logger.error("feature_select 需要 benign_samples 和 malignant_samples，"
-                         "请先完成 extract 步骤（或确保 pipeline_state.json 中有分组信息）")
-            if single_step:
-                return
-
-    # =========================================================
-    # 步骤 14.5: outlier_detect
+    # Step 13: outlier_detect  (runs BEFORE feature_select so that
+    #           outlier samples are excluded from LASSO/RF selection)
     # =========================================================
     if _should_run("outlier_detect", False):
         if benign_samples and malignant_samples:
-            logger.info("━━ 步骤 14.5: 样本异常检测 ━━")
+            logger.info("━━ Step 13: Sample outlier detection ━━")
             import numpy as np
             from scripts.modules.feature_utils import build_feature_matrix, detect_sample_outliers
             fm_path = os.path.join(result_dir, "feature_matrix.npz")
             if os.path.exists(fm_path):
-                data = np.load(fm_path, allow_pickle=True)
-                X_od       = data["X"]
-                y_od       = data["y"]
-                sids_od    = list(data["sample_ids"])
+                data    = np.load(fm_path, allow_pickle=True)
+                X_od    = data["X"]
+                y_od    = data["y"]
+                sids_od = list(data["sample_ids"])
+                logger.info(f"  Loaded cached feature matrix: {X_od.shape[0]} × {X_od.shape[1]}")
             else:
-                logger.info("  未找到 feature_matrix.npz，从 bedGraph 构建特征矩阵...")
-                X_od, y_od, sids_od, _, _, _ = build_feature_matrix(
+                logger.info("  Building feature matrix from bedGraphs...")
+                X_od, y_od, sids_od, feat_od, D_od, ri88_od = build_feature_matrix(
                     workdir, result_dir, benign_samples, malignant_samples, config
                 )
+                # Save so feature_select (Step 14) can load from cache
+                np.savez(fm_path,
+                         X=X_od, y=y_od,
+                         sample_ids=np.array(sids_od, dtype=object),
+                         feature_names=np.array(feat_od, dtype=object),
+                         D=D_od,
+                         region_in_88=ri88_od)
+                logger.info(f"  Feature matrix cached: {fm_path} "
+                            f"({X_od.shape[0]} samples × {X_od.shape[1]} features)")
             outlier_df, suspect_ids = detect_sample_outliers(X_od, y_od, sids_od, config)
             if not outlier_df.empty:
                 outlier_path = os.path.join(result_dir, "outlier_report.csv")
                 outlier_df.to_csv(outlier_path, index=False)
-                logger.info(f"  → 异常检测报告已保存: {outlier_path}")
+                logger.info(f"  → Outlier report saved: {outlier_path}")
             if suspect_ids:
-                logger.warning(f"  ⚠ 疑似异常样本（≥2项指标触发）: {suspect_ids}")
-                logger.warning(f"  ⚠ 请查看 {os.path.join(result_dir, 'outlier_report.csv')}，"
-                               f"确认后在 config.toml [ml] exclude_samples = [...] 中填写 ID，"
-                               f"再重跑 classify 步骤")
-            _save_state(workdir, {"completed_steps": state.get("completed_steps", []) + ["outlier_detect"]})
+                logger.warning(f"  ⚠ Suspected outliers (≥2 flags): {suspect_ids}")
+                logger.warning(
+                    "  ⚠ These samples will be EXCLUDED from feature selection (Step 14)."
+                )
+                logger.warning(
+                    "  ⚠ Review outlier_report.csv; add confirmed IDs to "
+                    "config.toml [ml] exclude_samples to also exclude from classifiers."
+                )
+            else:
+                logger.info("  No suspect samples detected")
+            _save_state(workdir, {
+                "suspect_ids": suspect_ids,
+                "completed_steps": state.get("completed_steps", []) + ["outlier_detect"],
+            })
+            state["suspect_ids"] = suspect_ids
         else:
-            logger.error("outlier_detect 需要 benign_samples 和 malignant_samples，"
-                         "请先完成 extract 步骤（或确保 pipeline_state.json 中有分组信息）")
+            logger.error("outlier_detect requires benign_samples and malignant_samples — "
+                         "complete the extract step first")
             if single_step:
                 return
 
     # =========================================================
-    # 步骤 15: classify
+    # Step 14: feature_select  (reads suspect_ids from Step 13 state
+    #           to exclude outlier samples from LASSO/RF selection)
+    # =========================================================
+    if _should_run("feature_select", False):
+        if benign_samples and malignant_samples:
+            logger.info("━━ Step 14: Feature selection (LASSO + RF) ━━")
+            from scripts.modules.feature_utils import select_features
+            suspect_ids = state.get("suspect_ids") or []
+            if suspect_ids:
+                logger.info(
+                    f"  Excluding {len(suspect_ids)} outlier sample(s) from feature selection: "
+                    f"{suspect_ids}"
+                )
+            panel_features, _ = select_features(
+                workdir, result_dir, config, benign_samples, malignant_samples,
+                extra_exclude_ids=suspect_ids or None,
+            )
+            _save_state(workdir, {"completed_steps": state.get("completed_steps", []) + ["feature_select"]})
+            logger.info(f"  → {len(panel_features)} features selected — saved to {result_dir}")
+        else:
+            logger.error("feature_select requires benign_samples and malignant_samples — "
+                         "complete the extract step first (or ensure pipeline_state.json has grouping info)")
+            if single_step:
+                return
+
+    # =========================================================
+    # Step 15: classify
     # =========================================================
     if _should_run("classify", False):
         if benign_samples and malignant_samples:
-            logger.info("━━ 步骤 15: 诊断分类器 LOO-CV ━━")
+            logger.info("━━ Step 15: Diagnostic classifiers LOO-CV ━━")
             from scripts.modules.classifier_utils import run_classifiers
             _, _ = run_classifiers(
                 workdir, result_dir, config, benign_samples, malignant_samples
             )
             _save_state(workdir, {"completed_steps": state.get("completed_steps", []) + ["classify"]})
-            logger.info(f"  → 分类器结果已保存至 {result_dir}")
+            logger.info(f"  → Classifier results saved to {result_dir}")
         else:
-            logger.error("classify 需要 benign_samples 和 malignant_samples，"
-                         "请先完成 extract 步骤（或确保 pipeline_state.json 中有分组信息）")
+            logger.error("classify requires benign_samples and malignant_samples — "
+                         "complete the extract step first")
             if single_step:
                 return
 
     # =========================================================
-    # 步骤 16: subtype_classify
+    # Step 16: subtype_classify
     # =========================================================
     if _should_run("subtype_classify", False):
-        logger.info("━━ 步骤 16: 亚型分类器 LOO-CV ━━")
+        logger.info("━━ Step 16: Subtype classifier LOO-CV ━━")
         from scripts.modules.subtype_utils import run_subtype_classifier
         sub_results, _ = run_subtype_classifier(workdir, result_dir, config)
         _save_state(workdir, {"completed_steps": state.get("completed_steps", []) + ["subtype_classify"]})
         if sub_results:
-            logger.info(f"  → 亚型分类结果已保存至 {result_dir}")
+            logger.info(f"  → Subtype classification results saved to {result_dir}")
 
     # =========================================================
-    # 步骤 17: annotate（在 report 之前运行，结果会嵌入报告）
+    # Step 17: temporal_validate (plasma only)
+    # =========================================================
+    if _should_run("temporal_validate", False):
+        logger.info("━━ Step 17: Temporal split validation ━━")
+        if mode != "plasma":
+            logger.warning("temporal_validate is only applicable in plasma mode — skipping")
+        elif not (benign_samples and malignant_samples):
+            logger.error("temporal_validate requires benign_samples and malignant_samples — "
+                         "complete the classify step first")
+            if single_step:
+                return
+        else:
+            from scripts.modules.classifier_utils import run_temporal_validation
+            from scripts.modules.subtype_utils import run_subtype_temporal_validation
+            run_temporal_validation(workdir, result_dir, config, benign_samples, malignant_samples)
+            # run_subtype_temporal_validation(result_dir, config)
+            _save_state(workdir, {"completed_steps": state.get("completed_steps", []) + ["temporal_validate"]})
+            logger.info(f"  → Temporal validation results saved to {result_dir}")
+
+    # =========================================================
+    # Step 18: annotate
     # =========================================================
     if _should_run("annotate", False):
-        logger.info("━━ 步骤 17: 特征位点注释 (Ensembl + EWAS Catalog) ━━")
+        logger.info("━━ Step 18: Site annotation (Ensembl + EWAS Catalog) ━━")
         from scripts.modules.annotation_utils import run_annotation
         ann_df, ann_summary = run_annotation(result_dir, config)
         if not ann_df.empty:
             _save_state(workdir, {"completed_steps": state.get("completed_steps", []) + ["annotate"]})
-            logger.info(f"  → 注释结果已保存至 {result_dir}/panel_annotation.csv")
-            logger.info(f"  → EWAS命中: {ann_summary.get('n_with_ewas',0)}/{ann_summary.get('n_sites',0)} 个位点"
-                        f"（窗口 ±{ann_summary.get('ewas_window_bp',500)} bp）")
+            logger.info(f"  → Annotation saved to {result_dir}/panel_annotation.csv")
+            logger.info(
+                f"  → EWAS hits: {ann_summary.get('n_with_ewas', 0)}/{ann_summary.get('n_sites', 0)} sites "
+                f"(window ±{ann_summary.get('ewas_window_bp', 500)} bp)"
+            )
         else:
-            logger.error("  注释步骤未产生结果，请检查 panel_cpg.csv 是否存在")
+            logger.error("  Annotation produced no results — check that panel_cpg.csv exists")
 
     # =========================================================
-    # 步骤 18: external_validate（可选，需要 data/external/ 参考数据）
+    # Step 19: external_validate
     # =========================================================
     if _should_run("external_validate", False):
-        logger.info("━━ 步骤 18: 公共数据集交叉验证 ━━")
+        logger.info("━━ Step 19: External dataset cross-validation ━━")
         from scripts.external_validate import run_external_validation
-        data_dir_ext = "data"
+        data_dir_ext = config.get("directories", {}).get("data_dir", "")
         external_dir = os.path.join(data_dir_ext, "external")
         if not os.path.isdir(external_dir):
-            logger.error(f"  external_dir 不存在: {external_dir}  — "
-                         f"请将参考数据放入 data/external/ 后重试")
+            logger.error(f"  external_dir not found: {external_dir} — "
+                         "place reference data under data/external/ and retry")
             if single_step:
                 return
         else:
             run_external_validation(result_dir, data_dir_ext, external_dir)
             _save_state(workdir, {"completed_steps": state.get("completed_steps", []) + ["external_validate"]})
-            logger.info(f"  → 外部验证完成: {os.path.join(result_dir, 'external_validation.csv')}")
-            logger.info("  → 运行 --step report 将 Section 13 嵌入 HTML 报告")
+            logger.info(f"  → External validation saved: {os.path.join(result_dir, 'external_validation.csv')}")
+            logger.info("  → Run --step report to embed Section 13 into the HTML report")
 
     # =========================================================
-    # 步骤 19: report（最后一步，汇总所有结果；含注释节 + 外部验证节）
+    # Step 20: report
     # =========================================================
     if _should_run("report", args.skip_report):
-        logger.info("━━ 步骤 19: 生成分析报告 ━━")
+        logger.info("━━ Step 20: Report generation ━━")
         generate_report(workdir, result_dir,
                         sample1_methylation, sample2_methylation,
                         candidate_sample1, candidate_sample2,
@@ -791,23 +878,21 @@ def main():
                         malignant_samples=malignant_samples)
         _save_state(workdir, {"completed_steps": state.get("completed_steps", []) + ["report"]})
 
-    # ── 完成提示 ──
+    # Completion message
     if single_step:
-        print(f"\n✓  步骤 [{single_step}] 完成")
-        print(f"   工作目录（下一步传入 --workdir）: {workdir}")
+        print(f"\n✓  Step [{single_step}] complete")
+        print(f"   Workdir (pass to next step via --workdir): {workdir}")
         _print_step_list(workdir)
     else:
-        print(f"\n✓  全流程分析完成！结果保存在: {result_dir}")
+        print(f"\n✓  Full pipeline complete — results in: {result_dir}")
 
-    # ── 清理 ──
     if args.clean_temp and not single_step:
         try:
             shutil.rmtree(workdir)
-            logger.info(f"临时目录已清理: {workdir}")
+            logger.info(f"Temp directory cleaned: {workdir}")
         except Exception as e:
-            logger.error(f"清理临时文件时出错: {e}")
+            logger.error(f"Failed to clean temp directory: {e}")
 
 
 if __name__ == "__main__":
     main()
-

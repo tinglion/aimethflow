@@ -681,10 +681,57 @@ def run_external_validation(result_dir: str, data_dir: str, external_dir: str):
                 logger.warning(f"    ... and {len(fail_sites)-10} more (see CSV)")
     logger.info("=" * 60)
 
-    # ── 7. Save ──────────────────────────────────────────────────────────────
+    # ── 7. Save external_validation.csv ─────────────────────────────────────
     out_path = os.path.join(result_dir, "external_validation.csv")
     result.to_csv(out_path, index=False)
     logger.info(f"Saved: {out_path}")
+
+    # ── 8. Write blood-filtered panel_cpg_blood_filtered.csv ─────────────────
+    #  Probe-matched sites with blood_mean_beta >= BLOOD_THRESHOLD are removed.
+    #  Un-matched sites (no 450K probe) are retained as-is (no blood evidence).
+    #  Classifiers (Steps 15 / 17) will auto-detect and prefer the filtered file.
+    panel_path = os.path.join(result_dir, "panel_cpg.csv")
+    if os.path.exists(panel_path):
+        blood_fail_sites = set(
+            result.loc[
+                (result["probe_matched"] == True) & (result["blood_pass"] == False),
+                "feature",
+            ]
+        )
+        panel_df = pd.read_csv(panel_path)
+        filtered_df = panel_df[~panel_df["feature"].isin(blood_fail_sites)].copy()
+        filtered_path = os.path.join(result_dir, "panel_cpg_blood_filtered.csv")
+        filtered_df.to_csv(filtered_path, index=False)
+
+        n_removed  = len(blood_fail_sites)
+        n_retained = len(filtered_df)
+        n_total_panel = len(panel_df)
+        logger.info(
+            f"Blood-filter: {n_removed} site(s) removed (blood_mean_beta >= {BLOOD_THRESHOLD}) "
+            f"→ {n_retained}/{n_total_panel} sites retained in panel_cpg_blood_filtered.csv"
+        )
+        if n_removed:
+            logger.warning(
+                "Re-run --step classify (and --step temporal_validate) to apply the "
+                "blood-filtered panel to classifier training."
+            )
+
+        # Summary CSV for reporting
+        summary_path = os.path.join(result_dir, "blood_filter_summary.csv")
+        pd.DataFrame([{
+            "panel_total":         n_total_panel,
+            "probe_matched":       n_probe_hit,
+            "blood_fail_removed":  n_removed,
+            "panel_retained":      n_retained,
+            "blood_threshold":     BLOOD_THRESHOLD,
+        }]).to_csv(summary_path, index=False)
+        logger.info(f"Saved: {summary_path}")
+    else:
+        logger.warning(
+            f"panel_cpg.csv not found at {panel_path} — blood-filtered panel not written. "
+            "Run --step feature_select first."
+        )
+
     return result
 
 

@@ -1,13 +1,13 @@
-# AIMethFlow — 卵巢癌血浆 cfDNA 靶向甲基化分析
+# AIMethFlow — Ovarian Cancer Plasma cfDNA Targeted Methylation Analysis
 
-卵巢癌早期诊断项目——基于血浆 cfDNA 的靶向甲基化测序分析流程，涵盖从原始 FastQ 到机器学习诊断分类的全流程（18 个步骤）。
+Early diagnosis project for ovarian cancer — targeted methylation sequencing analysis pipeline based on plasma cfDNA, covering the full workflow from raw FastQ to machine-learning diagnostic classification (18 steps).
 
-## 分析目标
+## Analysis Goals
 
-- 检测血浆游离 DNA（cfDNA）中与卵巢癌相关的 CpG 位点差异甲基化
-- 数据驱动发现候选位点（个体样本 bedGraph 直接聚合，88 个候选区域作为软先验加权）
-- 训练良恶性二分类模型（LR / SVM / RF / XGB / LGBM，Nested LOO-CV 评估，特征选择在每折训练集内完成）
-- 对恶性 + 交界性样本进行亚型多分类（高级别浆液性癌 / 子宫内膜样癌 / 透明细胞癌 / 低级别浆液性癌 / 黏液性）
+- Detect differential methylation at CpG sites associated with ovarian cancer in plasma cell-free DNA (cfDNA)
+- Data-driven discovery of candidate sites (individual-sample bedGraph direct aggregation; 88 candidate regions used as soft prior weighting)
+- Train benign/malignant binary classification models (LR / SVM / RF / XGB / LGBM, Nested LOO-CV evaluation, feature selection performed within each fold's training set)
+- Subtype multi-classification of malignant + borderline samples (high-grade serous carcinoma / endometrioid carcinoma / clear cell carcinoma / low-grade serous carcinoma / mucinous)
 
 ---
 
@@ -19,7 +19,7 @@ Before configuring the pipeline, confirm the following library parameters — th
 | --- | --- | --- |
 | UMI | **6N at R2 5' end** | Step 4 extraction, Step 6 deduplication method |
 | Library type | **Single-strand, highly directional (OB ≈ 1.2%)** | Step 5 `non_directional = false` |
-| End repair | **None; P7 adapter introduces poly-C (unmethylated)** | Step 4 `trim_tail2`, Step 7.5 M-bias check |
+| End repair | **None; P7 adapter introduces poly-C (unmethylated)** | Step 4 `trim_tail2`, Step 8 M-bias check |
 | 5' adapters | **12 nt low-complexity oligonucleotides on both R1 and R2** | Step 4 `trim_front1/2 = 12` |
 | Reference genome | hg38 (`/data/meth/bwa/hg38.fa`) | All steps |
 | bwameth c2t index | `/data/meth/bwa/hg38.fa.bwameth.c2t` (built, ~17 GB) | Step 5 |
@@ -43,52 +43,52 @@ Key differences vs. the prior (Youxun) approach:
 
 ---
 
-## 环境要求
+## Environment Requirements
 
-> **仅支持 Linux / WSL2**，生信工具（bismark、bwameth、MethylDackel 等）不支持 Windows 原生环境。
+> **Linux / WSL2 only** — bioinformatics tools (bismark, bwameth, MethylDackel, etc.) do not support native Windows environments.
 
-### 方式 A — Docker（推荐，开箱即用）
+### Option A — Docker (recommended, out-of-the-box)
 
-**前置条件**：Docker ≥ 24、Docker Compose Plugin（`docker compose` 命令可用）
+**Prerequisites**: Docker ≥ 24, Docker Compose Plugin (`docker compose` command available)
 
 ```bash
-# 1. 复制并填写路径
+# 1. Copy and fill in paths
 cp .env.example .env
-# 编辑 .env：填写宿主机上的数据/参考基因组/结果目录
+# Edit .env: set the host machine's data / reference genome / results directories
 
-# 2. 构建镜像（首次约 10–20 分钟，后续有缓存）
+# 2. Build the image (first time ~10–20 minutes; cached on subsequent runs)
 docker compose --progress=plain build
 
-# 3. 启动常驻容器
+# 3. Start the persistent container
 docker compose up -d
-# 提交分析任务
+# Submit an analysis job
 docker compose exec analysis \
     python /app/src/scripts/run_analysis.py --steps 1-19
-# 进入容器 shell
+# Enter the container shell
 docker compose exec analysis bash
 
-# 一次性运行（用完即删）
+# One-shot run (removed after completion)
 docker compose --profile run run --rm analysis-run \
     python /app/src/scripts/run_analysis.py --steps 1-19
 
-# 4. 启动 JupyterLab 分步查看结果
+# 4. Start JupyterLab to browse results step by step
 docker compose --profile jupyter up jupyter
-#    浏览器打开 http://localhost:8888
+#    Open http://localhost:8888 in your browser
 ```
 
-详细说明（挂载卷、工具版本、config.docker.toml 路径映射）→ [DOCKER.md](DOCKER.md)
+For details (mounted volumes, tool versions, config.docker.toml path mappings) → [DOCKER.md](DOCKER.md)
 
 ---
 
-### 方式 B — Conda（本地开发）
+### Option B — Conda (local development)
 
-#### 1. 创建 conda 环境
+#### 1. Create the conda environment
 
 ```bash
 conda create -n meth python=3.10.14 -y
 conda activate meth
 
-# 生信工具（bioconda）
+# Bioinformatics tools (bioconda)
 conda install -y -c bioconda -c conda-forge \
     fastp=0.23.4 \
     bwameth \
@@ -100,21 +100,21 @@ conda install -y -c bioconda -c conda-forge \
     umi_tools \
     pysam=0.22.0
 
-# Python 依赖（从 pyproject.toml 安装，单一来源）
+# Python dependencies (install from pyproject.toml, single source of truth)
 pip install -e ".[ml]" -i https://pypi.tuna.tsinghua.edu.cn/simple
-# 同时需要 Jupyter：pip install -e ".[ml,jupyter]"
-# 开发工具：        pip install -e ".[ml,jupyter,dev]"
+# Also includes Jupyter: pip install -e ".[ml,jupyter]"
+# Dev tools:            pip install -e ".[ml,jupyter,dev]"
 ```
 
-`[ml]` = xgboost + lightgbm；`[jupyter]` = jupyterlab + ipykernel；`[dev]` = 测试工具
+`[ml]` = xgboost + lightgbm; `[jupyter]` = jupyterlab + ipykernel; `[dev]` = testing tools
 
-#### 2. 参考基因组索引（首次运行）
+#### 2. Reference genome index (first run only)
 
 ```bash
-# bwameth 索引（血浆流程，推荐）
+# bwameth index (plasma pipeline, recommended)
 bwameth.py index /data/meth/bwa/hg38.fa
 
-# bismark 索引（组织流程）
+# bismark index (tissue pipeline)
 bismark_genome_preparation /data/meth/bwa/
 ```
 
@@ -129,41 +129,42 @@ bwameth c2t index files (all required, total ~17 GB):
 | `hg38.fa.bwameth.c2t.amb` | 42 KB | Ambiguous base table |
 | `hg38.fa.bwameth.c2t.ann` | 44 KB | Chromosome annotations (SAM header) |
 
-#### 3. 辅助文件
+#### 3. Auxiliary files
 
-| 文件 | 说明 |
+| File | Description |
 | --- | --- |
-| `data/OC_tissue_88_regions.hg38.txt` | 候选甲基化区域（88 个组织候选区域，作为软先验） |
-| `data/卵巢癌fq编号与样本信息对应表v3.xlsx` | 样本分组 Excel（含分类/亚型列） |
-| `/mnt/f/meth/hg38.repeat.bed` | hg38 重复序列 BED |
-| `/mnt/f/meth/hg38_upstream_2k_st.bed.gz` | 启动子区域 BED |
+| `data/OC_tissue_88_regions.hg38.txt` | Candidate methylation regions (88 tissue candidate regions, used as soft prior) |
+| `data/ovarian_fq_series_samples_v3.xlsx` | Sample grouping Excel (contains classification / subtype columns) |
+| `data/plasma_exp.xlsx` | Plasma sample collection dates (columns: `case_id`, `datetime` in `YYYYMMDD` format); required for temporal split validation in Step 17 (plasma mode only) |
+| `/mnt/f/meth/hg38.repeat.bed` | hg38 repeat element BED |
+| `/mnt/f/meth/hg38_upstream_2k_st.bed.gz` | Promoter region BED |
 
 ---
 
-## 项目结构
+## Project Structure
 
 ```text
-├── config.toml                    # 全局配置
-├── requirements.txt               # pip 依赖
-├── pyproject.toml                 # 包配置
-├── data/                          # 参考数据（BED、Excel）
+├── config.toml                    # Global configuration
+├── requirements.txt               # pip dependencies
+├── pyproject.toml                 # Package configuration
+├── data/                          # Reference data (BED, Excel)
 ├── src/
-│   ├── methylation/               # 核心分析模块
-│   │   ├── diff_methylation.py    # 差异甲基化分析
-│   │   ├── sample_grouping.py     # Excel 样本分组
+│   ├── methylation/               # Core analysis modules
+│   │   ├── diff_methylation.py    # Differential methylation analysis
+│   │   ├── sample_grouping.py     # Excel sample grouping
 │   │   └── methylation_visualizer.py
 │   ├── scripts/
-│   │   ├── run_analysis.py        # 主入口（CLI）
-│   │   ├── webui.py               # Web UI（FastAPI，端口 9999）
+│   │   ├── run_analysis.py        # Main entry point (CLI)
+│   │   ├── webui.py               # Web UI (FastAPI, port 9999)
 │   │   └── modules/
-│   │       ├── alignment_utils.py     # 比对 / 去重 / 靶区过滤 / 提取
-│   │       ├── fastq_utils.py         # fastp 预处理
-│   │       ├── feature_utils.py       # 特征选择（Step 14）+ 异常检测（Step 14.5）
-│   │       ├── classifier_utils.py    # 诊断分类（Step 15）
-│   │       ├── subtype_utils.py       # 亚型分类（Step 16）
-│   │       ├── annotation_utils.py    # 位点注释（Step 17，Ensembl + EWAS + CpG island）
-│   │       └── report_utils.py        # 报告生成（Step 19）
-│   ├── external_validate.py           # 公共数据集交叉验证（Step 18，可选）
+│   │       ├── alignment_utils.py     # Alignment / dedup / on-target filtering / extraction
+│   │       ├── fastq_utils.py         # fastp preprocessing
+│   │       ├── feature_utils.py       # Feature selection (Step 14) + outlier detection (Step 13)
+│   │       ├── classifier_utils.py    # Diagnostic classification (Step 15)
+│   │       ├── subtype_utils.py       # Subtype classification (Step 16) + temporal validation (Step 17)
+│   │       ├── annotation_utils.py    # Site annotation (Step 18, Ensembl + EWAS + CpG island)
+│   │       └── report_utils.py        # Report generation (Step 20)
+│   ├── external_validate.py           # Public dataset cross-validation (Step 19, optional)
 │   ├── test/
 │   │   └── test_parse_sample_info.py
 │   └── utils/
@@ -174,111 +175,152 @@ bwameth c2t index files (all required, total ~17 GB):
 
 ---
 
-## 分析流程
+## Analysis Pipeline
 
-### 血浆模式（`--plasma`，推荐）
+### Plasma mode (`--mode plasma`, default)
 
 | Step | Key | Description | Tool |
 | --- | --- | --- | --- |
+| 1 | `data_check` | Validate config: sample Excel, ref genome, panel BED, FASTQ paths | Built-in |
+| 2 | `ref_index` | Build / verify bwameth hg38 c2t index (~17 GB, one-time setup) | bwameth |
+| 3 | `panel_derive` | Derive panel BED from representative FASTQ alignments | bwameth + bedtools |
 | 4 | `preprocess` | fastp QC + UMI extraction | fastp |
 | 5 | `align` | Paired-end alignment (two-step, avoids pipe deadlock) | bwameth (default) / bismark |
 | 6 | `dedup` | UMI-aware deduplication | umi_tools dedup --paired |
 | 7 | `target` | On-target filtering | bedtools intersect |
-| 7.5 | `mbias` | M-bias check (optional but recommended) | MethylDackel mbias |
-| 8 | `extract` | CpG methylation extraction | MethylDackel extract --mergeContext |
-| 9 | `filter` | Filter: repeat regions / depth / candidate regions | Custom + bedtools |
-| 10 | `diff` | Differential methylation (Wilcoxon, p<0.05 and \|Δβ\|>0.1) | Custom |
-| 11 | `visualize` | Density / scatter / heatmap plots | matplotlib |
-| 14 | `feature_select` | Feature selection (LASSO + RF union); hard-filter sites with <80% samples at ≥10x depth | scikit-learn |
-| 14.5 | `outlier_detect` | Sample outlier detection (coverage / PCA z-score / Isolation Forest) | scikit-learn |
+| 8 | `mbias` | M-bias check; auto-detects suggested trim values → `mbias_auto_trim.json` | MethylDackel mbias |
+| 9 | `extract` | CpG methylation extraction | MethylDackel extract --mergeContext |
+| 10 | `filter` | Filter: repeat regions / depth / candidate regions | Custom + bedtools |
+| 11 | `diff` | Differential methylation (Wilcoxon, p<0.05 and \|Δβ\|>0.1) | Custom |
+| 12 | `visualize` | Density / scatter / heatmap plots | matplotlib |
+| 13 | `outlier_detect` | Sample outlier detection (coverage / PCA z-score / Isolation Forest); suspect samples excluded from feature selection | scikit-learn |
+| 14 | `feature_select` | Feature selection (LASSO + RF union); outlier samples excluded from computation; hard-filter sites with <80% samples at ≥10x depth | scikit-learn |
 | 15 | `classify` | Diagnostic classifiers, Nested LOO-CV | LR / SVM / RF / XGB / LGBM |
 | 16 | `subtype_classify` | Subtype multi-class LOO-CV (malignant + borderline) | RF + SVM OvR |
-| 17 | `annotate` | Panel CpG annotation: gene context / CpG island / EWAS Catalog / EWAS Atlas / PubMed plasma hits | Ensembl REST + UCSC + EWAS Catalog + CNCB NGDC + NCBI |
-| 18 | `external_validate` *(optional)* | Cross-validate panel sites against public 450K datasets (blood baseline + TCGA-OV) | numpy / scipy |
-| 19 | `report` | HTML + JSON summary report (annotation + external-validation sections auto-embedded) | Custom |
+| 17 | `temporal_validate` | **Plasma only.** Temporal split validation: train on samples collected before 2024-07-01, evaluate on samples collected on/after that date. Covers both binary (benign/malignant) and subtype classification. Requires `data/plasma_exp.xlsx` (columns: `case_id`, `datetime`). | scikit-learn / XGB / LGBM |
+| 18 | `annotate` | Panel CpG annotation: gene context / CpG island / EWAS Catalog / EWAS Atlas / PubMed plasma hits | Ensembl REST + UCSC + EWAS Catalog + CNCB NGDC + NCBI |
+| 19 | `external_validate` *(optional)* | Cross-validate panel sites against public 450K datasets (blood baseline + TCGA-OV) | numpy / scipy |
+| 20 | `report` | HTML + JSON summary report (annotation + external-validation sections auto-embedded) | Custom |
 
-### 组织模式（无 `--plasma`）
+### Tissue mode (`--mode tissue`)
 
-步骤 4–11 可用（bismark + deduplicate_bismark）；步骤 14–18 需要 Excel 含良/恶性分组。
+Steps 4–12 available (bismark + deduplicate_bismark); steps 13–19 require the sample info Excel with benign/malignant groups.
 
 ---
 
-## 快速开始
+## Quick Start
 
-### Web UI（推荐）
+### Web UI (recommended)
 
-浏览器可视化操作配置、执行步骤、查看结果和报告。
+Visual interface for configuring, running steps, and browsing results and reports.
 
-**Docker 模式**（`docker compose up -d` 后自动启动）：
+**Docker mode** (auto-starts after `docker compose up -d`):
 
 ```text
 http://<server-ip>:9999
 ```
 
-**本地开发模式**：
+**Local development mode**:
 
 ```bash
-# 项目根目录下执行；METH_WORKDIR 告知 webui 在哪里找 config.toml / temp / result
+# Run from the project root; METH_WORKDIR tells the Web UI where to find config.toml / temp / result
 export METH_WORKDIR=$(pwd)          # Linux / macOS / WSL
 # $env:METH_WORKDIR = (Get-Location).Path  # PowerShell
 
 conda activate meth
 python src/scripts/webui.py
-# 浏览器打开 http://localhost:9999
+# Open http://localhost:9999 in your browser
 ```
 
-> Web UI 读写的是 `$METH_WORKDIR/config.toml`，本地开发时即项目根下的 `config.toml`。
-> Docker 容器内挂载的是 `config.docker.toml`，两者路径不同，互不干扰。
+> The Web UI reads and writes `$METH_WORKDIR/config.toml` — in local dev mode this is the project root `config.toml`.
+> Inside the Docker container it uses `config.docker.toml`; the two paths are independent.
 
 ---
 
-### 全流程一键运行
+### Full pipeline (one command)
 
 ```bash
-run-analysis --plasma /mnt/f/meth/OC_plasma/
+run-analysis --mode plasma /mnt/f/meth/OC_plasma/
 ```
 
-### 分步执行
+### Step-by-step execution
+
+#### Phase 1 — one-time setup (per environment / per panel design)
+
+```bash
+# Step 1: validate config prerequisites (ref genome, panel BED, sample Excel)
+run-analysis --step data_check
+
+# Step 2: build bwameth c2t index for hg38 (~17 GB, 30–60 min, run once)
+run-analysis --step ref_index
+
+# Step 3: derive panel BED
+# Recommended: run 2–3 pilot samples through align + dedup first, then reuse their BAMs.
+# This avoids redundant alignment — the dedup BAMs are already computed.
+
+PILOT_WORKDIR=temp/pilot
+run-analysis --mode plasma --step preprocess \
+    /mnt/g/OC_tissue/P10001.R1.fq.gz \
+    /mnt/g/OC_tissue/P10002.R1.fq.gz \
+    --workdir $PILOT_WORKDIR
+run-analysis --mode plasma --step align --workdir $PILOT_WORKDIR
+run-analysis --mode plasma --step dedup --workdir $PILOT_WORKDIR
+
+python src/scripts/derive_panel_bed.py \
+    --workdir $PILOT_WORKDIR \
+    --out data/panel_B10308.bed
+
+# Alternative: derive directly from FASTQ (re-aligns, slower)
+# python src/scripts/derive_panel_bed.py \
+#     --fq /mnt/g/OC_tissue/P10001.R1.fq.gz /mnt/g/OC_tissue/P10001.R2.fq.gz \
+#     --out data/panel_B10308.bed
+```
+
+#### Phase 2 — per-run analysis (all samples)
 
 ```bash
 WORKDIR=temp/20260406
 
 # Step 4: preprocessing (creates workdir; subsequent steps reuse it)
-run-analysis --plasma --step preprocess /mnt/f/meth/OC_plasma/  --workdir $WORKDIR
+run-analysis --mode plasma --step preprocess /mnt/f/meth/OC_plasma/  --workdir $WORKDIR
 # WORKDIR=$(ls -dt temp/20[0-9]* | head -1)   # capture generated workdir
 
-# Steps 5–11: alignment / dedup / extraction / analysis
-run-analysis --plasma --step align          --workdir $WORKDIR
-run-analysis --plasma --step dedup          --workdir $WORKDIR
-run-analysis --plasma --step target         --workdir $WORKDIR
-run-analysis --plasma --step mbias          --workdir $WORKDIR
-# ── review M-bias SVGs ($WORKDIR/*.mbias_OT.svg) before continuing ──
-run-analysis --plasma --step extract        --workdir $WORKDIR
-run-analysis --plasma --step filter         --workdir $WORKDIR
-run-analysis --plasma --step diff           --workdir $WORKDIR
-run-analysis --plasma --step visualize      --workdir $WORKDIR
+# Steps 5–12: alignment / dedup / extraction / analysis
+run-analysis --mode plasma --step align          --workdir $WORKDIR
+run-analysis --mode plasma --step dedup          --workdir $WORKDIR
+run-analysis --mode plasma --step target         --workdir $WORKDIR
+run-analysis --mode plasma --step mbias          --workdir $WORKDIR
+# ── mbias writes mbias_auto_trim.json; review SVGs if you want to override ──
+# ── set nOT/nOB = "auto" in config.toml to apply auto-detected values      ──
+run-analysis --mode plasma --step extract        --workdir $WORKDIR
+run-analysis --mode plasma --step filter         --workdir $WORKDIR
+run-analysis --mode plasma --step diff           --workdir $WORKDIR
+run-analysis --mode plasma --step visualize      --workdir $WORKDIR
 
-# Step 14: feature selection
-run-analysis --plasma --step feature_select --workdir $WORKDIR
-
-# Step 14.5: outlier detection → review result/outlier_report.csv
-run-analysis --plasma --step outlier_detect --workdir $WORKDIR
+# Step 13: outlier detection → review result/outlier_report.csv
+run-analysis --mode plasma --step outlier_detect --workdir $WORKDIR
 #   Add confirmed outlier IDs to config.toml [ml] exclude_samples = [...]
 
-# Steps 15–17: classifiers + annotation
-run-analysis --plasma --step classify         --workdir $WORKDIR
-run-analysis --plasma --step subtype_classify --workdir $WORKDIR
-# Step 17: annotate selected panel sites (network access required on first run; cached after)
-run-analysis --plasma --step annotate         --workdir $WORKDIR
-# Step 18 (optional): cross-validate against public datasets (requires data/external/)
-run-analysis --plasma --step external_validate --workdir $WORKDIR
-# Step 19 (last): generate report — auto-embeds annotation + external-validation sections
-run-analysis --plasma --step report           --workdir $WORKDIR
+# Step 14: feature selection (outlier samples automatically excluded from LASSO/RF)
+run-analysis --mode plasma --step feature_select --workdir $WORKDIR
+
+# Steps 15–16: classification
+run-analysis --mode plasma --step classify         --workdir $WORKDIR
+run-analysis --mode plasma --step subtype_classify --workdir $WORKDIR
+
+# Step 17: temporal split validation (plasma only; requires data/plasma_exp.xlsx)
+run-analysis --mode plasma --step temporal_validate --workdir $WORKDIR
+
+# Step 18: annotate selected panel sites (network access required on first run; cached after)
+run-analysis --mode plasma --step annotate          --workdir $WORKDIR
+# Step 19 (optional): cross-validate against public datasets (requires data/external/)
+run-analysis --mode plasma --step external_validate --workdir $WORKDIR
+# Step 20 (last): generate report — auto-embeds annotation + external-validation sections
+run-analysis --mode plasma --step report            --workdir $WORKDIR
 
 # Show all steps and current progress
 run-analysis --list-steps --workdir $WORKDIR
-# 
-zip -r 20260406_report.zip .\result\20260406\20260406_report\
+zip -r 20260406_report.zip result/20260406/20260406_report/
 ```
 
 ### Shell Script (background execution)
@@ -291,42 +333,57 @@ cd /mnt/e/projects/hq/meth
 export PYTHONPATH=src
 PY=/mnt/e/programs/ubuntu/miniconda3/envs/meth/bin/python
 
-$PY src/scripts/run_analysis.py --plasma --step preprocess /mnt/f/meth/OC_plasma/
+# ── Phase 1: one-time setup (comment out after first run) ────────────────────
+$PY src/scripts/run_analysis.py --step data_check
+$PY src/scripts/run_analysis.py --step ref_index
+
+# Run 2–3 pilot samples through align + dedup to get BAMs for panel derivation
+PILOT=temp/pilot
+$PY src/scripts/run_analysis.py --mode plasma --step preprocess \
+    /mnt/g/OC_tissue/P10001.R1.fq.gz \
+    /mnt/g/OC_tissue/P10001.R2.fq.gz \
+    --workdir $PILOT
+$PY src/scripts/run_analysis.py --mode plasma --step align --workdir $PILOT
+$PY src/scripts/run_analysis.py --mode plasma --step dedup --workdir $PILOT
+
+# Step 3: derive panel BED from those dedup BAMs (no re-alignment needed)
+$PY src/scripts/derive_panel_bed.py --samples 5 --workdir $PILOT \
+  --out temp/panel_P10001.bed
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Phase 2: full analysis (all samples) ─────────────────────────────────────
+$PY src/scripts/run_analysis.py --mode plasma --step preprocess /mnt/f/meth/OC_plasma/
 WORKDIR=$(ls -dt temp/20[0-9]* | head -1)
 echo "workdir: $WORKDIR"
 
-$PY src/scripts/run_analysis.py --plasma --step align          --workdir $WORKDIR
-$PY src/scripts/run_analysis.py --plasma --step dedup          --workdir $WORKDIR
-$PY src/scripts/run_analysis.py --plasma --step target         --workdir $WORKDIR
-$PY src/scripts/run_analysis.py --plasma --step mbias          --workdir $WORKDIR
+$PY src/scripts/run_analysis.py --mode plasma --step align          --workdir $WORKDIR
+$PY src/scripts/run_analysis.py --mode plasma --step dedup          --workdir $WORKDIR
+$PY src/scripts/run_analysis.py --mode plasma --step target         --workdir $WORKDIR
+$PY src/scripts/run_analysis.py --mode plasma --step mbias          --workdir $WORKDIR
+# mbias writes mbias_auto_trim.json with suggested trim values (see workdir/).
+# Review SVGs if you want to override. nOT/nOB = "auto" in config.toml applies them.
 
-echo "=== Review M-bias SVGs ($WORKDIR/*.mbias_OT.svg). Press Enter to continue, Ctrl+C to adjust. ==="
-read
-
-$PY src/scripts/run_analysis.py --plasma --step extract        --workdir $WORKDIR
-$PY src/scripts/run_analysis.py --plasma --step filter         --workdir $WORKDIR
-$PY src/scripts/run_analysis.py --plasma --step diff           --workdir $WORKDIR
-$PY src/scripts/run_analysis.py --plasma --step visualize      --workdir $WORKDIR
-$PY src/scripts/run_analysis.py --plasma --step feature_select --workdir $WORKDIR
-$PY src/scripts/run_analysis.py --plasma --step classify       --workdir $WORKDIR
-$PY src/scripts/run_analysis.py --plasma --step subtype_classify --workdir $WORKDIR
-$PY src/scripts/run_analysis.py --plasma --step annotate       --workdir $WORKDIR
-$PY src/scripts/run_analysis.py --plasma --step external_validate --workdir $WORKDIR
-$PY src/scripts/run_analysis.py --plasma --step report         --workdir $WORKDIR
-
-# Step 19 (optional): cross-validate panel sites against public 450K datasets
-# Requires data/external/ files — see "辅助工具 → Step 19" section
-# Runs external_validate.py then auto-regenerates report with Section 13 embedded
-$PY src/scripts/run_analysis.py --plasma --step external_validate --workdir $WORKDIR
+$PY src/scripts/run_analysis.py --mode plasma --step extract        --workdir $WORKDIR
+$PY src/scripts/run_analysis.py --mode plasma --step filter         --workdir $WORKDIR
+$PY src/scripts/run_analysis.py --mode plasma --step diff           --workdir $WORKDIR
+$PY src/scripts/run_analysis.py --mode plasma --step visualize      --workdir $WORKDIR
+$PY src/scripts/run_analysis.py --mode plasma --step outlier_detect --workdir $WORKDIR
+$PY src/scripts/run_analysis.py --mode plasma --step feature_select --workdir $WORKDIR
+$PY src/scripts/run_analysis.py --mode plasma --step classify        --workdir $WORKDIR
+$PY src/scripts/run_analysis.py --mode plasma --step subtype_classify --workdir $WORKDIR
+$PY src/scripts/run_analysis.py --mode plasma --step temporal_validate --workdir $WORKDIR
+$PY src/scripts/run_analysis.py --mode plasma --step annotate        --workdir $WORKDIR
+$PY src/scripts/run_analysis.py --mode plasma --step external_validate --workdir $WORKDIR
+$PY src/scripts/run_analysis.py --mode plasma --step report          --workdir $WORKDIR
 
 echo "=== Done! Report: result/analysis_report.html ==="
 ```
 
-### 常用选项
+### Common options
 
 | Option | Description |
 | --- | --- |
-| `--plasma` | Plasma mode (bwameth + UMI dedup) |
+| `--mode plasma\|tissue` | Pipeline mode: plasma (bwameth + UMI dedup) or tissue (default: plasma) |
 | `--step <name>` | Run a single step only |
 | `--workdir <path>` | Existing workdir (required for single-step mode) |
 | `--skip-report` | Skip report generation |
@@ -336,14 +393,14 @@ echo "=== Done! Report: result/analysis_report.html ==="
 
 ---
 
-## 配置文件 `config.toml`
+## Config File `config.toml`
 
-### 关键路径
+### Key paths
 
 ```toml
 [data]
 plasma_dir         = "/mnt/f/meth/OC_plasma"
-sample_info_excel  = "data/卵巢癌fq编号与样本信息对应表v3.xlsx"
+sample_info_excel  = "data/ovarian_fq_series_samples_v3.xlsx"
 probe_panel_bed    = "data/panel_B10308.bed"
 candidate_regions  = "data/OC_tissue_88_regions.hg38.txt"
 
@@ -354,7 +411,7 @@ reference_genome   = "/data/meth/bwa/hg38.fa"
 conda_env_bin      = "/path/to/miniconda3/envs/meth/bin"
 ```
 
-### 血浆参数 `[plasma]`
+### Plasma parameters `[plasma]`
 
 ```toml
 aligner       = "bwameth"   # or "bismark"
@@ -362,15 +419,16 @@ umi_length    = 6
 trim_front1   = 12          # R1 5' low-complexity oligonucleotides
 trim_front2   = 12          # R2 5' oligonucleotides after UMI
 trim_tail2    = 5           # R2 3' poly-C trim — adjust after reviewing M-bias SVG
-nOT           = "0,0,0,20"  # MethylDackel OT-strand positional bias correction
-nOB           = "0,0,17,0"  # MethylDackel OB-strand positional bias correction
+nOT           = "auto"      # "auto" → mbias_auto_trim.json; or explicit skip counts e.g. "0,0,0,39"
+nOB           = "auto"      # "auto" → mbias_auto_trim.json; or explicit skip counts e.g. "0,0,17,0"
+mbias_trim_percentile = 95  # percentile for aggregating trim values across samples (50=median, 100=max)
 non_directional = false     # confirmed highly directional (OB ≈ 1.2%)
 min_mapq      = 40
 methylated_read_threshold = 0.60   # same threshold as tissue analysis
 diff_delta_beta = 0.10      # |Δβ| threshold for differential analysis
 ```
 
-> **M-bias adjustment**: run `--step mbias` first and inspect the SVG. If the R2 3' methylation rate drops sharply, increase `trim_tail2` (e.g. 8 or 10) and re-run from `extract` (no re-alignment needed). If `nOT`/`nOB` need tuning, only `extract` onwards must be re-run.
+> **M-bias auto-detection**: run `--step mbias` first — it writes `mbias_auto_trim.json` with skip counts ready for `--nOT`/`--nOB` in the `extract` step. MethylDackel outputs *inclusion positions* (`--OT a,b,c,d`), not skip counts; the pipeline converts them automatically: 5' skip = position directly; 3' skip = `read_len − pos − 1` (e.g. `--OT 0,0,0,110` + `read_len=150` → `nOT "0,0,0,39"`). Set `nOT = "auto"` / `nOB = "auto"` in `config.toml [plasma]` to apply; use explicit skip-count strings (e.g. `"0,0,0,39"`) to override.
 
 ### M-bias Re-run Scope
 
@@ -379,14 +437,14 @@ diff_delta_beta = 0.10      # |Δβ| threshold for differential analysis
 | `trim_tail2` too small | Increase `trim_tail2` in `[plasma]` | `preprocess` → `dedup` → `target` → `extract` |
 | Positional bias visible | Adjust `nOT` / `nOB` in `[plasma]` | `extract` onwards (no re-alignment) |
 
-### 中间文件清理 `[cleanup]`
+### Intermediate file cleanup `[cleanup]`
 
 ```toml
 delete_after_dedup  = false   # delete sorted.bam after dedup
 delete_after_target = false   # delete dedup.bam after on-target filter
 ```
 
-### 线程配置 `[threads]`
+### Thread configuration `[threads]`
 
 ```toml
 fastp           = 8
@@ -395,7 +453,7 @@ samtools_sort   = 4
 methyldackel    = 4
 ```
 
-### 机器学习 `[ml]`
+### Machine learning `[ml]`
 
 ```toml
 # Feature selection
@@ -415,7 +473,7 @@ lasso_cv_folds    = 5
 # Coverage QC hard filter (applied at end of feature_select)
 min_10x_coverage_rate = 0.80       # remove panel sites with <80% of samples at ≥10x depth
 
-# Sample outlier detection (Step 14.5)
+# Sample outlier detection (Step 13)
 outlier_coverage_min = 0.30        # flag if <30% of CpG sites are covered
 outlier_pca_z        = 2.5         # flag if within-group PCA distance z-score exceeds this
 exclude_samples      = []          # fill after reviewing outlier_report.csv
@@ -450,7 +508,7 @@ API responses are cached in `result/annotation_cache.json` — re-runs are insta
 
 ---
 
-## 输出文件
+## Output Files
 
 | Dir | File | Description |
 | --- | --- | --- |
@@ -462,16 +520,20 @@ API responses are cached in `result/annotation_cache.json` — re-runs are insta
 | `result/` | `feature_importance.csv` | LASSO + RF feature scores |
 | `result/` | `panel_cpg.csv` | Final selected CpG panel |
 | `result/` | `panel_cpg_depth.csv` | Per-panel-site depth stats: `coverage_rate`, `n_10x`, `coverage_rate_10x`, `pass_coverage_qc` |
-| `result/` | `feature_matrix.npz` | Feature matrix cache (reused by Step 15) |
+| `result/` | `feature_matrix.npz` | Feature matrix cache (reused by Step 15 classify) |
 | `result/` | `feature_selection_freq.csv` | LOO-CV per-fold feature selection frequency |
 | `result/` | `outlier_report.csv` | Outlier report (coverage / PCA z / Isolation Forest) |
 | `result/` | `classifier_summary.csv` | 5 classifiers AUC / Acc / Sens / Spec |
 | `result/` | `classifier_predictions.csv` | Per-sample predictions |
 | `result/` | `roc_curve.png` | ROC curves comparison |
 | `result/` | `confusion_matrix.png` | Confusion matrices (2 rows × 3 cols) |
+| `result/` | `temporal_validation_summary.csv` | Temporal split validation metrics (plasma only): AUC / Acc / Sens / Spec per classifier on samples collected on/after 2024-07-01 |
+| `result/` | `temporal_validation_predictions.csv` | Per-sample predictions for temporal validation set (plasma only) |
 | `result/` | `subtype_summary.csv` | Subtype classifier RF + SVM summary |
 | `result/` | `subtype_predictions.csv` | Per-sample subtype predictions (with confidence) |
 | `result/` | `subtype_roc.png` | Subtype OvR ROC curves |
+| `result/` | `subtype_temporal_summary.csv` | Temporal split subtype validation metrics (plasma only): accuracy per classifier |
+| `result/` | `subtype_temporal_predictions.csv` | Per-sample subtype predictions for temporal validation set (plasma only) |
 | `result/` | `panel_annotation.csv` | Per-site annotation: gene / CpG island / EWAS Catalog / EWAS Atlas / `has_plasma_evidence` / PubMed hits |
 | `result/` | `annotation_cache.json` | Cached API responses (speeds up re-runs) |
 | `result/` | `external_validation.csv` | P3 cross-validation: per-site blood baseline + TCGA-OV β stats (`blood_mean_beta`, `blood_pass`, `tcga_mean_beta`, `tcga_n_samples`) |
@@ -479,22 +541,23 @@ API responses are cached in `result/annotation_cache.json` — re-runs are insta
 | `temp/` | `*.dedup.bam` | UMI-deduplicated BAM |
 | `temp/` | `*_CpG.bedGraph` | Per-sample methylation bedGraph |
 | `temp/` | `*.mbias_OT.svg` | M-bias plot (OT strand) |
+| `temp/` | `mbias_auto_trim.json` | Auto-detected trim values (nOT/nOB) aggregated across all samples |
 
 ---
 
-## 样本 Excel 格式
+## Sample Excel Format
 
-`data/卵巢癌fq编号与样本信息对应表v3.xlsx` 须包含以下列（支持多 sheet）：
+`data/ovarian_fq_series_samples_v3.xlsx` must contain the following columns (multiple sheets supported):
 
-| 列名 | 内容 |
+| Column | Content |
 | --- | --- |
-| `fq_R1` | R1 文件名，如 `B10001.R1.fq.gz` |
-| `fq_R2` | R2 文件名 |
-| `分类` | `良性` / `恶性` / `交界性` |
-| `亚型` | `高级别浆液性癌` 等（恶性/交界性填写） |
+| `fq_R1` | R1 filename, e.g. `B10001.R1.fq.gz` |
+| `fq_R2` | R2 filename |
+| `category` | `benign` / `malignant` / `borderline` |
+| `subtype` | Subtype, e.g. `高级别浆液性癌` (fill in for malignant / borderline samples) |
 
-- `交界性` 不参与二分类训练，但参与亚型分类
-- 同一样本在多个 sheet 出现时自动去重
+- Borderline samples are excluded from binary classification training but are included in subtype classification
+- Duplicate entries for the same sample across multiple sheets are automatically deduplicated
 
 ---
 
@@ -546,13 +609,18 @@ Candidate BG    <1 MB    ← final analysis data (<0.1%)
 
 ---
 
-## 辅助工具
+## Helper tools
 
 ```bash
-# 快速查看 FastQ 统计
+# Quick FastQ statistics
 fq-inspect /mnt/f/meth/OC_plasma/B10001.R1.fq.gz
 
-# 从 BAM 文件生成 panel.bed（若无捕获 BED）
+# Derive panel BED from FASTQ files (Step 3, preferred)
+python src/scripts/derive_panel_bed.py \
+  --fq /mnt/f/meth/OC_plasma/*.R1.fq.gz \
+  --out data/panel_B10308.bed --samples 5
+
+# Derive panel BED from BAM (manual one-liner, if you already have aligned BAMs)
 bedtools genomecov -ibam sample.dedup.bam -bg \
   | awk '$4>10' | bedtools merge -d 100 \
   | awk 'length($1)<6' > panel.bed
@@ -561,85 +629,86 @@ bedtools genomecov -ibam sample.dedup.bam -bg \
 rm $WORKDIR/*.bwameth_pe.sorted.bam $WORKDIR/*.bwameth_pe.sorted.bam.bai
 rm $WORKDIR/*.bwameth_pe.dedup.bam  $WORKDIR/*.bwameth_pe.dedup.bam.bai
 
-# 单元测试
+# Unit tests
 pytest src/test/ -v
 ```
 
-### Step 18 — 公共数据集交叉验证（可选）
+### Step 19 — Public Dataset Cross-Validation (optional)
 
-#### 验证逻辑
+#### Validation Logic
 
-panel 位点经以下四步映射到公共 450K 数据集：
+Panel sites are mapped to public 450K datasets via the following four steps:
 
 ```text
         │
-        ▼  ① liftOver hg38 → hg19（UCSC chain 文件，每条染色体独立块映射）
-Panel 位点 (hg19)
+        ▼  ① liftOver hg38 → hg19 (UCSC chain file, per-chromosome block mapping)
+Panel sites (hg19)
         │
-        ▼  ② 在 ±2 bp 范围内匹配 Illumina 450K cg 探针（GPL13534 探针坐标）
-cg 探针 ID（如 cg07881041）
+        ▼  ② Match Illumina 450K cg probes within ±2 bp (GPL13534 probe coordinates)
+cg probe ID (e.g. cg07881041)
         │
-        ├─► ③ 查 GSE40279 全血 β 矩阵（656 样本均值）→ blood_mean_beta
-        └─► ④ 查 TCGA-OV β 矩阵（~590 样本均值）→ tcga_mean_beta
+        ├─► ③ Look up GSE40279 whole-blood β matrix (mean of 656 samples) → blood_mean_beta
+        └─► ④ Look up TCGA-OV β matrix (mean of ~590 samples) → tcga_mean_beta
 ```
 
-**血液基线（GSE40279）**：cfDNA 来自血浆，血细胞 cfDNA 是主要背景噪声。若某 panel 位点在正常全血中已高甲基化（`blood_mean_beta ≥ 0.10`），血浆中检测到的甲基化信号可能主要源于血细胞污染而非肿瘤，该位点的肿瘤特异性存疑——应考虑从 panel 移除或降权（`blood_pass = False` 行黄色高亮）。
+**Blood baseline (GSE40279)**: cfDNA originates from plasma; blood cell cfDNA is the primary background noise. If a panel site is already highly methylated in normal whole blood (`blood_mean_beta ≥ 0.10`), the methylation signal detected in plasma may be primarily from blood cell contamination rather than tumor — the tumor specificity of that site is questionable and it should be considered for removal or down-weighting from the panel (`blood_pass = False` rows highlighted in yellow).
 
-**肿瘤信号（TCGA-OV）**：确认 panel 位点在卵巢癌组织中确实存在甲基化信号（`tcga_mean_beta` 较高），与组织来源的差异甲基化结果形成互证。
+**Tumor signal (TCGA-OV)**: Confirms that panel sites have genuine methylation signal in ovarian cancer tissue (`tcga_mean_beta` is elevated), providing mutual corroboration with tissue-derived differential methylation results.
 
-**为什么会出现"Probe match: 0%"？**  
-坐标系不同：panel 位点为 hg38，450K 数组坐标为 hg19，需 liftOver 转换后才能匹配。liftOver 成功（Liftover success 显示 ~96%）但探针匹配为 0，说明 **`GPL13534_platform.txt` 未放入 `data/external/`**——探针坐标文件缺失时 probe_map 为空，所有位点无从比对。按下方说明下载后重跑即可。
+**Why does "Probe match: 0%" occur?**  
+Coordinate system mismatch: panel sites are in hg38 while 450K array coordinates are in hg19, requiring liftOver conversion before matching. If liftOver succeeds (Liftover success shows ~96%) but probe matching is 0%, it means **`GPL13534_platform.txt` has not been placed in `data/external/`** — when the probe coordinate file is missing the probe_map is empty and no sites can be matched. Download it as described below and re-run.
 
-在主流程（Step 19 report）完成后运行，检验 panel 位点的：
+Run after the main pipeline (Step 20 report) completes to validate panel sites against:
 
-- **血液基线**（正常全血 cfDNA 背景甲基化 < 0.10）——基于 GSE40279（656 名全血样本）
-- **肿瘤信号**（卵巢癌组织中存在甲基化信号）——基于 TCGA-OV HumanMethylation450（~590 TCGA 样本）
+- **Blood baseline** (normal whole-blood cfDNA background methylation < 0.10) — based on GSE40279 (656 whole-blood samples)
+- **Tumor signal** (methylation signal present in ovarian cancer tissue) — based on TCGA-OV HumanMethylation450 (~590 TCGA samples)
 
-**前置文件**（放入 `data/external/`）：
+**Required files** (place in `data/external/`):
 
-| 文件 | 来源 | 说明 |
+| File | Source | Description |
 | --- | --- | --- |
-| `GSE40279_series_matrix.txt.gz` | [GEO GSE40279](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE40279) → Download full table | 全血 Illumina 450K β 矩阵，1.2 GB |
-| `HumanMethylation450.gz` | [Xena Browser](https://xenabrowser.net/datapages/?cohort=TCGA%20Ovarian%20Cancer%20(OV)) → DNA methylation → HumanMethylation450 → 下载 | TCGA-OV 450K β 矩阵，完整版 ~300 MB，注意要点击 Download 而非预览 |
-| `hg38ToHg19.over.chain.gz` | [UCSC downloads](https://hgdownload.soe.ucsc.edu/goldenPath/hg38/liftOver/hg38ToHg19.over.chain.gz) | 坐标转换链文件 |
-| `GPL13534_platform.txt` | [NCBI GEO GPL13534](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GPL13534) → Data table → Download full table… → 另存为 `GPL13534_platform.txt` | Illumina 450K 探针 hg19 坐标（推荐）；脚本也接受 `HM450.hg19.manifest.tsv.gz`（Zhou lab，~10 MB，自动尝试下载）；**若文件缺失，探针匹配列全为 False，不中止流程** |
+| `GSE40279_series_matrix.txt.gz` | [GEO GSE40279](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE40279) → Download full table | Whole-blood Illumina 450K β matrix, 1.2 GB |
+| `HumanMethylation450.gz` | [Xena Browser](https://xenabrowser.net/datapages/?cohort=TCGA%20Ovarian%20Cancer%20(OV)) → DNA methylation → HumanMethylation450 → Download | TCGA-OV 450K β matrix, full version ~300 MB; click Download rather than preview |
+| `hg38ToHg19.over.chain.gz` | [UCSC downloads](https://hgdownload.soe.ucsc.edu/goldenPath/hg38/liftOver/hg38ToHg19.over.chain.gz) | Coordinate conversion chain file |
+| `GPL13534_platform.txt` | [NCBI GEO GPL13534](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GPL13534) → Data table → Download full table… → save as `GPL13534_platform.txt` | Illumina 450K probe hg19 coordinates (recommended); the script also accepts `HM450.hg19.manifest.tsv.gz` (Zhou lab, ~10 MB, auto-download attempted); **if the file is missing, the probe match column will be all False but the pipeline will not abort** |
 
-**运行**：
+**Run**:
 
 ```bash
-# result-dir 填写本次分析的时间戳目录
-run-analysis --plasma --step external_validate --workdir result/20260406
-# 等价于（直接调用脚本）:
+# result-dir should be the timestamp directory for this analysis run
+run-analysis --mode plasma --step external_validate --workdir result/20260406
+# Equivalent (calling the script directly):
 # python src/scripts/external_validate.py --result-dir result/20260406 --data-dir data
-# 输出: result/20260406/external_validation.csv，并自动重新生成 HTML 报告（嵌入 Section 13）
+# Output: result/20260406/external_validation.csv, and automatically regenerates the HTML report (embeds Section 13)
 ```
 
-**结果列说明**：
+**Output column descriptions**:
 
-| 列 | 含义 |
+| Column | Meaning |
 | --- | --- |
-| `cg_probe` | 匹配到的 Illumina 450K probe ID（liftOver hg38→hg19，±2 bp） |
-| `probe_matched` | 是否成功匹配到 cg probe |
-| `blood_mean_beta` | 全血 656 样本平均 β 值 |
-| `blood_pass` | `blood_mean_beta < 0.10`（True = 满足血液低甲基化条件） |
-| `tcga_mean_beta` | TCGA-OV 均值 β |
-| `tcga_n_samples` | TCGA-OV 有覆盖的样本数 |
+| `cg_probe` | Matched Illumina 450K probe ID (liftOver hg38→hg19, ±2 bp) |
+| `probe_matched` | Whether a cg probe was successfully matched |
+| `blood_mean_beta` | Mean β value across 656 whole-blood samples |
+| `blood_pass` | `blood_mean_beta < 0.10` (True = meets low blood methylation criterion) |
+| `tcga_mean_beta` | TCGA-OV mean β |
+| `tcga_n_samples` | Number of TCGA-OV samples with coverage |
 
-**解读**：`blood_pass = False` 的位点在血浆中可能受血细胞干扰，建议从 panel 中移除或降权。
+**Interpretation**: Sites with `blood_pass = False` may be subject to blood cell interference in plasma — consider removing or down-weighting them from the panel.
 
 ---
 
-## 注意事项
+## Notes
 
-- `pysam` 仅支持 Linux/WSL，Windows 本机无法安装
-- XGBoost / LightGBM 为可选依赖，未安装时自动跳过，其余分类器正常运行
-- 步骤间状态通过 `temp/<workdir>/pipeline_state.json` 传递，重跑单步时不需要重新指定输入文件
-- dedup / target 步骤均支持幂等重跑：输出文件已存在时自动跳过
-- **M-bias 调参**：修改 `trim_tail2` 需从 `preprocess` 重跑；修改 `nOT`/`nOB` 只需从 `extract` 重跑
-- **Outlier exclusion**: Step 14.5 only generates the report — no automatic exclusion. Add confirmed IDs to `exclude_samples` and re-run `classify` (no need to re-run feature selection)
-- 88 个候选区域（`OC_tissue_88_regions.hg38.txt`）现为**软先验**：该区域内位点使用更宽松的 Wilcoxon 阈值（p<0.10, |Δβ|≥0.05），不再作为硬过滤条件
-- **Annotation (Step 17)**: runs before `report` so the annotation table is embedded in the HTML. Requires internet access on first run; all API responses (Ensembl, EWAS Catalog, EWAS Atlas, PubMed) are cached in `annotation_cache.json` — re-runs are instant. If `annotate` is skipped, the report section is simply omitted.
+- `pysam` is Linux/WSL only; cannot be installed on native Windows
+- XGBoost / LightGBM are optional dependencies; if not installed they are automatically skipped and the remaining classifiers run normally
+- Inter-step state is passed via `temp/<workdir>/pipeline_state.json` — no need to re-specify input files when re-running a single step
+- Both the dedup and target steps support idempotent re-runs: if output files already exist they are automatically skipped
+- **M-bias auto-detection**: `--step mbias` writes `mbias_auto_trim.json` with converted skip counts. MethylDackel outputs *inclusion positions* (`--OT a,b,c,d`); the pipeline converts them: 5' skip = position directly; 3' skip = `read_len − pos − 1` (e.g. `--OT 0,0,0,110` + `read_len=150` → `nOT "0,0,0,39"`). Set `nOT = "auto"` / `nOB = "auto"` to use in `extract`; explicit skip-count strings override auto. Changing `trim_tail2` requires re-running from `preprocess`; changing `nOT`/`nOB` only requires re-running from `extract`.
+- **Outlier exclusion**: Step 13 generates the report and saves suspect sample IDs to pipeline state. Step 14 (`feature_select`) automatically excludes these samples from LASSO/RF computation — the saved `feature_matrix.npz` still contains all samples so classifiers can apply their own exclusion via `exclude_samples`. Add confirmed outlier IDs to `exclude_samples` and re-run `classify`.
+- **Temporal split validation (Step 17, plasma only)**: run `--step temporal_validate` after Steps 15 and 16 to evaluate the pre-selected panel on prospectively collected samples. Requires `data/plasma_exp.xlsx` with columns `case_id` and `datetime` (format `YYYYMMDD`). Samples with `datetime < 2024-07-01` form the train set; samples on/after that date form the validation set. Covers both binary classification (LR/SVM/RF/XGB/LGBM) and subtype classification (RF/SVM). If the file is absent the step logs a warning and exits cleanly. Outputs: `temporal_validation_summary.csv`, `temporal_validation_predictions.csv`, `subtype_temporal_summary.csv`, `subtype_temporal_predictions.csv`.
+- The 88 candidate regions (`OC_tissue_88_regions.hg38.txt`) are now a **soft prior**: sites within these regions use more relaxed Wilcoxon thresholds (p<0.10, |Δβ|≥0.05) and are no longer a hard filter condition
+- **Annotation (Step 18)**: runs before `report` so the annotation table is embedded in the HTML. Requires internet access on first run; all API responses (Ensembl, EWAS Catalog, EWAS Atlas, PubMed) are cached in `annotation_cache.json` — re-runs are instant. If `annotate` is skipped, the report section is simply omitted.
 - **Annotation — NCBI API key**: set `[annotation] ncbi_api_key` to increase PubMed rate limit from 3 to 10 req/s. Without a key the search still works but is slower. Register free at [NCBI account portal](https://www.ncbi.nlm.nih.gov/account/).
 - **Coverage QC (Step 14)**: at the end of `feature_select`, sites where fewer than `min_10x_coverage_rate` (default 80%) of samples have ≥10x depth are hard-removed from `panel_cpg.csv`. Details recorded in `panel_cpg_depth.csv` (`n_10x`, `coverage_rate_10x`, `pass_coverage_qc` columns). Re-run `classify` after adjusting the threshold — no need to re-run feature selection.
-- **Public dataset cross-validation (Step 18)**: run `--step external_validate` after `annotate`, then run `--step report` last to embed Section 13 (blood baseline + TCGA-OV table) in the HTML. Sites with `blood_pass = False` (mean β ≥ 0.10 in whole blood) are highlighted yellow — consider removing or down-weighting them from the panel.
+- **Public dataset cross-validation (Step 19)**: run `--step external_validate` after `annotate`, then run `--step report` last to embed Section 13 (blood baseline + TCGA-OV table) in the HTML. Sites with `blood_pass = False` (mean β ≥ 0.10 in whole blood) are highlighted yellow — consider removing or down-weighting them from the panel.
 - **Relation to tissue analysis**: the 88 candidate regions derived from tissue DMR analysis serve as a soft prior — they cannot be directly applied to plasma. Plasma cfDNA has lower signal-to-noise; statistical validation in plasma data is always required before modelling

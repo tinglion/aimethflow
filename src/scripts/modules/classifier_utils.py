@@ -1,42 +1,54 @@
 #!/usr/bin/env python3
 """
-classifier_utils.py - 诊断分类器模块（Step 15）
+classifier_utils.py - Diagnostic classifier module (Step 15)
 
-使用留一法交叉验证（LOO-CV）评估五种分类器：
-  LR    — L2 逻辑回归（可解释，适合小样本）
-  SVM   — RBF 核支持向量机（非线性边界）
-  RF    — 随机森林（集成方法，自带特征重要性）
-  XGB   — XGBoost（梯度提升树，scale_pos_weight 处理不平衡）
-  LGBM  — LightGBM（高效梯度提升，scale_pos_weight 处理不平衡）
+Evaluates five classifiers with leave-one-out cross-validation (LOO-CV):
+  LR    — L2 logistic regression (interpretable, well-suited for small samples)
+  SVM   — RBF-kernel SVM (non-linear decision boundary)
+  RF    — Random Forest (ensemble method with built-in feature importance)
+  XGB   — XGBoost (gradient-boosted trees; scale_pos_weight for class imbalance)
+  LGBM  — LightGBM (efficient gradient boosting; scale_pos_weight for class imbalance)
 
-输出：
-  roc_curve.png              — 分类器 ROC 曲线对比图
-  confusion_matrix.png       — 各分类器混淆矩阵
-  classifier_predictions.csv — 每个样本的预测概率和标签
-  classifier_summary.csv     — AUC / 准确率 / 灵敏度 / 特异度汇总
+Outputs:
+  roc_curve.png              — ROC curve comparison across classifiers
+  confusion_matrix.png       — confusion matrix per classifier
+  classifier_predictions.csv — per-sample predicted probabilities and labels
+  classifier_summary.csv     — AUC / accuracy / sensitivity / specificity summary
 
-依赖：scikit-learn、matplotlib、xgboost、lightgbm
+Dependencies: scikit-learn, matplotlib, xgboost, lightgbm
 """
 
 import os
 import warnings
+import traceback
 import numpy as np
 import pandas as pd
+
+from sklearn.linear_model import LogisticRegression
+from sklearn.svm import SVC
+from sklearn.linear_model import LogisticRegressionCV
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import roc_auc_score, confusion_matrix, accuracy_score
+from xgboost import XGBClassifier
+from lightgbm import LGBMClassifier
+
+from sklearn.model_selection import LeaveOneOut
 
 from utils.logger import logger
 
 
 def _load_feature_matrix(workdir, result_dir, benign_samples, malignant_samples, config):
     """
-    加载特征矩阵：优先从 feature_matrix.npz 恢复（feature_select 步骤保存的），
-    若不存在则从 bedGraph 重新构建（需要 workdir）。
+    Load the feature matrix: prefer restoring from feature_matrix.npz (saved by
+    feature_select step); rebuild from bedGraph if not found (requires workdir).
 
     Returns:
         X, y, sample_ids, feature_names, region_in_88
     """
     fm_path = os.path.join(result_dir, "feature_matrix.npz")
     if os.path.exists(fm_path):
-        logger.info(f"从缓存加载特征矩阵: {fm_path}")
+        logger.info(f"Loading feature matrix from cache: {fm_path}")
         data = np.load(fm_path, allow_pickle=True)
         X = data["X"]
         y = data["y"]
@@ -44,7 +56,7 @@ def _load_feature_matrix(workdir, result_dir, benign_samples, malignant_samples,
         feature_names = list(data["feature_names"])
         region_in_88  = data["region_in_88"] if "region_in_88" in data else np.zeros(X.shape[1], dtype=bool)
     else:
-        logger.info("未找到 feature_matrix.npz，从 bedGraph 重新构建...")
+        logger.info("feature_matrix.npz not found — rebuilding from bedGraph...")
         from scripts.modules.feature_utils import build_feature_matrix
         X, y, sample_ids, feature_names, _, region_in_88 = build_feature_matrix(
             workdir, result_dir, benign_samples, malignant_samples, config
@@ -52,27 +64,11 @@ def _load_feature_matrix(workdir, result_dir, benign_samples, malignant_samples,
     return X, y, sample_ids, feature_names, region_in_88
 
 
-def _apply_panel_filter(X, feature_names, result_dir):
-    """
-    若存在 panel_cpg.csv，将特征矩阵过滤为 panel 位点；否则使用全部特征。
 
-    Returns:
-        X_filtered, filtered_feature_names
-    """
-    panel_path = os.path.join(result_dir, "panel_cpg.csv")
-    if os.path.exists(panel_path):
-        panel_df = pd.read_csv(panel_path)
-        panel_set = set(panel_df["feature"])
-        indices = [i for i, fn in enumerate(feature_names) if fn in panel_set]
-        logger.info(f"应用 panel_cpg.csv：使用 {len(indices)} 个特征（共 {len(feature_names)} 个）")
-        return X[:, indices], [feature_names[i] for i in indices]
-    else:
-        logger.info(f"未找到 panel_cpg.csv，使用全部 {len(feature_names)} 个特征")
-        return X, feature_names
 
 
 def _impute(X):
-    """按列中位数插补 NaN。"""
+    """Impute NaN values using column medians."""
     X_imp = X.copy()
     col_medians = np.nanmedian(X_imp, axis=0)
     for j in range(X_imp.shape[1]):
@@ -83,8 +79,8 @@ def _impute(X):
 
 def _impute_fit(X):
     """
-    用训练集列中位数插补 NaN，返回 (插补后矩阵, 列中位数向量)。
-    NaN 中位数（全列缺失）兜底为 0.0。
+    Impute NaN values with training-set column medians; return (imputed matrix, medians).
+    Columns that are entirely NaN default to 0.0.
     """
     col_medians = np.nanmedian(X, axis=0)
     col_medians = np.where(np.isnan(col_medians), 0.0, col_medians)
@@ -96,7 +92,7 @@ def _impute_fit(X):
 
 
 def _impute_transform(X, col_medians):
-    """用训练集的列中位数插补测试集 NaN。"""
+    """Impute test-set NaN values using training-set column medians."""
     X_imp = X.copy()
     for j in range(X.shape[1]):
         mask = np.isnan(X_imp[:, j])
@@ -106,29 +102,26 @@ def _impute_transform(X, col_medians):
 
 def _select_features_in_fold(X_train, y_train, region_in_88, config):
     """
-    在单个 LOO fold 的训练集上运行特征选择，返回选中的列索引。
+    Run feature selection on the training set of a single LOO fold; return selected column indices.
 
-    流程：分层 Wilcoxon 预筛选（88 区域宽松 / 其余标准）→ LASSO → RF → 并集
-    内部自行插补 NaN（用训练集中位数），严格不使用测试样本数据。
+    Pipeline: stratified Wilcoxon pre-filter (relaxed thresholds for 88-region sites,
+    standard thresholds elsewhere) → LASSO → RF → union.
+    Imputes NaN internally using training-set medians; test samples are never touched.
 
     Args:
         X_train:      (n_train, n_features)
         y_train:      (n_train,)
-        region_in_88: (n_features,) bool — 是否属于 88 个组织候选区域
-        config:       配置对象
+        region_in_88: (n_features,) bool — whether each feature is in the 88 candidate regions
+        config:       config dict
 
     Returns:
-        selected_indices: np.ndarray  (相对于传入 X_train 的列索引)
+        selected_indices: np.ndarray of column indices (relative to X_train)
     """
     try:
         from scipy import stats as _stats
         _HAS_SCIPY = True
     except ImportError:
         _HAS_SCIPY = False
-
-    from sklearn.linear_model import LogisticRegressionCV
-    from sklearn.ensemble import RandomForestClassifier
-    from sklearn.preprocessing import StandardScaler
 
     ml_cfg = (config or {}).get("ml", {})
     wilcox_p        = ml_cfg.get("sample_wilcox_p",       0.05)
@@ -139,10 +132,10 @@ def _select_features_in_fold(X_train, y_train, region_in_88, config):
 
     n_features = X_train.shape[1]
 
-    # 1. 插补（训练集中位数）
+    # 1. impute (training-set medians)
     X_imp, _ = _impute_fit(X_train)
 
-    # 2. 分层 Wilcoxon 预筛选
+    # 2. stratified Wilcoxon pre-filter
     if _HAS_SCIPY:
         pvals  = np.ones(n_features)
         deltas = np.zeros(n_features)
@@ -161,7 +154,7 @@ def _select_features_in_fold(X_train, y_train, region_in_88, config):
         d_thresh = np.where(region_in_88, wilcox_delta_88, wilcox_delta)
         wilcox_mask = (pvals < p_thresh) & (deltas >= d_thresh)
 
-        if wilcox_mask.sum() == 0:   # 全量放宽兜底
+        if wilcox_mask.sum() == 0:   # fallback: relax thresholds
             wilcox_mask = (pvals < 0.20) & (deltas >= 0.05)
         if wilcox_mask.sum() == 0:
             wilcox_mask = np.ones(n_features, dtype=bool)
@@ -171,7 +164,7 @@ def _select_features_in_fold(X_train, y_train, region_in_88, config):
     wilcox_indices = np.where(wilcox_mask)[0]
     X_w = X_imp[:, wilcox_indices]
 
-    # 3. LASSO（fold 内加速：Cs=10, cv≤3）
+    # 3. LASSO (in-fold speedup: Cs=10, cv≤3)
     cv_folds = min(ml_cfg.get("lasso_cv_folds", 5), 3)
     scaler = StandardScaler()
     X_ws = scaler.fit_transform(X_w)
@@ -182,7 +175,7 @@ def _select_features_in_fold(X_train, y_train, region_in_88, config):
     lasso.fit(X_ws, y_train)
     lasso_local = np.where(lasso.coef_[0] != 0)[0]
 
-    # 4. RF（100 棵树，fold 内快速估计）
+    # 4. RF (100 trees, quick in-fold estimate)
     rf = RandomForestClassifier(
         n_estimators=100, class_weight="balanced",
         random_state=42, n_jobs=-1,
@@ -190,7 +183,7 @@ def _select_features_in_fold(X_train, y_train, region_in_88, config):
     rf.fit(X_w, y_train)
     rf_local = np.where(rf.feature_importances_ > 0)[0]
 
-    # 5. 并集，按 LASSO 系数 + RF 重要性综合评分排序，限制最大特征数
+    # 5. union, ranked by combined LASSO coef + RF importance, capped at max_features
     if selection_mode == "lasso":
         local_idx = lasso_local
     elif selection_mode == "rf":
@@ -198,7 +191,7 @@ def _select_features_in_fold(X_train, y_train, region_in_88, config):
     else:
         local_idx = np.unique(np.concatenate([lasso_local, rf_local]))
 
-    # 综合评分（各归一化后求和）：评分越高 → 越优先保留
+    # combined score (each normalized then summed): higher = higher priority
     lasso_abs  = np.abs(lasso.coef_[0])                  # shape: (n_wilcox,)
     rf_imp     = rf.feature_importances_                  # shape: (n_wilcox,)
     lasso_norm = lasso_abs / (lasso_abs.max() + 1e-10)
@@ -207,15 +200,45 @@ def _select_features_in_fold(X_train, y_train, region_in_88, config):
 
     max_feat = ml_cfg.get("max_features_clf", 0)
     if max_feat > 0 and len(local_idx) > max_feat:
-        scores  = combined[local_idx]
-        top_n   = np.argsort(scores)[-max_feat:]          # 取综合评分最高的 N 个
-        local_idx = local_idx[np.sort(top_n)]             # 保持列序
+        scores    = combined[local_idx]
+        top_n     = np.argsort(scores)[-max_feat:]        # top-N by combined score
+        local_idx = local_idx[np.sort(top_n)]             # preserve column order
 
     return wilcox_indices[local_idx]
 
 
+def _bootstrap_ci(y_true, y_prob, y_pred, n_bootstrap=1000, ci=0.95, seed=42):
+    """Bootstrap percentile CI for AUC / accuracy / sensitivity / specificity."""
+    from sklearn.metrics import roc_auc_score, accuracy_score, confusion_matrix as _cm
+    rng = np.random.default_rng(seed)
+    n = len(y_true)
+    alpha = (1 - ci) / 2
+    aucs, accs, sens, specs = [], [], [], []
+    for _ in range(n_bootstrap):
+        idx = rng.integers(0, n, size=n)
+        yt, yp, ypr = y_true[idx], y_pred[idx], y_prob[idx]
+        if len(np.unique(yt)) < 2:
+            continue
+        aucs.append(roc_auc_score(yt, ypr))
+        accs.append(accuracy_score(yt, yp))
+        tn, fp, fn, tp = _cm(yt, yp, labels=[0, 1]).ravel()
+        sens.append(tp / (tp + fn) if (tp + fn) > 0 else 0.0)
+        specs.append(tn / (tn + fp) if (tn + fp) > 0 else 0.0)
+
+    def _pct(arr):
+        a = np.array(arr)
+        return float(np.percentile(a, 100 * alpha)), float(np.percentile(a, 100 * (1 - alpha)))
+
+    return {
+        "auc":         _pct(aucs),
+        "accuracy":    _pct(accs),
+        "sensitivity": _pct(sens),
+        "specificity": _pct(specs),
+    }
+
+
 def _save_roc_plot(results, result_dir):
-    """绘制并保存分类器 ROC 曲线对比图。"""
+    """Plot and save the classifier ROC comparison figure."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -233,9 +256,13 @@ def _save_roc_plot(results, result_dir):
 
     for clf_name, res in results.items():
         fpr, tpr, _ = roc_curve(res["y_true"], res["y_prob"])
-        ax.plot(fpr, tpr,
-                label=f"{clf_name} (AUC={res['auc']:.3f})",
-                color=colors.get(clf_name, "gray"), lw=2)
+        ci = res.get("ci", {})
+        auc_ci = ci.get("auc", (None, None))
+        if auc_ci[0] is not None:
+            lbl = f"{clf_name} (AUC={res['auc']:.3f} [{auc_ci[0]:.3f}–{auc_ci[1]:.3f}])"
+        else:
+            lbl = f"{clf_name} (AUC={res['auc']:.3f})"
+        ax.plot(fpr, tpr, label=lbl, color=colors.get(clf_name, "gray"), lw=2)
 
     ax.plot([0, 1], [0, 1], "k--", lw=1, alpha=0.5)
     ax.set_xlabel("False Positive Rate (1 − Specificity)")
@@ -249,12 +276,12 @@ def _save_roc_plot(results, result_dir):
     roc_path = os.path.join(result_dir, "roc_curve.png")
     fig.savefig(roc_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
-    logger.info(f"  ROC曲线已保存: {roc_path}")
+    logger.info(f"  ROC curve saved: {roc_path}")
     return roc_path
 
 
 def _save_confusion_matrix_plot(results, result_dir):
-    """为每个分类器绘制混淆矩阵，超过 3 个时自动换行。"""
+    """Plot a confusion matrix for each classifier; wraps to multiple rows beyond 3."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -266,7 +293,6 @@ def _save_confusion_matrix_plot(results, result_dir):
     fig, axes = plt.subplots(n_rows, n_cols,
                              figsize=(4 * n_cols, 4 * n_rows),
                              squeeze=False)
-    # 展平为列表，方便按顺序遍历
     axes_flat = [axes[r][c] for r in range(n_rows) for c in range(n_cols)]
 
     for ax, (clf_name, res) in zip(axes_flat, results.items()):
@@ -287,7 +313,7 @@ def _save_confusion_matrix_plot(results, result_dir):
                         color="white" if cm[i, j] > cm.max() / 2 else "black",
                         fontsize=14)
 
-    # 隐藏多余的子图
+    # hide unused subplots
     for ax in axes_flat[n_clf:]:
         ax.set_visible(False)
 
@@ -295,81 +321,77 @@ def _save_confusion_matrix_plot(results, result_dir):
     cm_path = os.path.join(result_dir, "confusion_matrix.png")
     fig.savefig(cm_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
-    logger.info(f"  混淆矩阵已保存: {cm_path}")
+    logger.info(f"  Confusion matrix saved: {cm_path}")
     return cm_path
 
 
 # ──────────────────────────────────────────────────────
-# 主入口：Step 15
+# Step 15 entry point
 # ──────────────────────────────────────────────────────
 
 def run_classifiers(workdir, result_dir, config, benign_samples, malignant_samples):
     """
-    Step 15 主函数：Nested LOO-CV 评估 LR / SVM / RF / XGB / LGBM 分类性能。
+    Step 15 entry point: Nested LOO-CV evaluation of LR / SVM / RF / XGB / LGBM classifiers.
 
-    特征选择（Wilcoxon + LASSO + RF）在每个 LOO fold 的训练集内独立完成，
-    测试样本的数据严格不参与任何特征选择或归一化 fit，杜绝数据泄漏。
+    Feature selection (Wilcoxon + LASSO + RF) is performed independently on each LOO fold
+    training set; test samples are never used during feature selection or scaler fitting —
+    no data leakage.
 
     Args:
-        workdir:           临时目录（含 bedGraph；仅在无缓存时使用）
-        result_dir:        结果目录（读取 feature_matrix.npz，写入输出）
-        config:            配置对象
-        benign_samples:    良性样本 ID 列表
-        malignant_samples: 恶性样本 ID 列表
+        workdir:           working directory (contains bedGraph files; used only when
+                           no cached feature matrix exists)
+        result_dir:        results directory (reads feature_matrix.npz, writes outputs)
+        config:            config dict
+        benign_samples:    list of benign sample IDs
+        malignant_samples: list of malignant sample IDs
 
     Returns:
         results:    dict {clf_name: {y_true, y_prob, y_pred, auc, accuracy,
                                     sensitivity, specificity, confusion_matrix}}
-        summary_df: pd.DataFrame，各分类器汇总指标
+        summary_df: pd.DataFrame of per-classifier summary metrics
     """
-    from sklearn.linear_model import LogisticRegression
-    from sklearn.svm import SVC
-    from sklearn.ensemble import RandomForestClassifier
-    from sklearn.model_selection import LeaveOneOut
-    from sklearn.preprocessing import StandardScaler
-    from sklearn.metrics import (roc_auc_score, confusion_matrix,
-                                 accuracy_score)
-    from xgboost import XGBClassifier
-    from lightgbm import LGBMClassifier
 
-    logger.info(f"开始分类器评估（Nested LOO-CV）  "
-                f"(良性={len(benign_samples)}, 恶性={len(malignant_samples)})")
+    logger.info(f"Starting classifier evaluation (Nested LOO-CV)  "
+                f"(benign={len(benign_samples)}, malignant={len(malignant_samples)})")
 
-    # 1. 加载全量特征矩阵（覆盖率过滤后、Wilcoxon 前）
+    # 1. load full feature matrix (post-coverage filter, pre-Wilcoxon)
     X, y, sample_ids, feature_names, region_in_88 = _load_feature_matrix(
         workdir, result_dir, benign_samples, malignant_samples, config
     )
 
     if X.shape[1] == 0:
-        logger.error("特征矩阵无特征，跳过分类器评估")
+        logger.error("Feature matrix has no features — skipping classifier evaluation")
         return {}, pd.DataFrame()
 
-    # 1b. 异常样本检测 + 排除
+    # 1b. outlier detection (skip if Step 13 already ran and wrote outlier_report.csv)
     ml_cfg_pre = (config or {}).get("ml", {})
-    from scripts.modules.feature_utils import detect_sample_outliers
-    outlier_df, suspect_ids = detect_sample_outliers(X, y, sample_ids, config)
-    if len(outlier_df) > 0:
-        outlier_path = os.path.join(result_dir, "outlier_report.csv")
-        outlier_df.to_csv(outlier_path, index=False)
-        logger.info(f"  异常检测报告已保存: {outlier_path}")
+    outlier_path = os.path.join(result_dir, "outlier_report.csv")
+    if os.path.exists(outlier_path):
+        logger.info(f"  Outlier report already exists (from Step 13) — skipping re-run: {outlier_path}")
+    else:
+        from scripts.modules.feature_utils import detect_sample_outliers
+        outlier_df, _ = detect_sample_outliers(X, y, sample_ids, config)
+        if len(outlier_df) > 0:
+            outlier_df.to_csv(outlier_path, index=False)
+            logger.info(f"  Outlier report saved: {outlier_path}")
 
     exclude_set = set(ml_cfg_pre.get("exclude_samples", []))
     if exclude_set:
         keep_mask = np.array([sid not in exclude_set for sid in sample_ids])
         n_excluded = int((~keep_mask).sum())
-        logger.info(f"  根据 exclude_samples 排除 {n_excluded} 个样本: "
+        logger.info(f"  Excluding {n_excluded} sample(s) per exclude_samples: "
                     f"{[sid for sid in sample_ids if sid in exclude_set]}")
         X          = X[keep_mask]
         y          = y[keep_mask]
         sample_ids = [sid for sid, k in zip(sample_ids, keep_mask) if k]
-        region_in_88 = region_in_88   # feature 维度不变，无需过滤
+        region_in_88 = region_in_88   # feature dimension unchanged, no filtering needed
 
     n_in_88 = int(region_in_88.sum())
-    logger.info(f"  全量特征矩阵: {X.shape[0]} 样本 × {X.shape[1]} 特征  "
-                f"(88区域内: {n_in_88}  区域外: {X.shape[1]-n_in_88}，"
-                f"特征选择将在每折训练集内独立运行)")
+    logger.info(f"  Full feature matrix: {X.shape[0]} samples × {X.shape[1]} features  "
+                f"(in 88-regions: {n_in_88}  outside: {X.shape[1]-n_in_88};  "
+                f"feature selection runs independently per fold)")
 
-    # 2. 分类器定义
+    # 2. define classifiers
     ml_cfg = (config or {}).get("ml", {})
 
     n_neg = int(sum(y == 0))
@@ -422,13 +444,13 @@ def run_classifiers(workdir, result_dir, config, benign_samples, malignant_sampl
     loo = LeaveOneOut()
     clf_names = list(classifiers.keys())
 
-    # 每分类器独立收集预测
+    # per-classifier prediction storage
     clf_y_true = {n: [] for n in clf_names}
     clf_y_prob = {n: [] for n in clf_names}
     clf_y_pred = {n: [] for n in clf_names}
 
-    fold_n_features   = []   # 每折选中的特征数
-    fold_selected_names = []  # 每折选中的特征名列表（用于频率统计）
+    fold_n_features    = []  # features selected per fold
+    fold_selected_names = []  # selected feature names per fold (for frequency stats)
 
     n_folds = X.shape[0]
     log_interval = max(1, n_folds // 10)
@@ -437,28 +459,28 @@ def run_classifiers(workdir, result_dir, config, benign_samples, malignant_sampl
         X_train_raw, X_test_raw = X[train_idx], X[test_idx]
         y_train, y_test         = y[train_idx], y[test_idx]
 
-        # 3a. 在训练集上独立选特征（分层 Wilcoxon + LASSO + RF）
+        # 3a. independent feature selection on training set (Wilcoxon + LASSO + RF)
         sel_idx = _select_features_in_fold(X_train_raw, y_train, region_in_88, config)
         if len(sel_idx) == 0:
-            sel_idx = np.arange(X.shape[1])   # 兜底：全特征
+            sel_idx = np.arange(X.shape[1])   # fallback: all features
         fold_n_features.append(len(sel_idx))
         fold_selected_names.append([feature_names[i] for i in sel_idx])
 
         X_tr = X_train_raw[:, sel_idx]
         X_te = X_test_raw[:, sel_idx]
 
-        # 3b. 插补（训练集中位数）
+        # 3b. impute (training-set medians)
         X_tr_imp, col_meds = _impute_fit(X_tr)
         X_te_imp = _impute_transform(X_te, col_meds)
 
-        # 3c. 标准化（在训练集上 fit）
+        # 3c. standardize (fit on training set)
         scaler = StandardScaler()
         X_tr_sc = scaler.fit_transform(X_tr_imp)
         X_te_sc = scaler.transform(X_te_imp)
 
-        # 3d. 所有分类器在同一折特征集上训练 + 预测
-        # LightGBM >= 4.x 在 fit numpy array 时内部生成特征名，predict 时 sklearn
-        # 校验层会因无名称发出 UserWarning，对结果无影响，局部屏蔽。
+        # 3d. train and predict with all classifiers on this fold's feature set
+        # LightGBM >= 4.x generates internal feature names when fitting numpy arrays;
+        # sklearn's check layer emits a UserWarning about missing names — suppress locally.
         with warnings.catch_warnings():
             warnings.filterwarnings(
                 "ignore",
@@ -475,15 +497,15 @@ def run_classifiers(workdir, result_dir, config, benign_samples, malignant_sampl
 
         if (fold_idx + 1) % log_interval == 0 or fold_idx == n_folds - 1:
             logger.info(f"    fold {fold_idx+1}/{n_folds}  "
-                        f"特征数={len(sel_idx)}")
+                        f"n_features={len(sel_idx)}")
 
-    # 每折特征数统计
+    # per-fold feature count stats
     fold_arr = np.array(fold_n_features)
-    logger.info(f"  Nested CV 每折特征数: 均值={fold_arr.mean():.1f}  "
-                f"中位数={float(np.median(fold_arr)):.1f}  "
-                f"最少={fold_arr.min()}  最多={fold_arr.max()}")
+    logger.info(f"  Nested CV features per fold: mean={fold_arr.mean():.1f}  "
+                f"median={float(np.median(fold_arr)):.1f}  "
+                f"min={fold_arr.min()}  max={fold_arr.max()}")
 
-    # ── 特征选择频率统计 ──
+    # feature selection frequency table
     from collections import Counter
     name_counter = Counter()
     for names in fold_selected_names:
@@ -499,21 +521,21 @@ def run_classifiers(workdir, result_dir, config, benign_samples, malignant_sampl
     freq_df = pd.DataFrame(freq_rows)
     freq_path = os.path.join(result_dir, "feature_selection_freq.csv")
     freq_df.to_csv(freq_path, index=False)
-    logger.info(f"  特征选择频率表已保存: {freq_path}")
+    logger.info(f"  Feature selection frequency table saved: {freq_path}")
 
-    # 稳定特征（选中率 ≥ 50%）
+    # stable features (selection rate ≥ 50%)
     stable_thr = 0.50
     stable_rows = [r for r in freq_rows if r["selection_rate"] >= stable_thr]
-    logger.info(f"\n  ══ 稳定特征 Panel（选中率≥{stable_thr:.0%}，共 {len(stable_rows)} 个）══")
+    logger.info(f"\n  ══ Stable feature panel (rate≥{stable_thr:.0%}, {len(stable_rows)} features) ══")
     for r in stable_rows:
         marker = "★" if r["in_88_regions"] else "○"
         logger.info(f"    {marker} {r['feature']:<30s}  "
-                    f"{r['selection_rate']:.0%} ({r['selection_count']}/{n_folds}折)")
+                    f"{r['selection_rate']:.0%} ({r['selection_count']}/{n_folds} folds)")
     if not stable_rows:
-        logger.info("    （无稳定特征；建议检查 max_features_clf 或放宽 Wilcoxon 阈值）")
+        logger.info("    (no stable features — consider checking max_features_clf or relaxing Wilcoxon thresholds)")
     logger.info("")
 
-    # 4. 汇总指标
+    # 4. aggregate metrics
     results = {}
     for clf_name in clf_names:
         y_true = np.array(clf_y_true[clf_name])
@@ -527,6 +549,8 @@ def run_classifiers(workdir, result_dir, config, benign_samples, malignant_sampl
         sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0.0
         specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
 
+        ci_dict = _bootstrap_ci(y_true, y_prob, y_pred)
+
         results[clf_name] = {
             "y_true": y_true,
             "y_prob": y_prob,
@@ -536,17 +560,19 @@ def run_classifiers(workdir, result_dir, config, benign_samples, malignant_sampl
             "sensitivity": sensitivity,
             "specificity": specificity,
             "confusion_matrix": cm,
+            "ci": ci_dict,
         }
-        logger.info(f"    {clf_name}: AUC={auc:.3f}  Acc={acc:.3f}  "
-                    f"Sens={sensitivity:.3f}  Spec={specificity:.3f}")
+        auc_lo, auc_hi = ci_dict["auc"]
+        logger.info(f"    {clf_name}: AUC={auc:.3f} [{auc_lo:.3f}–{auc_hi:.3f}]  "
+                    f"Acc={acc:.3f}  Sens={sensitivity:.3f}  Spec={specificity:.3f}")
 
-    # 5. 保存 ROC 曲线
+    # 5. save ROC curve
     _save_roc_plot(results, result_dir)
 
-    # 6. 保存混淆矩阵图
+    # 6. save confusion matrix plots
     _save_confusion_matrix_plot(results, result_dir)
 
-    # 7. 保存逐样本预测结果
+    # 7. save per-sample predictions
     rows = []
     for clf_name, res in results.items():
         for i, sid in enumerate(sample_ids):
@@ -561,39 +587,393 @@ def run_classifiers(workdir, result_dir, config, benign_samples, malignant_sampl
     pred_df = pd.DataFrame(rows)
     pred_path = os.path.join(result_dir, "classifier_predictions.csv")
     pred_df.to_csv(pred_path, index=False)
-    logger.info(f"  逐样本预测结果已保存: {pred_path}")
+    logger.info(f"  Per-sample predictions saved: {pred_path}")
 
-    # 8. 保存汇总指标
+    # 8. save summary metrics
     summary_rows = []
     for clf_name, res in results.items():
         cm = res["confusion_matrix"]
         tn, fp, fn, tp = cm.ravel()
+        ci = res.get("ci", {})
+        auc_lo,  auc_hi  = ci.get("auc",         (None, None))
+        acc_lo,  acc_hi  = ci.get("accuracy",     (None, None))
+        sens_lo, sens_hi = ci.get("sensitivity",  (None, None))
+        spec_lo, spec_hi = ci.get("specificity",  (None, None))
         summary_rows.append({
-            "classifier": clf_name,
-            "auc": round(res["auc"], 4),
-            "accuracy": round(res["accuracy"], 4),
-            "sensitivity": round(res["sensitivity"], 4),
-            "specificity": round(res["specificity"], 4),
+            "classifier":        clf_name,
+            "auc":               round(res["auc"],         4),
+            "auc_ci95_lo":       round(auc_lo,  4) if auc_lo  is not None else "",
+            "auc_ci95_hi":       round(auc_hi,  4) if auc_hi  is not None else "",
+            "accuracy":          round(res["accuracy"],    4),
+            "acc_ci95_lo":       round(acc_lo,  4) if acc_lo  is not None else "",
+            "acc_ci95_hi":       round(acc_hi,  4) if acc_hi  is not None else "",
+            "sensitivity":       round(res["sensitivity"], 4),
+            "sens_ci95_lo":      round(sens_lo, 4) if sens_lo is not None else "",
+            "sens_ci95_hi":      round(sens_hi, 4) if sens_hi is not None else "",
+            "specificity":       round(res["specificity"], 4),
+            "spec_ci95_lo":      round(spec_lo, 4) if spec_lo is not None else "",
+            "spec_ci95_hi":      round(spec_hi, 4) if spec_hi is not None else "",
             "TP": int(tp), "FP": int(fp),
             "TN": int(tn), "FN": int(fn),
-            "n_benign": int(sum(y == 0)),
-            "n_malignant": int(sum(y == 1)),
-            "n_features_mean": round(float(fold_arr.mean()), 1),
+            "n_benign":          int(sum(y == 0)),
+            "n_malignant":       int(sum(y == 1)),
+            "n_features_mean":   round(float(fold_arr.mean()), 1),
         })
     summary_df = pd.DataFrame(summary_rows)
     summary_path = os.path.join(result_dir, "classifier_summary.csv")
     summary_df.to_csv(summary_path, index=False)
-    logger.info(f"  分类器汇总已保存: {summary_path}")
+    logger.info(f"  Classifier summary saved: {summary_path}")
 
-    # 打印汇总
-    logger.info("\n  ┌──────────────────────────────────────────────────────┐")
-    logger.info("  │  分类器 Nested LOO-CV 结果汇总                       │")
-    logger.info("  ├────────┬───────┬────────┬──────────┬───────────────┤")
-    logger.info("  │ 分类器 │  AUC  │ 准确率 │  灵敏度  │   特异度      │")
-    logger.info("  ├────────┼───────┼────────┼──────────┼───────────────┤")
+    # print summary table
+    logger.info("\n  ┌───────────────────────────────────────────────────────────────────────┐")
+    logger.info("  │  Classifier Nested LOO-CV Summary  (95% Bootstrap CI in brackets)    │")
+    logger.info("  ├────────┬──────────────────────┬───────────┬───────────┬───────────────┤")
+    logger.info("  │  Clf   │        AUC           │  Accuracy │  Sensitiv │  Specificity  │")
+    logger.info("  ├────────┼──────────────────────┼───────────┼───────────┼───────────────┤")
     for row in summary_rows:
-        logger.info(f"  │ {row['classifier']:<6} │ {row['auc']:.3f} │  {row['accuracy']:.3f} │  "
-                    f"{row['sensitivity']:.3f}   │   {row['specificity']:.3f}         │")
-    logger.info("  └────────┴───────┴────────┴──────────┴───────────────┘")
+        def _fmt(v, lo, hi):
+            if lo != "":
+                return f"{v:.3f}[{lo:.3f}-{hi:.3f}]"
+            return f"{v:.3f}"
+        logger.info(
+            f"  │ {row['classifier']:<6} │ {_fmt(row['auc'], row['auc_ci95_lo'], row['auc_ci95_hi']):<20} │"
+            f" {_fmt(row['accuracy'], row['acc_ci95_lo'], row['acc_ci95_hi']):<9} │"
+            f" {_fmt(row['sensitivity'], row['sens_ci95_lo'], row['sens_ci95_hi']):<9} │"
+            f"   {_fmt(row['specificity'], row['spec_ci95_lo'], row['spec_ci95_hi']):<13} │"
+        )
+    logger.info("  └────────┴──────────────────────┴───────────┴───────────┴───────────────┘")
+
+    return results, summary_df
+
+
+def _build_sample_date_map(config):
+    """
+    Build {sample_id: collection_date} keyed by fq_R1 prefix (same as feature matrix).
+
+    Two-step join:
+      1. plasma_exp.xlsx  : case_id → collection_date
+      2. sample_info_excel: fq_R1 prefix (sample_id) → case_id
+    Both tables store integer case_ids as Excel floats ("640849.0"); normalise to "640849".
+
+    Returns an empty dict on any failure (caller should check and skip).
+    """
+
+    def _norm_id(raw):
+        """'640849.0' → '640849'; non-numeric strings kept as-is."""
+        s = str(raw).strip()
+        try:
+            return str(int(float(s)))
+        except (ValueError, OverflowError):
+            return s
+
+    # Step 1: plasma_exp.xlsx → {case_id: timestamp}
+    exp_path = None
+    for candidate in ["data/plasma_exp.xlsx", "plasma_exp.xlsx"]:
+        if os.path.exists(candidate):
+            exp_path = candidate
+            break
+    if exp_path is None:
+        logger.warning("[temporal] plasma_exp.xlsx not found — skipping temporal validation")
+        return {}
+
+    try:
+        df_exp = pd.read_excel(exp_path)
+    except Exception as e:
+        logger.warning(f"[temporal] Failed to read {exp_path}: {e}")
+        return {}
+
+    df_exp.columns = df_exp.columns.str.strip().str.lower()
+    if "case_id" not in df_exp.columns or "datetime" not in df_exp.columns:
+        logger.warning("[temporal] plasma_exp.xlsx missing required columns (case_id, datetime)")
+        return {}
+
+    case_date = {}
+    for _, row in df_exp.iterrows():
+        cid = _norm_id(row["case_id"])
+        dt_raw = str(row["datetime"]).strip()
+        ts = pd.to_datetime(dt_raw, format="%Y%m%d", errors="coerce")
+        if pd.isna(ts):
+            ts = pd.to_datetime(dt_raw, errors="coerce")
+        if not pd.isna(ts):
+            case_date[cid] = ts
+
+    if not case_date:
+        logger.warning("[temporal] No valid dates parsed from plasma_exp.xlsx")
+        return {}
+
+    # Step 2: sample_info_excel → {sample_id (fq_R1 prefix): case_id}
+    excel_file = (config or {}).get("data", {}).get("sample_info_excel", "")
+    if not excel_file or not os.path.exists(excel_file):
+        logger.warning(f"[temporal] sample_info_excel not found: {excel_file!r}")
+        return {}
+
+    sid_to_case = {}
+    try:
+        xl = pd.ExcelFile(excel_file)
+        for sheet in xl.sheet_names:
+            df = pd.read_excel(excel_file, sheet_name=sheet)
+            # df.columns = df.columns.str.strip()
+            if "fq_R1" not in df.columns or "case_id" not in df.columns:
+                continue
+            for _, row in df.iterrows():
+                cid = _norm_id(row.get("case_id", ""))
+                r1  = str(row.get("fq_R1", "")).strip()
+                sid = r1.split(".")[0]
+                if cid and cid != "nan" and sid and sid != "nan":
+                    sid_to_case[sid] = cid
+    except Exception as e:
+        logger.warning(f"[temporal] Failed to read sample_info_excel: {e} {traceback.format_exc()}")
+        return {}
+
+    # Step 3: join → {sample_id: date}
+    sample_date_map = {
+        sid: case_date[cid]
+        for sid, cid in sid_to_case.items()
+        if cid in case_date
+    }
+    logger.info(
+        f"[temporal] date map: {len(case_date)} case_ids in plasma_exp.xlsx, "
+        f"{len(sid_to_case)} sample_ids in sample_info_excel, "
+        f"{len(sample_date_map)} matched → {list(sample_date_map.keys())[:5]}"
+    )
+    return sample_date_map
+
+
+def run_temporal_validation(workdir, result_dir, config, benign_samples, malignant_samples):
+    """
+    Supplementary temporal split validation (plasma mode only).
+
+    Reads data/plasma_exp.xlsx (columns: case_id, datetime) joined with sample_info_excel
+    to map case_id → sample_id.
+    Splits at 2024-07-01: datetime < cutoff → train; datetime >= cutoff → validation.
+    Trains each classifier once on the train set and evaluates on the validation set
+    using the pre-selected panel features (panel_cpg.csv).
+
+    Outputs:
+        temporal_validation_predictions.csv — per-sample predictions for validation set
+        temporal_validation_summary.csv     — AUC / accuracy / sensitivity / specificity
+    """
+
+    tv_cfg = (config or {}).get("temporal_validate", {})
+    CUTOFF = pd.Timestamp(tv_cfg.get("cutoff_date", "2024-07-01"))
+    TOP_N  = int(tv_cfg.get("top_n_features", 20))
+
+    # 1-2. Build {sample_id: collection_date} via plasma_exp.xlsx + sample_info_excel bridge
+    date_map = _build_sample_date_map(config)
+    if not date_map:
+        return None, None
+
+    # 3. Load full feature matrix (no panel filter — use freq-selected features below)
+    X, y, sample_ids, feature_names, region_in_88 = _load_feature_matrix(
+        workdir, result_dir, benign_samples, malignant_samples, config
+    )
+
+    # 4. Restrict to top-N features from feature_selection_freq.csv.
+    #    If panel_cpg_blood_filtered.csv exists (written by Step 19 external_validate),
+    #    additionally exclude blood-contaminated sites (blood_mean_beta >= 0.10).
+    #    These were selected per LOO fold on training data in run_classifiers,
+    #    so they carry no information from the temporal test set.
+    freq_path = os.path.join(result_dir, "feature_selection_freq.csv")
+    if not os.path.exists(freq_path):
+        logger.warning(f"[temporal] feature_selection_freq.csv not found — run classify first: {freq_path}")
+        return None, None
+    freq_df = pd.read_csv(freq_path)
+    top_features = set(freq_df["feature"].iloc[:TOP_N].tolist())
+
+    # Apply blood-filter whitelist if available (Step 19 must have run first)
+    blood_filtered_path = os.path.join(result_dir, "panel_cpg_blood_filtered.csv")
+    if os.path.exists(blood_filtered_path):
+        blood_panel_df = pd.read_csv(blood_filtered_path)
+        blood_whitelist = set(blood_panel_df["feature"].tolist())
+        n_before = len(top_features)
+        top_features = top_features & blood_whitelist
+        n_removed = n_before - len(top_features)
+        if n_removed:
+            logger.info(
+                f"[temporal] Blood-filter applied: {n_removed} blood-contaminated site(s) "
+                f"removed from top features → {len(top_features)} features retained"
+            )
+        else:
+            logger.info("[temporal] Blood-filter: no top features were blood-contaminated")
+    else:
+        logger.debug(
+            "[temporal] panel_cpg_blood_filtered.csv not found — "
+            "run --step external_validate to enable blood-site exclusion"
+        )
+
+    top_idx = [i for i, fn in enumerate(feature_names) if fn in top_features]
+    if not top_idx:
+        logger.warning("[temporal] None of the top features found in feature matrix — skipping")
+        return None, None
+    X = X[:, top_idx]
+    feature_names = [feature_names[i] for i in top_idx]
+    logger.info(f"[temporal] Using top {len(top_idx)} features from feature_selection_freq.csv")
+
+    # 5. Apply exclude_samples (consistent with run_classifiers)
+    ml_cfg = (config or {}).get("ml", {})
+    exclude_set = set(ml_cfg.get("exclude_samples", []))
+    if exclude_set:
+        keep_mask = [sid not in exclude_set for sid in sample_ids]
+        X          = X[[i for i, k in enumerate(keep_mask) if k]]
+        y          = y[[i for i, k in enumerate(keep_mask) if k]]
+        sample_ids = [sid for sid, k in zip(sample_ids, keep_mask) if k]
+
+    # 6. Partition by collection date — no test-set info leaks into train
+    train_idx, test_idx = [], []
+    no_date_count = 0
+    for i, sid in enumerate(sample_ids):
+        if sid not in date_map:
+            no_date_count += 1
+            continue
+        if date_map[sid] < CUTOFF:
+            train_idx.append(i)
+        else:
+            test_idx.append(i)
+
+    if no_date_count:
+        logger.info(f"[temporal] {no_date_count} sample(s) not in plasma_exp.xlsx — excluded")
+    logger.info(f"[temporal] Split: {len(train_idx)} train (before {CUTOFF.date()})  "
+                f"{len(test_idx)} validation (on/after {CUTOFF.date()})")
+
+    if len(train_idx) < 5:
+        logger.warning(f"[temporal] Insufficient train samples ({len(train_idx)}) — skipping")
+        return None, None
+    if len(test_idx) == 0:
+        logger.warning("[temporal] No validation samples — skipping")
+        return None, None
+
+    X_train, y_train = X[train_idx], y[train_idx]
+    X_test,  y_test  = X[test_idx],  y[test_idx]
+
+    # 7. Impute then scale — both fitted on train only to prevent leakage
+    X_train_imp, col_medians = _impute_fit(X_train)
+    X_test_imp               = _impute_transform(X_test, col_medians)
+
+    scaler     = StandardScaler()
+    X_train_sc = scaler.fit_transform(X_train_imp)
+    X_test_sc  = scaler.transform(X_test_imp)
+
+    # 7. Classifiers (same hyperparameters as run_classifiers)
+    n_neg = int(sum(y_train == 0))
+    n_pos = int(sum(y_train == 1))
+    spw   = n_neg / n_pos if n_pos > 0 else 1.0
+    logger.info(f"[temporal] train n_neg={n_neg} n_pos={n_pos}")
+    logger.info(f"[temporal] test  n_neg={int(sum(y_test == 0))} n_pos={int(sum(y_test == 1))}")
+
+    classifiers = {
+        "LR": LogisticRegression(
+            C=ml_cfg.get("lr_C", 1.0),
+            class_weight="balanced",
+            max_iter=2000,
+            random_state=42,
+        ),
+        "SVM": SVC(
+            kernel="rbf",
+            C=ml_cfg.get("svm_C", 1.0),
+            probability=True,
+            class_weight="balanced",
+            random_state=42,
+        ),
+        "RF": RandomForestClassifier(
+            n_estimators=ml_cfg.get("rf_n_estimators", 200),
+            class_weight="balanced",
+            random_state=42,
+            n_jobs=-1,
+        ),
+        "XGB": XGBClassifier(
+            n_estimators=ml_cfg.get("xgb_n_estimators", 200),
+            max_depth=ml_cfg.get("xgb_max_depth", 4),
+            learning_rate=ml_cfg.get("xgb_learning_rate", 0.1),
+            scale_pos_weight=spw,
+            use_label_encoder=False,
+            eval_metric="logloss",
+            random_state=42,
+            n_jobs=-1,
+            verbosity=0,
+        ),
+        "LGBM": LGBMClassifier(
+            n_estimators=ml_cfg.get("lgbm_n_estimators", 200),
+            max_depth=ml_cfg.get("lgbm_max_depth", 4),
+            learning_rate=ml_cfg.get("lgbm_learning_rate", 0.1),
+            scale_pos_weight=spw,
+            random_state=42,
+            n_jobs=-1,
+            verbosity=-1,
+        ),
+    }
+
+    # 8. Train and evaluate
+    results = {}
+    test_dates = [date_map.get(sample_ids[i]) for i in test_idx]
+
+    for clf_name, clf in classifiers.items():
+        clf.fit(X_train_sc, y_train)
+        y_prob = clf.predict_proba(X_test_sc)[:, 1]
+        y_pred = clf.predict(X_test_sc)
+
+        acc  = float(accuracy_score(y_test, y_pred))
+        cm   = confusion_matrix(y_test, y_pred, labels=[0, 1])
+        tn, fp, fn, tp = cm.ravel()
+        sensitivity = tp / (tp + fn) if (tp + fn) > 0 else float("nan")
+        specificity = tn / (tn + fp) if (tn + fp) > 0 else float("nan")
+
+        n_classes_test = len(set(y_test))
+        if n_classes_test < 2:
+            logger.warning(f"[temporal] {clf_name}: only one class in validation set — AUC undefined")
+            auc = float("nan")
+        else:
+            auc = float(roc_auc_score(y_test, y_prob))
+
+        logger.info(f"[temporal] {clf_name}: AUC={auc:.3f}  Acc={acc:.3f}  "
+                    f"Sens={sensitivity:.3f}  Spec={specificity:.3f}")
+
+        results[clf_name] = {
+            "y_true": y_test,
+            "y_prob": y_prob,
+            "y_pred": y_pred,
+            "auc": auc,
+            "accuracy": acc,
+            "sensitivity": sensitivity,
+            "specificity": specificity,
+            "confusion_matrix": cm,
+        }
+
+    # 9. Save predictions
+    val_sample_ids = [sample_ids[i] for i in test_idx]
+    pred_rows = []
+    for clf_name, res in results.items():
+        for i, sid in enumerate(val_sample_ids):
+            pred_rows.append({
+                "sample_id":       sid,
+                "true_label":      "malignant" if res["y_true"][i] == 1 else "benign",
+                "classifier":      clf_name,
+                "prob_malignant":  round(float(res["y_prob"][i]), 4),
+                "predicted":       "malignant" if res["y_pred"][i] == 1 else "benign",
+                "correct":         bool(res["y_true"][i] == res["y_pred"][i]),
+                "split":           "validation",
+                "collection_date": test_dates[i].strftime("%Y%m%d") if test_dates[i] is not None else "",
+            })
+    pred_df = pd.DataFrame(pred_rows)
+    pred_path = os.path.join(result_dir, "temporal_validation_predictions.csv")
+    pred_df.to_csv(pred_path, index=False)
+    logger.info(f"[temporal] Predictions saved: {pred_path}")
+
+    # 10. Save summary
+    summary_rows = []
+    for clf_name, res in results.items():
+        summary_rows.append({
+            "classifier":   clf_name,
+            "n_train":      len(train_idx),
+            "n_validation": len(test_idx),
+            "auc":          round(res["auc"], 4) if not np.isnan(res["auc"]) else "",
+            "accuracy":     round(res["accuracy"], 4),
+            "sensitivity":  round(res["sensitivity"], 4) if not np.isnan(res["sensitivity"]) else "",
+            "specificity":  round(res["specificity"], 4) if not np.isnan(res["specificity"]) else "",
+            "cutoff_date":  str(CUTOFF.date()),
+        })
+    summary_df = pd.DataFrame(summary_rows)
+    summary_path = os.path.join(result_dir, "temporal_validation_summary.csv")
+    summary_df.to_csv(summary_path, index=False)
+    logger.info(f"[temporal] Summary saved: {summary_path}")
 
     return results, summary_df

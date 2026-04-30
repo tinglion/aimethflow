@@ -127,7 +127,7 @@ def _save_skip_summary(result_dir, reason, warnings=None):
 def _build_subtype_map(config):
     """
     Read all sheets from sample_info_excel and return {sample_id: subtype_str}.
-    Only retains rows where 分类 is '恶性' or '交界性' and 亚型 is non-empty.
+    Only retains rows where category is 'malignant' or 'borderline' and subtype is non-empty.
     """
     excel_file = config.get("data", {}).get("sample_info_excel", "")
     if not excel_file or not os.path.exists(excel_file):
@@ -143,20 +143,20 @@ def _build_subtype_map(config):
             logger.info("  → no fq_R1 column, skip")
             continue
 
-        if "分类" in df.columns:
-            df["分类"] = df["分类"].astype(str).str.strip()
-            logger.info(f"  → 分类 distribution: {df['分类'].value_counts().to_dict()}")
-        if "亚型" not in df.columns:
-            logger.warning("  → no '亚型' column, skip")
+        if "category" in df.columns:
+            df["category"] = df["category"].astype(str).str.strip()
+            logger.info(f"  → category distribution: {df['category'].value_counts().to_dict()}")
+        if "subtype" not in df.columns:
+            logger.warning("  → no 'subtype' column, skip")
             continue
-        df["亚型"] = df["亚型"].astype(str).str.strip()
-        logger.info(f"  → 亚型 distribution: {df['亚型'].value_counts().to_dict()}")
+        df["subtype"] = df["subtype"].astype(str).str.strip()
+        logger.info(f"  → subtype distribution: {df['subtype'].value_counts().to_dict()}")
 
         for _, row in df.iterrows():
-            category = str(row.get("分类", "")).strip() if "分类" in df.columns else "恶性"
-            if category not in ("恶性", "交界性"):
+            category = str(row.get("category", "")).strip() if "category" in df.columns else "malignant"
+            if category not in ("malignant", "borderline"):
                 continue
-            subtype = str(row.get("亚型", "")).strip()
+            subtype = str(row.get("subtype", "")).strip()
             if not subtype or subtype in ("nan", ""):
                 continue
             r1  = str(row.get("fq_R1", "")).strip()
@@ -670,5 +670,295 @@ def run_subtype_classifier(workdir, result_dir, config):
 
     # 10. One-vs-Rest binary classifiers (each subtype vs others)
     _run_ovr_binary(X_raw, labels, sample_ids, observed_classes, result_dir, config)
+
+    return results, summary_df
+
+
+def _build_sample_date_map():
+    """
+    Build {sample_id: collection_date} keyed by fq_R1 prefix (same as feature matrix).
+
+    Two-step join:
+      1. plasma_exp.xlsx  : case_id → collection_date
+      2. sample_info_excel: fq_R1 prefix (sample_id) → case_id
+    Both tables store integer case_ids as Excel floats ("640849.0"); normalise to "640849".
+
+    Returns an empty dict on any failure (caller should check and skip).
+    """
+    from utils.config import load_config as _load_config
+    _cfg = _load_config()
+
+    def _norm_id(raw):
+        s = str(raw).strip()
+        try:
+            return str(int(float(s)))
+        except (ValueError, OverflowError):
+            return s
+
+    exp_path = None
+    for candidate in ["data/plasma_exp.xlsx", "plasma_exp.xlsx"]:
+        if os.path.exists(candidate):
+            exp_path = candidate
+            break
+    if exp_path is None:
+        logger.warning("[subtype-temporal] plasma_exp.xlsx not found — skipping")
+        return {}
+
+    try:
+        df_exp = pd.read_excel(exp_path)
+    except Exception as e:
+        logger.warning(f"[subtype-temporal] Failed to read {exp_path}: {e}")
+        return {}
+
+    df_exp.columns = df_exp.columns.str.strip().str.lower()
+    if "case_id" not in df_exp.columns or "datetime" not in df_exp.columns:
+        logger.warning("[subtype-temporal] plasma_exp.xlsx missing required columns (case_id, datetime)")
+        return {}
+
+    case_date = {}
+    for _, row in df_exp.iterrows():
+        cid = _norm_id(row["case_id"])
+        dt_raw = str(row["datetime"]).strip()
+        ts = pd.to_datetime(dt_raw, format="%Y%m%d", errors="coerce")
+        if pd.isna(ts):
+            ts = pd.to_datetime(dt_raw, errors="coerce")
+        if not pd.isna(ts):
+            case_date[cid] = ts
+
+    if not case_date:
+        logger.warning("[subtype-temporal] No valid dates parsed from plasma_exp.xlsx")
+        return {}
+
+    excel_file = _cfg.get("data", {}).get("sample_info_excel", "")
+    if not excel_file or not os.path.exists(excel_file):
+        logger.warning(f"[subtype-temporal] sample_info_excel not found: {excel_file!r}")
+        return {}
+
+    sid_to_case = {}
+    try:
+        xl = pd.ExcelFile(excel_file)
+        for sheet in xl.sheet_names:
+            df = pd.read_excel(excel_file, sheet_name=sheet)
+            df.columns = df.columns.str.strip()
+            if "fq_R1" not in df.columns or "case_id" not in df.columns:
+                continue
+            for _, row in df.iterrows():
+                cid = _norm_id(row.get("case_id", ""))
+                r1  = str(row.get("fq_R1", "")).strip()
+                sid = r1.split(".")[0]
+                if cid and cid != "nan" and sid and sid != "nan":
+                    sid_to_case[sid] = cid
+    except Exception as e:
+        logger.warning(f"[subtype-temporal] Failed to read sample_info_excel: {e}")
+        return {}
+
+    sample_date_map = {
+        sid: case_date[cid]
+        for sid, cid in sid_to_case.items()
+        if cid in case_date
+    }
+    logger.info(
+        f"[subtype-temporal] date map: {len(case_date)} case_ids in plasma_exp.xlsx, "
+        f"{len(sid_to_case)} sample_ids in sample_info_excel, "
+        f"{len(sample_date_map)} matched → {list(sample_date_map.keys())[:5]}"
+    )
+    return sample_date_map
+
+
+def run_subtype_temporal_validation(result_dir, config):
+    """
+    Supplementary temporal split validation for subtype classification (plasma mode only).
+
+    Reads data/plasma_exp.xlsx (columns: case_id, datetime) joined with sample_info_excel
+    to map case_id → sample_id.
+    Splits at 2024-07-01: datetime < cutoff → train; datetime >= cutoff → validation.
+    Trains RF and SVM once on the train set, evaluates on the validation set.
+
+    Outputs:
+        subtype_temporal_predictions.csv — per-sample predictions for validation set
+        subtype_temporal_summary.csv     — accuracy per classifier
+    """
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.svm import SVC
+    from sklearn.preprocessing import StandardScaler, LabelEncoder
+    from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
+
+    tv_cfg = (config or {}).get("temporal_validate", {})
+    CUTOFF = pd.Timestamp(tv_cfg.get("cutoff_date", "2024-07-01"))
+
+    # 1-2. Build {sample_id: collection_date} via plasma_exp.xlsx + sample_info_excel bridge
+    date_map = _build_sample_date_map()
+    if not date_map:
+        return None, None
+
+    # 3. Load subtype map and feature matrix
+    subtype_map = _build_subtype_map(config)
+    if not subtype_map:
+        logger.warning("[subtype-temporal] No subtype labels found — skipping")
+        return None, None
+
+    try:
+        X_all, all_ids, feature_names = _load_feature_matrix(result_dir)
+    except FileNotFoundError as e:
+        logger.warning(f"[subtype-temporal] {e}")
+        return None, None
+
+    X_all, feature_names = _apply_panel_filter(X_all, feature_names, result_dir)
+
+    # 4. Filter to samples with both a subtype label and a date
+    indices, labels_raw, sample_ids = [], [], []
+    for i, sid in enumerate(all_ids):
+        sub = subtype_map.get(sid)
+        if sub is None or sub not in SUBTYPE_CLASSES:
+            continue
+        if sid not in date_map:
+            continue
+        indices.append(i)
+        labels_raw.append(sub)
+        sample_ids.append(sid)
+
+    if len(indices) == 0:
+        logger.warning("[subtype-temporal] No samples with both subtype labels and dates — skipping")
+        return None, None
+
+    X_sub = X_all[indices]
+    dates = [date_map[sid] for sid in sample_ids]
+
+    # 5. Partition by date
+    train_mask = [d < CUTOFF for d in dates]
+    test_mask  = [d >= CUTOFF for d in dates]
+    train_idx  = [i for i, m in enumerate(train_mask) if m]
+    test_idx   = [i for i, m in enumerate(test_mask)  if m]
+
+    logger.info(f"[subtype-temporal] Split: {len(train_idx)} train  {len(test_idx)} validation")
+
+    if len(train_idx) < 5 or len(test_idx) == 0:
+        logger.warning("[subtype-temporal] Insufficient samples for temporal split — skipping")
+        return None, None
+
+    X_train = X_sub[train_idx]
+    X_test  = X_sub[test_idx]
+    y_train_raw = [labels_raw[i] for i in train_idx]
+    y_test_raw  = [labels_raw[i] for i in test_idx]
+    test_ids    = [sample_ids[i]  for i in test_idx]
+    test_dates  = [dates[i]       for i in test_idx]
+
+    # Encode labels on train set only; skip test samples with unseen classes
+    le = LabelEncoder()
+    le.fit(y_train_raw)
+    train_classes = set(y_train_raw)
+    valid_test_mask = [l in train_classes for l in y_test_raw]
+    if not any(valid_test_mask):
+        logger.warning("[subtype-temporal] No test samples have classes seen in train — skipping")
+        return None, None
+    if not all(valid_test_mask):
+        n_skip = sum(1 for m in valid_test_mask if not m)
+        logger.warning(f"[subtype-temporal] {n_skip} test sample(s) have unseen subtype classes — excluded")
+
+    X_test_filt   = X_test[[i for i, m in enumerate(valid_test_mask) if m]]
+    y_test_filt   = [y_test_raw[i]  for i, m in enumerate(valid_test_mask) if m]
+    test_ids_filt = [test_ids[i]    for i, m in enumerate(valid_test_mask) if m]
+    test_dates_f  = [test_dates[i]  for i, m in enumerate(valid_test_mask) if m]
+
+    y_train_enc = le.transform(y_train_raw)
+    y_test_enc  = le.transform(y_test_filt)
+    n_classes   = len(le.classes_)
+    en_labels   = [SUBTYPE_EN.get(c, c) for c in le.classes_]
+
+    # 6. Impute (train only) then scale
+    X_train_imp, col_medians = _impute_fit(X_train)
+    X_test_imp               = _impute_transform(X_test_filt, col_medians)
+    scaler    = StandardScaler()
+    X_train_sc = scaler.fit_transform(X_train_imp)
+    X_test_sc  = scaler.transform(X_test_imp)
+
+    ml_cfg = (config or {}).get("ml", {})
+    classifiers = {
+        "RF":  RandomForestClassifier(
+            n_estimators=ml_cfg.get("rf_n_estimators", 200),
+            class_weight="balanced",
+            random_state=42,
+            n_jobs=-1,
+        ),
+        "SVM": SVC(
+            kernel="rbf",
+            C=ml_cfg.get("svm_C", 1.0),
+            probability=True,
+            class_weight="balanced",
+            random_state=42,
+        ),
+    }
+
+    # 7. Train and evaluate
+    results = {}
+    for clf_name, clf in classifiers.items():
+        clf.fit(X_train_sc, y_train_enc)
+        y_prob = clf.predict_proba(X_test_sc)   # (n_test, n_train_classes)
+        # Align probability vector to full n_classes (handles class subset edge case)
+        clf_classes = list(clf.classes_)
+        y_prob_full = np.zeros((len(y_test_enc), n_classes))
+        for j, cls_idx in enumerate(clf_classes):
+            y_prob_full[:, cls_idx] = y_prob[:, j]
+
+        y_pred = clf.predict(X_test_sc)
+        acc    = float(accuracy_score(y_test_enc, y_pred))
+        cm     = confusion_matrix(y_test_enc, y_pred, labels=list(range(n_classes)))
+        logger.info(f"[subtype-temporal] {clf_name}: accuracy={acc:.3f}")
+        logger.info("\n" + classification_report(
+            y_test_enc, y_pred,
+            labels=list(range(n_classes)),
+            target_names=en_labels,
+            zero_division=0,
+        ))
+        results[clf_name] = {
+            "y_true": y_test_enc,
+            "y_prob": y_prob_full,
+            "y_pred": y_pred,
+            "accuracy": acc,
+            "confusion_matrix": cm,
+        }
+
+    # 8. Save predictions
+    pred_rows = []
+    for clf_name, res in results.items():
+        for i, sid in enumerate(test_ids_filt):
+            row = {
+                "sample_id":         sid,
+                "true_subtype":      le.inverse_transform([res["y_true"][i]])[0],
+                "classifier":        clf_name,
+                "predicted_subtype": le.inverse_transform([res["y_pred"][i]])[0],
+                "confidence":        round(float(res["y_prob"][i].max()), 4),
+                "correct":           bool(res["y_true"][i] == res["y_pred"][i]),
+                "split":             "validation",
+                "collection_date":   test_dates_f[i].strftime("%Y%m%d"),
+            }
+            for j, cls in enumerate(le.classes_):
+                col = f"prob_{SUBTYPE_EN.get(cls, cls[:6])}"
+                row[col] = round(float(res["y_prob"][i, j]), 4)
+            pred_rows.append(row)
+
+    pred_df   = pd.DataFrame(pred_rows)
+    pred_path = os.path.join(result_dir, "subtype_temporal_predictions.csv")
+    pred_df.to_csv(pred_path, index=False)
+    logger.info(f"[subtype-temporal] Predictions saved: {pred_path}")
+
+    # 9. Save summary
+    summary_rows = []
+    for clf_name, res in results.items():
+        counts = Counter(y_train_raw)
+        summary_rows.append({
+            "classifier":   clf_name,
+            "n_train":      len(train_idx),
+            "n_validation": len(test_ids_filt),
+            "accuracy":     round(res["accuracy"], 4),
+            "n_subtypes":   n_classes,
+            "class_counts_train": str({SUBTYPE_EN.get(k, k): v
+                                       for k, v in sorted(counts.items(), key=lambda x: -x[1])}),
+            "cutoff_date":  str(CUTOFF.date()),
+        })
+    summary_df   = pd.DataFrame(summary_rows)
+    summary_path = os.path.join(result_dir, "subtype_temporal_summary.csv")
+    summary_df.to_csv(summary_path, index=False)
+    logger.info(f"[subtype-temporal] Summary saved: {summary_path}")
 
     return results, summary_df

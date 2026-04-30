@@ -10,14 +10,15 @@ Report structure:
   5.  Methylation Extraction & Candidate Regions
   6.  Methylation Distribution Visualization
   7.  Differential Methylation Analysis (DMC)
-  8.  Feature Selection (LASSO + RF) [optional]
-  9.  Sample Quality & Outlier Detection [optional]
-  10. Diagnostic Classifiers (LR / SVM / RF / XGB / LGBM, LOO-CV) [optional]
-  11. Subtype Classifier (multi-class LOO-CV) [optional]
-  12. Feature Site Annotation (Ensembl + EWAS + CpG island) [optional]
-  13. Public Dataset Cross-validation (blood baseline + TCGA-OV) [optional]
-  14. Results Interpretation & Quality Assessment
-  15. Analysis Pipeline
+  8.  Sample Quality & Outlier Detection [Step 13, optional]
+  9.  Feature Selection (LASSO + RF) [Step 14, optional]
+  10. Diagnostic Classifiers (LR / SVM / RF / XGB / LGBM, LOO-CV) [Step 15, optional]
+  11. Subtype Classifier (multi-class LOO-CV) [Step 16, optional]
+  12. Temporal Split Validation (plasma only) [Step 17, optional]
+  13. Feature Site Annotation (Ensembl + EWAS + CpG island) [Step 18, optional]
+  14. Public Dataset Cross-validation (blood baseline + TCGA-OV) [Step 19, optional]
+  15. Results Interpretation & Quality Assessment
+  16. Analysis Pipeline
 """
 
 import os
@@ -262,7 +263,12 @@ def _build_outlier_section(result_dir):
     path = os.path.join(result_dir, "outlier_report.csv")
     records = _read_csv_safe(path)
     if records is None:
-        return "", None
+        return (
+            '<div class="section"><h2>Step 13. Sample Quality &amp; Outlier Detection</h2>'
+            '<p style="color:#aaa;font-size:.9em">Step 13 not yet run — '
+            'execute <code>--step outlier_detect</code> to populate this section.</p></div>',
+            None,
+        )
 
     PAGE_SIZE = 20
     n_total   = len(records)
@@ -319,7 +325,7 @@ def _build_outlier_section(result_dir):
 
     html = f"""
 <div class="section">
-<h2>9. Sample Quality &amp; Outlier Detection</h2>
+<h2>Step 13. Sample Quality &amp; Outlier Detection</h2>
 <p style="color:#666;font-size:.85em">
   Three complementary methods flag unusual samples (flagged by &ge;2 methods = suspect):
   (1) <strong>Coverage</strong> &mdash; fraction of CpG sites with no read depth;
@@ -383,7 +389,12 @@ def _build_annotation_section(result_dir):
     path    = os.path.join(result_dir, "panel_annotation.csv")
     records = _read_csv_safe(path)
     if records is None:
-        return "", None
+        return (
+            '<div class="section"><h2>Step 18. Feature Site Annotation</h2>'
+            '<p style="color:#aaa;font-size:.9em">Step 18 not yet run — '
+            'execute <code>--step annotate</code> to populate this section.</p></div>',
+            None,
+        )
 
     PAGE_SIZE = 20
     n_total   = len(records)
@@ -495,7 +506,7 @@ def _build_annotation_section(result_dir):
 
     html = f"""
 <div class="section">
-<h2>12. Feature Site Annotation</h2>
+<h2>Step 18. Feature Site Annotation</h2>
 <p style="color:#666;font-size:.85em">
   Each panel CpG site is annotated with the nearest gene (Ensembl REST API),
   CpG island context (UCSC hg38), and associations from the EWAS Catalog
@@ -580,7 +591,12 @@ def _build_external_validation_section(result_dir):
     path    = os.path.join(result_dir, "external_validation.csv")
     records = _read_csv_safe(path)
     if records is None:
-        return "", None
+        return (
+            '<div class="section"><h2>Step 19. Public Dataset Cross-validation (optional)</h2>'
+            '<p style="color:#aaa;font-size:.9em">Step 19 not yet run — '
+            'execute <code>--step external_validate</code> to populate this section.</p></div>',
+            None,
+        )
 
     # ── Join selection_rate from panel_annotation.csv ────────────────────────
     annot_path = os.path.join(result_dir, "panel_annotation.csv")
@@ -681,13 +697,50 @@ def _build_external_validation_section(result_dir):
 
     controls_extval, js_pagination = _pagination_widget(TBL, CTRL, n_total, PAGE_SIZE)
 
+    # ── Blood-filter panel summary (written by external_validate after panel_cpg.csv exists) ─
+    bf_path = os.path.join(result_dir, "blood_filter_summary.csv")
+    bf_records = _read_csv_safe(bf_path)
+    if bf_records:
+        bfr = bf_records[0]
+        try:
+            bf_removed  = int(float(bfr.get("blood_fail_removed", 0)))
+            bf_retained = int(float(bfr.get("panel_retained", 0)))
+            bf_total    = int(float(bfr.get("panel_total", 0)))
+            bf_thresh   = float(bfr.get("blood_threshold", 0.10))
+        except (TypeError, ValueError):
+            bf_removed = bf_retained = bf_total = 0
+            bf_thresh = 0.10
+        if bf_removed > 0:
+            blood_filter_note = (
+                f"<div style='background:#fff3cd;border:1px solid #f0ad4e;border-radius:4px;"
+                f"padding:8px 12px;margin-top:10px;font-size:.87em'>"
+                f"<strong>&#9888; Blood-filter applied (Step 19 &rarr; re-run Step 15):</strong> "
+                f"<strong>{bf_removed}</strong> site(s) with blood mean &beta; &ge; {bf_thresh} "
+                f"removed from <code>panel_cpg.csv</code> &rarr; "
+                f"<code>panel_cpg_blood_filtered.csv</code> "
+                f"(<strong>{bf_retained}/{bf_total}</strong> sites retained). "
+                f"The blood-filtered panel is automatically used by <strong>Step 17</strong> "
+                f"(temporal validation). To apply it to <strong>Step 15</strong> LOO-CV results, "
+                f"re-run: <code>--step classify</code>."
+                f"</div>"
+            )
+        else:
+            blood_filter_note = (
+                "<p style='color:#22863a;font-size:.85em;margin-top:8px'>"
+                "&#10003; Blood-filter: no sites removed — all probe-matched sites pass "
+                f"blood baseline threshold (&beta; &lt; {bf_thresh}).</p>"
+            )
+    else:
+        blood_filter_note = ""
+
     if n_blood_fail > 0:
         blood_note = (
             f"<p style='color:#c0392b;font-size:.85em;margin-top:8px'>"
             f"&#9888; <strong>{n_blood_fail}</strong> site(s) fail blood baseline check "
             f"(blood_mean_beta &ge; 0.10, highlighted yellow). "
-            f"These sites may be confounded by blood cell methylation — "
-            f"consider removing or down-weighting them from the panel before clinical use.</p>"
+            f"These sites are potentially confounded by leukocyte DNA in plasma cfDNA — "
+            f"they have been removed from the classifier panel "
+            f"(see <code>panel_cpg_blood_filtered.csv</code>).</p>"
         )
     else:
         blood_note = ("<p style='color:#22863a;font-size:.85em;margin-top:8px'>"
@@ -762,7 +815,7 @@ def _build_external_validation_section(result_dir):
 
     html = f"""
 <div class="section">
-<h2>13. Public Dataset Cross-validation (Step 18, optional)</h2>
+<h2>Step 19. Public Dataset Cross-validation (optional)</h2>
 <p style="color:#666;font-size:.85em">
   Panel sites mapped to Illumina 450K probes via hg38&rarr;hg19 liftOver (&plusmn;2 bp) and
   cross-referenced against two public reference datasets:
@@ -782,6 +835,7 @@ def _build_external_validation_section(result_dir):
   <tr><td>Sites with TCGA-OV coverage</td><td>{n_tcga}</td></tr>
 </table>
 {blood_note}
+{blood_filter_note}
 {controls_extval}
 <div style="overflow-x:auto;margin-top:4px">
 <table id="{TBL}" style="font-size:.82em">
@@ -874,11 +928,11 @@ def _build_ovr_subsection(ovr_records, roc_src):
 
 def _build_classifier_section(result_dir, imgs_dir):
     """
-    Read Step 14-16 output files and build HTML fragments + JSON data.
-    All three sections are optional: returns empty string / None when files are absent.
-    Returns (sec9_html, sec10_html, sec11_html, clf_data_dict)
+    Read Step 13-16 output files and build HTML fragments + JSON data.
+    All sections are optional: returns empty string / None when files are absent.
+    Returns (sec8_html, sec_outlier_html, sec10_html, sec11_html, sec12_html, clf_data_dict)
     """
-    # ── Section 9: Feature Selection ──
+    # ── Section 8: Feature Selection (Step 14) ──
     panel_path    = os.path.join(result_dir, "panel_cpg.csv")
     feat_imp_path = os.path.join(result_dir, "feature_importance.csv")
     feat_records  = _read_csv_safe(feat_imp_path)
@@ -1044,7 +1098,7 @@ full per-site stats: <code>panel_cpg_depth.csv</code></p>"""
 
         sec9_html = f"""
 <div class="section">
-<h2>8. Feature Selection (LASSO + RF)</h2>
+<h2>Step 14. Feature Selection — LASSO + RF</h2>
 <p style="color:#666;font-size:.85em">
   Pipeline: group-level DMC (merged bedGraph) →
   coverage filter (≥50% samples) →
@@ -1070,10 +1124,12 @@ outputs: <code>panel_cpg.csv</code>, <code>feature_importance.csv</code></p>
                      "rf_selected": rf_sel, "panel_size": n_panel,
                      "wilcoxon": wilcox_data, "depth": depth_data}
     else:
-        sec9_html = ""
+        sec9_html = ('<div class="section"><h2>Step 14. Feature Selection — LASSO + RF</h2>'
+                     '<p style="color:#aaa;font-size:.9em">Step 14 not yet run — '
+                     'execute <code>--step feature_select</code> to populate this section.</p></div>')
         sec9_data = None
 
-    # ── Section 10: Diagnostic Classifiers ──
+    # ── Section 10: Diagnostic Classifiers (Step 15) ──
     clf_sum_path  = os.path.join(result_dir, "classifier_summary.csv")
     roc_src       = _copy_img(os.path.join(result_dir, "roc_curve.png"), imgs_dir)
     cm_src        = _copy_img(os.path.join(result_dir, "confusion_matrix.png"), imgs_dir)
@@ -1094,7 +1150,7 @@ outputs: <code>panel_cpg.csv</code>, <code>feature_importance.csv</code></p>
         cm_note    = _img_tag(cm_src,   "Confusion Matrix")
         sec10_html = f"""
 <div class="section">
-<h2>10. Diagnostic Classifiers (LOO-CV — Benign vs Malignant)</h2>
+<h2>Step 15. Diagnostic Classifiers — LOO-CV, Benign vs Malignant</h2>
 <table>
   <tr><th>Classifier</th><th>AUC</th><th>Accuracy</th><th>Sensitivity</th><th>Specificity</th><th>Features</th></tr>
   {clf_rows}
@@ -1109,10 +1165,12 @@ outputs: <code>classifier_summary.csv</code>, <code>classifier_predictions.csv</
 </div>"""
         sec10_data = clf_records
     else:
-        sec10_html = ""
+        sec10_html = ('<div class="section"><h2>Step 15. Diagnostic Classifiers — LOO-CV, Benign vs Malignant</h2>'
+                      '<p style="color:#aaa;font-size:.9em">Step 15 not yet run — '
+                      'execute <code>--step classify</code> to populate this section.</p></div>')
         sec10_data = None
 
-    # ── Section 11: Subtype Classifier ──
+    # ── Section 11: Subtype Classifier (Step 16) ──
     sub_sum_path   = os.path.join(result_dir, "subtype_summary.csv")
     sub_roc_src    = _copy_img(os.path.join(result_dir, "subtype_roc.png"), imgs_dir)
     rf_cm_src      = _copy_img(os.path.join(result_dir, "subtype_confusion_RF.png"), imgs_dir)
@@ -1139,7 +1197,7 @@ outputs: <code>classifier_summary.csv</code>, <code>classifier_predictions.csv</
         warn_html   = "".join(f"<li>{w}</li>" for w in skip_warns) if skip_warns else ""
         sec11_html  = f"""
 <div class="section">
-<h2>11. Subtype Classifier — Skipped</h2>
+<h2>Step 16. Subtype Classifier — Skipped</h2>
 <p style="color:#c0392b;font-size:.9em">
   &#9888; Subtype classification was skipped because the dataset does not meet
   the minimum requirements for reliable LOO-CV training.
@@ -1183,7 +1241,7 @@ outputs: <code>classifier_summary.csv</code>, <code>classifier_predictions.csv</
             )
         sec11_html = f"""
 <div class="section">
-<h2>11. Subtype Classifier (LOO-CV — Malignant + Borderline, Multi-class)</h2>
+<h2>Step 16. Subtype Classifier — LOO-CV, Malignant + Borderline, Multi-class</h2>
 <p style="color:#666;font-size:.85em">
   Subtypes: HGSC / Endometrioid / Clear cell / LGSC / Mucinous.
   Strategy: One-vs-Rest (OvR); evaluation: Leave-One-Out CV.
@@ -1209,7 +1267,9 @@ outputs: <code>classifier_summary.csv</code>, <code>classifier_predictions.csv</
         sec11_data = sub_records
 
     else:
-        sec11_html = ""
+        sec11_html = ('<div class="section"><h2>Step 16. Subtype Classifier — LOO-CV, Malignant + Borderline</h2>'
+                      '<p style="color:#aaa;font-size:.9em">Step 16 not yet run — '
+                      'execute <code>--step subtype_classify</code> to populate this section.</p></div>')
         sec11_data = None
 
     clf_data = {
@@ -1219,11 +1279,55 @@ outputs: <code>classifier_summary.csv</code>, <code>classifier_predictions.csv</
         "subtype_classifier": sec11_data,
     }
 
-    # ── Outlier detection section (Step 14.5) ──
+    # ── Outlier detection section (Step 13) ──
     sec_outlier_html, outlier_data = _build_outlier_section(result_dir)
     clf_data["outlier_detection"] = outlier_data
 
-    return sec9_html, sec_outlier_html, sec10_html, sec11_html, clf_data
+    # ── Section 12: Temporal Split Validation (Step 17, plasma only) ──
+    tv_sum_path  = os.path.join(result_dir, "temporal_validation_summary.csv")
+    tv_pred_path = os.path.join(result_dir, "temporal_validation_predictions.csv")
+    tv_records   = _read_csv_safe(tv_sum_path)
+
+    if tv_records is not None:
+        tv_rows = ""
+        for r in tv_records:
+            tv_rows += (
+                f"<tr><td>{r.get('classifier','')}</td>"
+                f"<td>{r.get('n_train','')}</td>"
+                f"<td>{r.get('n_validation','')}</td>"
+                f"<td>{r.get('auc','')}</td>"
+                f"<td>{r.get('accuracy','')}</td>"
+                f"<td>{r.get('sensitivity','')}</td>"
+                f"<td>{r.get('specificity','')}</td></tr>\n"
+            )
+        cutoff = tv_records[0].get("cutoff_date", "2024-07-01") if tv_records else "2024-07-01"
+        sec12_html = f"""
+<div class="section">
+<h2>Step 17. Temporal Split Validation (plasma mode)</h2>
+<p style="color:#666;font-size:.85em">
+  Prospective simulation: samples collected before <strong>{cutoff}</strong> form the train set;
+  samples collected on/after that date form the held-out validation set.
+  Features: top-N sites by LOO-CV selection frequency (<code>feature_selection_freq.csv</code>),
+  fitted on train only — no information from the validation set leaks in.
+</p>
+<table>
+  <tr><th>Classifier</th><th>Train (n)</th><th>Validation (n)</th>
+      <th>AUC</th><th>Accuracy</th><th>Sensitivity</th><th>Specificity</th></tr>
+  {tv_rows}
+</table>
+<p style="color:#666;font-size:.83em">
+  Outputs: <code>temporal_validation_summary.csv</code>,
+  <code>temporal_validation_predictions.csv</code>
+</p>
+</div>"""
+        clf_data["temporal_validation"] = tv_records
+    else:
+        sec12_html = ('<div class="section"><h2>Step 17. Temporal Split Validation (plasma mode)</h2>'
+                      '<p style="color:#aaa;font-size:.9em">Step 17 not yet run — '
+                      'execute <code>--step temporal_validate</code> (plasma mode only) to populate this section.</p></div>')
+        clf_data["temporal_validation"] = None
+
+    return sec9_html, sec_outlier_html, sec10_html, sec11_html, sec12_html, clf_data
 
 
 # ─────────────────────────────────────────────
@@ -1241,7 +1345,7 @@ def generate_report(
     malignant_samples=None,
 ):
     """Generate full analysis report (HTML + JSON) inside result_dir/report/."""
-    logger.info("开始生成分析报告")
+    logger.info("Generating analysis report")
 
     benign_samples    = benign_samples or []
     malignant_samples = malignant_samples or []
@@ -1488,14 +1592,22 @@ def generate_report(
 
     analysis_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Optional ML sections (Steps 8–11; empty string if files absent)
-    sec8_html, sec9_html, sec10_html, sec11_html, clf_data = _build_classifier_section(result_dir, imgs_dir)
-    # Section 12: annotation (runs after classifiers; silent if panel_annotation.csv absent)
-    sec12_html, annot_data = _build_annotation_section(result_dir)
+    # Optional ML sections (Steps 13–17; empty string if files absent)
+    sec8_html, sec9_html, sec10_html, sec11_html, sec12_html, clf_data = _build_classifier_section(result_dir, imgs_dir)
+    # Section 13: annotation (Step 18; silent if panel_annotation.csv absent)
+    sec13_html, annot_data = _build_annotation_section(result_dir)
     clf_data["annotation"] = annot_data
-    # Section 13: public-dataset cross-validation (silent if external_validation.csv absent)
-    sec13_html, ext_val_data = _build_external_validation_section(result_dir)
+    # Section 14: public-dataset cross-validation (Step 19; silent if external_validation.csv absent)
+    sec14_html, ext_val_data = _build_external_validation_section(result_dir)
     clf_data["external_validation"] = ext_val_data
+
+    # iMeta publication figures (auto-generated; silently skipped if input CSVs absent)
+    try:
+        from scripts.modules.imeta_utils import build_imeta_section as _build_imeta
+        sec_imeta_html = _build_imeta(result_dir, imgs_dir)
+    except Exception as _imeta_exc:
+        logger.warning("iMeta figure generation skipped: %s", _imeta_exc)
+        sec_imeta_html = ""
 
     # QC table rows
     qc_rows = ""
@@ -1622,7 +1734,7 @@ def generate_report(
 
 <!-- 1. Data Quality Overview -->
 <div class="section">
-<h2>1. Data Quality Overview (fastp QC)</h2>
+<h2>Step 4. Data Quality Overview — fastp QC</h2>
 <table>
   <tr><th>Sample</th><th>Group</th><th>Raw Read Pairs</th><th>Filtered Pairs</th><th>Pass Rate</th><th>Q30 (post-QC)</th></tr>
   {qc_rows}
@@ -1632,7 +1744,7 @@ def generate_report(
 
 <!-- 2. Alignment & Deduplication -->
 <div class="section">
-<h2>2. Alignment (bwameth) &amp; UMI Deduplication</h2>
+<h2>Steps 5–7. Alignment, Deduplication &amp; On-target Filter</h2>
 <div style="overflow-x:auto">
 <table>
   <tr><th>Sample</th><th>Sorted BAM</th><th>Input Pairs (pre-dedup)</th><th>Dedup Pairs</th><th>Dup Rate</th><th>On-target BAM</th><th>On-target Rate</th></tr>
@@ -1644,14 +1756,14 @@ def generate_report(
 
 <!-- 3. M-bias Check -->
 <div class="section">
-<h2>3. M-bias Check (MethylDackel mbias)</h2>
+<h2>Step 8. M-bias Check — MethylDackel mbias</h2>
 <p style="color:#666;font-size:.85em">OT = Watson-strand methylation (~99% of reads). If the R2 3' curve drops, increase trim_tail2 and re-run from --step extract.</p>
 {mbias_body}
 </div>
 
 <!-- 4. Sample Grouping -->
 <div class="section">
-<h2>4. Sample Grouping</h2>
+<h2>Sample Grouping</h2>
 <div class="two-col">
   <div class="group-box group-benign">
     <h3 style="color:#1d4ed8;margin-top:0">&#x1F535; {g1_label} ({len(benign_samples)} samples)</h3>
@@ -1662,12 +1774,12 @@ def generate_report(
     <p style="font-size:.9em">{g2_samples_str}</p>
   </div>
 </div>
-<p style="color:#666;font-size:.83em;margin-top:10px">Source: data/卵巢癌fq编号与样本信息对应表.xlsx</p>
+<p style="color:#666;font-size:.83em;margin-top:10px">Source: data/ovarian_fq_series_samples_v3.xlsx</p>
 </div>
 
 <!-- 5. Methylation Extraction -->
 <div class="section">
-<h2>5. Methylation Extraction (MethylDackel extract)</h2>
+<h2>Step 9. Methylation Extraction — MethylDackel extract</h2>
 <table>
   <tr><th>Sample</th><th>Group</th><th>CpG Sites Detected</th><th>Mean Methylation</th></tr>
   {cpg_rows}
@@ -1687,7 +1799,7 @@ def generate_report(
 
 <!-- 6. Methylation Visualization -->
 <div class="section">
-<h2>6. Methylation Distribution Visualization (candidate regions, merged)</h2>
+<h2>Step 12. Methylation Distribution Visualization</h2>
 <div class="two-col">
   <div><h3>Density Plot</h3>{_img_tag(density_src, 'Density Plot')}</div>
   <div><h3>Position Scatter Plot</h3>{_img_tag(scatter_src, 'Position Scatter Plot')}</div>
@@ -1697,7 +1809,7 @@ def generate_report(
 
 <!-- 7. Differential Methylation Analysis -->
 <div class="section">
-<h2>7. Differential Methylation Analysis (DMC, |Δβ| ≥ 0.2)</h2>
+<h2>Step 11. Differential Methylation Analysis — DMC, |Δβ| ≥ 0.2</h2>
 <div class="two-col">
   <div>
     <table>
@@ -1736,17 +1848,21 @@ def generate_report(
 
 {sec13_html}
 
-<!-- 14. Results Interpretation -->
+{sec14_html}
+
+{sec_imeta_html}
+
+<!-- Step 20. Results Interpretation -->
 <div class="section">
-<h2>14. Results Interpretation &amp; Quality Assessment</h2>
+<h2>Step 20. Results Interpretation &amp; Quality Assessment</h2>
 <div class="interp">
 {interp_html}
 </div>
 </div>
 
-<!-- 15. Analysis Pipeline -->
+<!-- 16. Analysis Pipeline -->
 <div class="section">
-<h2>15. Analysis Pipeline</h2>
+<h2>Pipeline Overview</h2>
 <div class="funnel">
   <div class="funnel-step">fastp QC<br/>UMI extract</div><div class="funnel-arrow">→</div>
   <div class="funnel-step">bwameth<br/>alignment</div><div class="funnel-arrow">→</div>
@@ -1759,22 +1875,27 @@ def generate_report(
   <div class="funnel-step">Diff.<br/>analysis</div><div class="funnel-arrow">→</div>
   <div class="funnel-step">Feature<br/>selection</div><div class="funnel-arrow">→</div>
   <div class="funnel-step">ML<br/>classifiers</div><div class="funnel-arrow">→</div>
+  <div class="funnel-step">Temporal<br/>validation</div><div class="funnel-arrow">→</div>
   <div class="funnel-step">Report</div>
 </div>
 <table style="margin-top:14px">
   <tr><th>Step</th><th>Tool</th><th>Key Parameters</th></tr>
-  <tr><td>Preprocessing</td><td>fastp</td><td>trim_front=12/12, trim_tail2=5, min_length=35, Q20, UMI R2 5' 6 N</td></tr>
-  <tr><td>Alignment</td><td>bwameth + bwa-mem</td><td>-t 8, two-step (view + sort -m 8 G), reference hg38</td></tr>
-  <tr><td>Deduplication</td><td>umi_tools dedup</td><td>--paired, UMI at R2 5' 6 N</td></tr>
-  <tr><td>On-target filtering</td><td>bedtools intersect</td><td>panel_B10308.bed</td></tr>
-  <tr><td>M-bias check</td><td>MethylDackel mbias</td><td>confirms trim_tail2 parameter</td></tr>
-  <tr><td>Methylation extraction</td><td>MethylDackel extract</td><td>--minDepth 1 --mergeContext → CpG bedGraph</td></tr>
-  <tr><td>Group merging</td><td>custom script</td><td>split by Excel into Benign/Malignant; merge bedGraphs per group</td></tr>
-  <tr><td>Filtering</td><td>custom script + bedtools</td><td>repeat masking, depth filter, focus on 88 candidate regions</td></tr>
-  <tr><td>Differential analysis</td><td>custom script</td><td>threshold |Δβ| ≥ 0.2, coverage statistics (Wilcoxon)</td></tr>
-  <tr><td>Feature selection</td><td>scikit-learn</td><td>LASSO (LogisticRegressionCV, L1) ∪ RF (Gini importance > 0)</td></tr>
-  <tr><td>Diagnostic classifiers</td><td>scikit-learn / XGBoost / LightGBM</td><td>LR / SVM / RF / XGB / LGBM, LOO-CV, StandardScaler per fold</td></tr>
-  <tr><td>Subtype classifier</td><td>scikit-learn</td><td>RF + SVM OvR, LOO-CV, malignant + borderline samples</td></tr>
+  <tr><td>Preprocessing (Step 4)</td><td>fastp</td><td>trim_front=12/12, trim_tail2=5, min_length=35, Q20, UMI R2 5' 6 N</td></tr>
+  <tr><td>Alignment (Step 5)</td><td>bwameth + bwa-mem</td><td>-t 8, two-step (view + sort -m 8 G), reference hg38</td></tr>
+  <tr><td>Deduplication (Step 6)</td><td>umi_tools dedup</td><td>--paired, UMI at R2 5' 6 N</td></tr>
+  <tr><td>On-target filtering (Step 7)</td><td>bedtools intersect</td><td>panel_B10308.bed</td></tr>
+  <tr><td>M-bias check (Step 8)</td><td>MethylDackel mbias</td><td>confirms trim_tail2 parameter</td></tr>
+  <tr><td>Methylation extraction (Step 9)</td><td>MethylDackel extract</td><td>--minDepth 1 --mergeContext → CpG bedGraph; merge per group (Benign/Malignant)</td></tr>
+  <tr><td>Filtering (Step 10)</td><td>custom script + bedtools</td><td>repeat masking, depth filter, focus on 88 candidate regions</td></tr>
+  <tr><td>Differential analysis (Step 11)</td><td>custom script</td><td>threshold |Δβ| ≥ 0.2, coverage statistics (Wilcoxon)</td></tr>
+  <tr><td>Visualization (Step 12)</td><td>matplotlib / seaborn</td><td>density, scatter, heatmap; candidate regions merged bedGraph</td></tr>
+  <tr><td>Sample QC &amp; outlier detection (Step 13)</td><td>scikit-learn / scipy</td><td>coverage fraction, PCA z-score, Isolation Forest; ≥2 flags = suspect</td></tr>
+  <tr><td>Feature selection (Step 14)</td><td>scikit-learn</td><td>LASSO (LogisticRegressionCV, L1) ∪ RF (Gini importance > 0); outlier samples excluded from selection</td></tr>
+  <tr><td>Diagnostic classifiers (Step 15)</td><td>scikit-learn / XGBoost / LightGBM</td><td>LR / SVM / RF / XGB / LGBM, LOO-CV, StandardScaler per fold</td></tr>
+  <tr><td>Subtype classifier (Step 16)</td><td>scikit-learn</td><td>RF + SVM OvR, LOO-CV, malignant + borderline samples</td></tr>
+  <tr><td>Temporal validation (Step 17)</td><td>scikit-learn</td><td>Train ← before cutoff_date; Validation ← on/after; top-N freq features; no test-set leakage</td></tr>
+  <tr><td>Site annotation (Step 18)</td><td>Ensembl REST + EWAS Catalog + UCSC CpGi</td><td>gene overlap, CpG island context, EWAS associations</td></tr>
+  <tr><td>External validation (Step 19)</td><td>custom script</td><td>GSE40279 blood baseline + TCGA-OV tumour cross-reference</td></tr>
 </table>
 </div>
 
@@ -1811,8 +1932,8 @@ def generate_report(
     with open(html_report, "w", encoding="utf-8") as f:
         f.write(html)
 
-    logger.info(f"分析报告生成完成: {html_report}")
-    logger.info(f"  报告目录（可直接打包）: {report_dir}")
+    logger.info(f"Analysis report saved: {html_report}")
+    logger.info(f"  Report directory (ready to zip): {report_dir}")
     return html_report
 
 

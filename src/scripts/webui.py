@@ -48,22 +48,23 @@ page_router = APIRouter(prefix="/meth")  # HTML pages
 api_router = APIRouter(prefix="/methapi")  # REST / SSE
 
 STEPS = [
-    ("preprocess", "Step 4    Preprocessing (fastp)"),
-    ("align", "Step 5    Alignment (bwameth)"),
-    ("dedup", "Step 6    Deduplication (umi_tools)"),
-    ("target", "Step 7    Target Region Filter"),
-    ("mbias", "Step 7.5  M-bias Check"),
-    ("extract", "Step 8    Methylation Extraction"),
-    ("filter", "Step 9    Filtering"),
-    ("diff", "Step 10   Differential Analysis"),
-    ("visualize", "Step 11   Visualization"),
-    ("feature_select", "Step 14   Feature Selection"),
-    ("outlier_detect", "Step 14.5 Outlier Detection"),
-    ("classify", "Step 15   Diagnostic Classification"),
-    ("subtype_classify", "Step 16   Subtype Classification"),
-    ("annotate", "Step 17   Site Annotation"),
-    ("external_validate", "Step 18   External Validation"),
-    ("report", "Step 19   Report Generation"),
+    ("preprocess",        "Step 4    Preprocessing (fastp)"),
+    ("align",             "Step 5    Alignment (bwameth)"),
+    ("dedup",             "Step 6    Deduplication (umi_tools)"),
+    ("target",            "Step 7    Target Region Filter"),
+    ("mbias",             "Step 8    M-bias Check"),
+    ("extract",           "Step 9    Methylation Extraction"),
+    ("filter",            "Step 10   Filtering"),
+    ("diff",              "Step 11   Differential Analysis"),
+    ("visualize",         "Step 12   Visualization"),
+    ("feature_select",    "Step 13   Feature Selection"),
+    ("outlier_detect",    "Step 14   Outlier Detection"),
+    ("classify",          "Step 15   Diagnostic Classification"),
+    ("subtype_classify",  "Step 16   Subtype Classification"),
+    ("temporal_validate", "Step 17   Temporal Validation (plasma)"),
+    ("annotate",          "Step 18   Site Annotation"),
+    ("external_validate", "Step 19   External Validation"),
+    ("report",            "Step 20   Report Generation"),
 ]
 _STEP_KEYS = {k for k, _ in STEPS}
 
@@ -170,15 +171,17 @@ def get_steps(workdir: Optional[str] = None):
 
 
 @api_router.post("/api/run/{step}")
-def run_step(step: str, workdir: Optional[str] = None):
+def run_step(step: str, workdir: Optional[str] = None, mode: str = "plasma"):
     if step not in _STEP_KEYS:
         raise HTTPException(400, f"Unknown step: {step}")
+    if mode not in ("plasma", "tissue"):
+        raise HTTPException(400, f"Invalid mode: {mode!r} — must be 'plasma' or 'tissue'")
 
     wd = workdir or str(_latest_workdir() or "")
     cmd = [
         PYTHON,
         str(ROOT / "src/scripts/run_analysis.py"),
-        "--plasma",
+        "--mode", mode,
         "--step",
         step,
         "--config",

@@ -89,6 +89,11 @@
         <select class="form-select form-select-sm" id="wd-select" style="max-width:400px"
           onchange="loadSteps()"></select>
         <button class="btn btn-sm btn-outline-secondary" onclick="loadWorkdirs()">Refresh</button>
+        <label class="form-label mb-0 text-nowrap small fw-bold ms-2">Mode</label>
+        <select class="form-select form-select-sm" id="mode-select" style="max-width:120px">
+          <option value="plasma">plasma</option>
+          <option value="tissue">tissue</option>
+        </select>
       </div>
       <div class="row">
         <div class="col-lg-5">
@@ -205,7 +210,11 @@
       document.getElementById('log-title').textContent = `▶ ${label}`;
       document.getElementById('log-box').innerHTML = '';
       const wd = document.getElementById('wd-select').value;
-      const url = wd ? `${BASE}/api/run/${key}?workdir=${encodeURIComponent(wd)}` : `${BASE}/api/run/${key}`;
+      const mode = document.getElementById('mode-select').value;
+      const params = new URLSearchParams();
+      if (wd) params.set('workdir', wd);
+      params.set('mode', mode);
+      const url = `${BASE}/api/run/${key}?${params.toString()}`;
       const r = await fetch(url, { method: 'POST' }).then(r => r.json());
       if (r.job_id) streamLogs(r.job_id);
     }

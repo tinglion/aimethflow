@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-file_utils.py - 文件工具模块
+file_utils.py - File utility module
 
-该模块包含文件检测和查找相关的函数
+Functions for file type detection and discovery.
 """
 
 import os
@@ -13,13 +13,13 @@ logger = logging.getLogger(__name__)
 
 def detect_file_type(file_path):
     """
-    检测文件类型
+    Detect the type of a file.
 
     Args:
-        file_path: 文件路径
+        file_path: path to the file
 
     Returns:
-        str: 文件类型，可能的值：fastq, bam, methylation, unknown
+        str: one of 'fastq', 'bam', 'methylation', 'unknown'
     """
     if (
         file_path.endswith(".fq.gz")
@@ -43,23 +43,21 @@ def detect_file_type(file_path):
 
 def find_files(paths):
     """
-    查找所有支持的文件类型
+    Find all supported file types under the given paths.
 
     Args:
-        paths: 文件或文件夹路径列表
+        paths: list of file or directory paths
 
     Returns:
-        dict: 包含不同类型文件的字典
+        dict mapping type name to list of absolute file paths
     """
     files = {"fastq": [], "bam": [], "methylation": [], "unknown": []}
 
     for path in paths:
         if os.path.isfile(path):
-            # 如果是文件，检测文件类型
             file_type = detect_file_type(path)
             files[file_type].append(os.path.abspath(path))
         elif os.path.isdir(path):
-            # 如果是文件夹，递归查找所有支持的文件
             for ext in [
                 "*.fq.gz",
                 "*.fastq.gz",
@@ -75,7 +73,7 @@ def find_files(paths):
                     file_type = detect_file_type(file_path)
                     files[file_type].append(os.path.abspath(file_path))
 
-    # 去重并排序
+    # deduplicate and sort
     for file_type in files:
         files[file_type] = sorted(list(set(files[file_type])))
 
