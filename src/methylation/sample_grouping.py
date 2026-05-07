@@ -55,26 +55,33 @@ def group_methylation_files_v1(methylation_files):
 
 def group_methylation_files_v2(methylation_files, category="plasma"):
     """
-    Split methylation files into (benign, malignant) using the sample info Excel.
-    Falls back to group_methylation_files_v1 on any error.
+    Split methylation files into (benign, malignant, borderline) using the sample info Excel.
+    Falls back to group_methylation_files_v1 on any error (borderline = [] in that case).
     """
     excel_file = _resolve_excel(config.get("data", {}).get("sample_info_excel", _DEFAULT_EXCEL))
     if not os.path.exists(excel_file):
         logger.error(f"Sample info Excel not found: {excel_file}")
-        return group_methylation_files_v1(methylation_files)
+        benign_files, malignant_files = group_methylation_files_v1(methylation_files)
+        return benign_files, malignant_files, []
 
     try:
         sample_info = parse_sample_info(excel_file, category)
         if not sample_info:
             logger.error("Failed to parse Excel, falling back to v1 grouping")
-            return group_methylation_files_v1(methylation_files)
+            benign_files, malignant_files = group_methylation_files_v1(methylation_files)
+            return benign_files, malignant_files, []
 
-        benign_fq    = set(sample_info["benign"]["R1"])
-        malignant_fq = set(sample_info["malignant"]["R1"])
-        logger.info(f"Excel: {len(benign_fq)} benign, {len(malignant_fq)} malignant samples")
+        benign_fq     = set(sample_info["benign"]["R1"])
+        malignant_fq  = set(sample_info["malignant"]["R1"])
+        borderline_fq = set(sample_info.get("borderline", {}).get("R1", []))
+        logger.info(
+            f"Excel: {len(benign_fq)} benign, {len(malignant_fq)} malignant, "
+            f"{len(borderline_fq)} borderline samples"
+        )
 
-        benign_files    = []
-        malignant_files = []
+        benign_files     = []
+        malignant_files  = []
+        borderline_files = []
 
         logger.info(f"Grouping {len(methylation_files)} methylation files by Excel")
         for meth_file in methylation_files:
@@ -95,17 +102,21 @@ def group_methylation_files_v2(methylation_files, category="plasma"):
                 benign_files.append(meth_file)
             elif _in_set(sample_id, malignant_fq):
                 malignant_files.append(meth_file)
+            elif _in_set(sample_id, borderline_fq):
+                borderline_files.append(meth_file)
 
         logger.info(
             f"Grouping result from {excel_file}:\n"
             f"  benign={len(benign_files)}: {benign_files}\n"
-            f"  malignant={len(malignant_files)}: {malignant_files}"
+            f"  malignant={len(malignant_files)}: {malignant_files}\n"
+            f"  borderline={len(borderline_files)}: {borderline_files}"
         )
-        return benign_files, malignant_files
+        return benign_files, malignant_files, borderline_files
 
     except Exception as e:
         logger.error(f"Error grouping by {excel_file}: {e}")
-        return group_methylation_files_v1(methylation_files)
+        benign_files, malignant_files = group_methylation_files_v1(methylation_files)
+        return benign_files, malignant_files, []
 
 
 def parse_sample_info(excel_file=None, category="plasma"):
@@ -123,10 +134,12 @@ def parse_sample_info(excel_file=None, category="plasma"):
         sheet_names = xl.sheet_names
         logger.info(f"Excel sheets: {sheet_names}")
 
-        all_benign_R1    = []
-        all_benign_R2    = []
-        all_malignant_R1 = []
-        all_malignant_R2 = []
+        all_benign_R1     = []
+        all_benign_R2     = []
+        all_malignant_R1  = []
+        all_malignant_R2  = []
+        all_borderline_R1 = []
+        all_borderline_R2 = []
 
         for sheet_name in sheet_names:
             if category and sheet_name != category:
@@ -144,33 +157,38 @@ def parse_sample_info(excel_file=None, category="plasma"):
             if "subtype" in df.columns:
                 df["subtype"] = df["subtype"].astype(str).str.strip()
 
-            borderline = df[df["category"] == "borderline"]
-            if not borderline.empty:
-                logger.info(f"  Excluding {len(borderline)} borderline samples")
+            borderline_df = df[df["category"] == "borderline"]
+            if not borderline_df.empty:
+                logger.info(f"  borderline: {len(borderline_df)} samples")
 
             benign_df    = df[df["category"] == "benign"]
             malignant_df = df[df["category"] == "malignant"]
 
             logger.info(f"  benign={len(benign_df)}  malignant={len(malignant_df)}  "
-                        f"borderline={len(borderline)}")
+                        f"borderline={len(borderline_df)}")
 
             if "fq_R1" in df.columns:
                 all_benign_R1.extend(benign_df["fq_R1"].dropna().tolist())
                 all_malignant_R1.extend(malignant_df["fq_R1"].dropna().tolist())
+                all_borderline_R1.extend(borderline_df["fq_R1"].dropna().tolist())
             if "fq_R2" in df.columns:
                 all_benign_R2.extend(benign_df["fq_R2"].dropna().tolist())
                 all_malignant_R2.extend(malignant_df["fq_R2"].dropna().tolist())
+                all_borderline_R2.extend(borderline_df["fq_R2"].dropna().tolist())
 
-        all_benign_R1    = list(set(all_benign_R1))
-        all_benign_R2    = list(set(all_benign_R2))
-        all_malignant_R1 = list(set(all_malignant_R1))
-        all_malignant_R2 = list(set(all_malignant_R2))
+        all_benign_R1     = list(set(all_benign_R1))
+        all_benign_R2     = list(set(all_benign_R2))
+        all_malignant_R1  = list(set(all_malignant_R1))
+        all_malignant_R2  = list(set(all_malignant_R2))
+        all_borderline_R1 = list(set(all_borderline_R1))
+        all_borderline_R2 = list(set(all_borderline_R2))
 
         logger.info(f"Parsed {excel_file}: {len(all_benign_R1)} benign, "
-                    f"{len(all_malignant_R1)} malignant")
+                    f"{len(all_malignant_R1)} malignant, {len(all_borderline_R1)} borderline")
         return {
-            "benign":    {"R1": all_benign_R1,    "R2": all_benign_R2},
-            "malignant": {"R1": all_malignant_R1, "R2": all_malignant_R2},
+            "benign":     {"R1": all_benign_R1,     "R2": all_benign_R2},
+            "malignant":  {"R1": all_malignant_R1,  "R2": all_malignant_R2},
+            "borderline": {"R1": all_borderline_R1, "R2": all_borderline_R2},
         }
 
     except Exception as e:
@@ -260,6 +278,61 @@ def resolve_patient_files(csv_path, excel_file=None, data_dir=None):
         logger.warning(f"  Missing/not-found IDs: {missing}")
 
     return fastq_files
+
+
+def load_ca125_map(excel_file=None, category="plasma"):
+    """
+    Return {normalized_case_id: float} for samples with a valid CA-125 value.
+
+    Keys are normalised the same way as classifier_utils._norm_id:
+    '640849.0' → '640849', plain strings kept as-is.
+
+    Accepts column names: ca125, CA125, CA-125, ca_125, ca 125 (case-insensitive).
+    Skips rows where the value is NaN, empty, or not numeric.
+    Returns an empty dict if the column is absent — callers handle this gracefully.
+    """
+    _ALIASES = {"ca125", "ca-125", "ca_125", "ca 125", "ca125(u/ml)", "ca-125(u/ml)"}
+
+    def _norm(raw):
+        s = str(raw).strip()
+        try:
+            return str(int(float(s)))
+        except (ValueError, OverflowError):
+            return s
+
+    if excel_file is None:
+        excel_file = _resolve_excel(config.get("data", {}).get("sample_info_excel", _DEFAULT_EXCEL))
+    if not os.path.exists(excel_file):
+        logger.warning(f"[ca125] Excel not found: {excel_file}")
+        return {}
+
+    result = {}
+    try:
+        xl = pd.ExcelFile(excel_file)
+        for sheet_name in xl.sheet_names:
+            if category and sheet_name != category:
+                continue
+            df = pd.read_excel(excel_file, sheet_name=sheet_name)
+            col_map = {c.strip().lower(): c for c in df.columns}
+            ca125_col = next((col_map[a] for a in _ALIASES if a in col_map), None)
+            if ca125_col is None:
+                logger.debug(f"[ca125] Sheet '{sheet_name}': no CA-125 column — skipping")
+                continue
+            if "case_id" not in df.columns:
+                logger.warning(f"[ca125] Sheet '{sheet_name}': no 'case_id' column — cannot match")
+                continue
+            for _, row in df.iterrows():
+                case_id = _norm(row["case_id"]) if pd.notna(row.get("case_id")) else ""
+                val     = row[ca125_col]
+                if case_id and case_id != "nan" and pd.notna(val):
+                    try:
+                        result[case_id] = float(val)
+                    except (ValueError, TypeError):
+                        pass
+        logger.info(f"[ca125] Loaded {len(result)} CA-125 values from {excel_file}")
+    except Exception as exc:
+        logger.warning(f"[ca125] Failed to load CA-125 values: {exc}")
+    return result
 
 
 if __name__ == "__main__":

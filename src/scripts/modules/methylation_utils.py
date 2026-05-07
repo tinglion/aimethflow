@@ -13,6 +13,22 @@ logger = logging.getLogger(__name__)
 
 def extract_methylation_info(temp_dir, fastq_files, group_method="v2", config=None, bam_files=None, category="plasma"):
     """
+    提取甲基化信息并按样本分组
+    
+    Args:
+        temp_dir (str): 工作目录，用于存储临时文件和输出结果
+        fastq_files (list): FastQ 文件列表（当未提供 bam_files 时用于生成 BAM 文件）
+        group_method (str, optional): 分组方法，可选 "v1"（基于索引）或 "v2"（基于 Excel）。默认为 "v2"
+        config (dict, optional): 配置字典，包含参考基因组和线程数等参数。默认为 None
+        bam_files (list, optional): 预计算的 BAM 文件列表（血浆模式：由比对→去重→靶向捕获步骤生成）。
+                                     当提供时，跳过内部 BAM 生成（避免对 BS-seq 数据运行普通 bwa mem）。默认为 None
+        category (str, optional): 分组类别，例如 "plasma" 或 "tissue"。默认为 "plasma"
+    
+    Returns:
+        tuple: 包含三个元素的元组 (sample1_methylation, sample2_methylation, borderline_methylation)，
+               分别为样本组1、样本组2和边界样本的甲基化文件路径
+    """
+    """
     Extract methylation information.
 
     Args:
@@ -57,11 +73,12 @@ def extract_methylation_info(temp_dir, fastq_files, group_method="v2", config=No
 
     sample1_methylation = os.path.join(temp_dir, "sample1_methylation.txt")
     sample2_methylation = os.path.join(temp_dir, "sample2_methylation.txt")
+    borderline_methylation = os.path.join(temp_dir, "borderline_methylation.txt")
 
     if group_method == "v2":
         logger.info("using Excel-based grouping (v2)")
         from methylation.sample_grouping import group_methylation_files_v2
-        sample1_methylation_files, sample2_methylation_files = group_methylation_files_v2(
+        sample1_methylation_files, sample2_methylation_files, borderline_methylation_files = group_methylation_files_v2(
             all_methylation_files, category=category
         )
     else:
@@ -70,6 +87,7 @@ def extract_methylation_info(temp_dir, fastq_files, group_method="v2", config=No
         sample1_methylation_files, sample2_methylation_files = group_methylation_files_v1(
             all_methylation_files
         )
+        borderline_methylation_files = []
     logger.info(f"Grouping done\ngroup1: {sample1_methylation_files}\ngroup2: {sample2_methylation_files}")
 
     if sample1_methylation_files:
@@ -82,7 +100,12 @@ def extract_methylation_info(temp_dir, fastq_files, group_method="v2", config=No
         merge_methylation_files(sample2_methylation_files, sample2_methylation)
     logger.info(f"group 2 methylation ready: {sample2_methylation}")
 
-    return sample1_methylation, sample2_methylation
+    if borderline_methylation_files:
+        logger.info(f"merging {len(borderline_methylation_files)} methylation file(s) for borderline samples")
+        merge_methylation_files(borderline_methylation_files, borderline_methylation)
+        logger.info(f"borderline samples methylation ready: {borderline_methylation}")
+
+    return sample1_methylation, sample2_methylation, borderline_methylation
 
 
 def validate_methylation_output(output_file):

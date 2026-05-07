@@ -254,7 +254,7 @@ def _pagination_widget(tbl_id: str, ctrl_id: str, n_total: int, page_size: int =
     return controls, js
 
 
-def _build_outlier_section(result_dir):
+def _build_outlier_section(result_dir, imgs_dir=None):
     """
     Read outlier_report.csv and build the HTML section + JSON data.
     Returns (html_str, data_dict). Both empty/None when file is absent.
@@ -318,6 +318,19 @@ def _build_outlier_section(result_dir):
         suspect_note = ("<p style='color:#22863a;font-size:.85em;margin-top:8px'>"
                         "&#10003; No suspect samples detected.</p>")
 
+    # PCA scatter plot (Figure S2)
+    pca_img_src = None
+    if imgs_dir:
+        pca_img_src = _copy_img(os.path.join(result_dir, "pca_outliers.png"), imgs_dir)
+    pca_img_html = (
+        f"<div style='margin:12px 0'><h3 style='font-size:.95em;margin-bottom:4px'>"
+        f"Figure S2 — PCA Scatter (PC1 vs PC2)</h3>"
+        f"{_img_tag(pca_img_src, 'PCA outlier scatter')}</div>"
+        if pca_img_src else
+        "<p style='color:#aaa;font-size:.85em;margin:8px 0'>"
+        "PCA scatter plot not yet generated — run <code>--step outlier_detect</code>.</p>"
+    )
+
     # Unique JS identifier so multiple reports on the same page don't conflict
     tbl_id  = "outlier_tbl"
     ctrl_id = "outlier_ctrl"
@@ -342,6 +355,7 @@ def _build_outlier_section(result_dir):
       <td><strong style="color:{'#c0392b' if n_suspect else '#22863a'}">{n_suspect}</strong></td></tr>
 </table>
 {suspect_note}
+{pca_img_html}
 <details style="margin-top:12px" {'open' if n_suspect > 0 else ''}>
   <summary style="cursor:pointer;color:#1a6fbb;font-size:.88em">
     Show all {n_total} samples &mdash; paginated, {PAGE_SIZE} per page (yellow = suspect)
@@ -1096,6 +1110,13 @@ full per-site stats: <code>panel_cpg_depth.csv</code></p>"""
             depth_section = ""
             depth_data = None
 
+        funnel_src = _copy_img(os.path.join(result_dir, "feature_selection_funnel.png"), imgs_dir)
+        funnel_html = (
+            f"<div style='margin:12px 0'><h3 style='font-size:.95em;margin-bottom:4px'>"
+            f"Figure 2A — Feature Selection Funnel</h3>"
+            f"{_img_tag(funnel_src, 'Feature selection funnel')}</div>"
+            if funnel_src else ""
+        )
         sec9_html = f"""
 <div class="section">
 <h2>Step 14. Feature Selection — LASSO + RF</h2>
@@ -1117,6 +1138,7 @@ full per-site stats: <code>panel_cpg_depth.csv</code></p>"""
 </table>
 <p style="color:#666;font-size:.83em">Method: LASSO (LogisticRegressionCV, L1) ∪ Random Forest (Gini importance &gt; 0);
 outputs: <code>panel_cpg.csv</code>, <code>feature_importance.csv</code></p>
+{funnel_html}
 {wilcox_section}
 {depth_section}
 </div>"""
@@ -1148,6 +1170,99 @@ outputs: <code>panel_cpg.csv</code>, <code>feature_importance.csv</code></p>
             )
         roc_note   = _img_tag(roc_src,  "ROC Curve")
         cm_note    = _img_tag(cm_src,   "Confusion Matrix")
+
+        # Feature selection ablation table (Step 15b — optional)
+        bench_records = _read_csv_safe(os.path.join(result_dir, "feature_selection_benchmark.csv"))
+        if bench_records:
+            _MODES  = ["wilcoxon", "lasso", "rf", "union"]
+            _CLFS   = ["LR", "SVM", "RF", "XGB", "LGBM"]
+            _MODE_LABEL = {
+                "wilcoxon": "Wilcoxon-only",
+                "lasso":    "LASSO-only",
+                "rf":       "RF-only",
+                "union":    "LASSO ∪ RF (AIMethFlow)",
+            }
+            # Build lookup: (mode, clf) → row
+            bench_map = {(r.get("mode",""), r.get("classifier","")): r for r in bench_records}
+            # Header: Classifier | Wilcoxon | LASSO | RF | LASSO∪RF
+            bench_header = "<tr><th>Classifier</th>" + "".join(
+                f"<th>{_MODE_LABEL.get(m, m)}<br/><small>n_feat</small></th>"
+                for m in _MODES
+            ) + "</tr>\n"
+            bench_body = ""
+            for clf in _CLFS:
+                bench_body += f"<tr><td><strong>{clf}</strong></td>"
+                best_auc = max(
+                    float(bench_map.get((m, clf), {}).get("auc", 0)) for m in _MODES
+                )
+                for m in _MODES:
+                    r = bench_map.get((m, clf), {})
+                    auc_v  = float(r.get("auc", 0))
+                    nf     = r.get("n_features_mean", "—")
+                    bold   = " font-weight:700;color:#1a6fbb" if abs(auc_v - best_auc) < 1e-6 else ""
+                    bench_body += (
+                        f"<td style='text-align:center{bold}'>"
+                        f"{auc_v:.3f}<br/><small style='color:#888'>{nf}</small></td>"
+                    )
+                bench_body += "</tr>\n"
+            bench_html = f"""
+<h3 style="margin-top:20px">Step 15b. Feature Selection Ablation (wilcoxon / lasso / rf / union)</h3>
+<p style="color:#666;font-size:.83em">
+  Same CV strategy, same classifiers. AUC shown; bold = best per row.
+  <em>n_feat</em> = mean features selected per fold.
+  Full table: <code>feature_selection_benchmark.csv</code>
+</p>
+<table style="font-size:.88em">
+  {bench_header}
+  {bench_body}
+</table>"""
+        else:
+            bench_html = (
+                "<p style='color:#aaa;font-size:.85em;margin-top:10px'>"
+                "Feature selection ablation not yet run — "
+                "execute <code>--step fs_benchmark</code> to populate.</p>"
+            )
+
+        # ── CA-125 comparison block (Step 15c — optional) ──────────────────────
+        ca125_records = _read_csv_safe(os.path.join(result_dir, "ca125_comparison.csv"))
+        if ca125_records:
+            ca125_rows = ""
+            for r in ca125_records:
+                is_ca125 = r.get("method") == "CA-125"
+                style    = " style='background:#eaf4fb'" if is_ca125 else ""
+                ca125_rows += (
+                    f"<tr{style}>"
+                    f"<td><strong>{r.get('method','')}</strong></td>"
+                    f"<td style='text-align:right'>{r.get('n_ca125_subset','')}</td>"
+                    f"<td style='text-align:right'><strong>{float(r.get('auc',0)):.3f}</strong></td>"
+                    f"<td style='text-align:right'>{float(r.get('auc_ci95_lo',0)):.3f}"
+                    f" – {float(r.get('auc_ci95_hi',0)):.3f}</td>"
+                    f"</tr>\n"
+                )
+            n_sub = ca125_records[0].get("n_ca125_subset", "?")
+            n_tot = ca125_records[0].get("n_total", "?")
+            ca125_html = f"""
+<h3 style="margin-top:20px">Step 15c. CA-125 vs Classifier AUC
+  <span style="font-size:.82em;font-weight:normal;color:#666">
+    (n = {n_sub} with CA-125 data / {n_tot} total; 95% bootstrap CI)
+  </span>
+</h3>
+<table style="font-size:.88em">
+  <tr><th>Method</th><th>n subset</th><th>AUC</th><th>95% CI</th></tr>
+  {ca125_rows}
+</table>
+<p style="color:#666;font-size:.82em;margin-top:4px">
+  Classifiers re-evaluated on the CA-125-available subset for direct comparison.
+  CA-125 binary threshold = median value in subset.
+  Full data: <code>ca125_comparison.csv</code>, <code>ca125_values.csv</code>
+</p>"""
+        else:
+            ca125_html = (
+                "<p style='color:#aaa;font-size:.85em;margin-top:10px'>"
+                "CA-125 comparison not available — add a <code>ca125</code> column to the "
+                "sample info Excel, then run <code>--step ca125_compare</code>.</p>"
+            )
+
         sec10_html = f"""
 <div class="section">
 <h2>Step 15. Diagnostic Classifiers — LOO-CV, Benign vs Malignant</h2>
@@ -1162,6 +1277,8 @@ outputs: <code>panel_cpg.csv</code>, <code>feature_importance.csv</code></p>
 <p style="color:#666;font-size:.83em">Classifiers: LR / SVM / RF / XGB / LGBM evaluated via Leave-One-Out CV (LOO-CV);
 StandardScaler fitted within each training fold to prevent data leakage;
 outputs: <code>classifier_summary.csv</code>, <code>classifier_predictions.csv</code></p>
+{bench_html}
+{ca125_html}
 </div>"""
         sec10_data = clf_records
     else:
@@ -1280,7 +1397,7 @@ outputs: <code>classifier_summary.csv</code>, <code>classifier_predictions.csv</
     }
 
     # ── Outlier detection section (Step 13) ──
-    sec_outlier_html, outlier_data = _build_outlier_section(result_dir)
+    sec_outlier_html, outlier_data = _build_outlier_section(result_dir, imgs_dir)
     clf_data["outlier_detection"] = outlier_data
 
     # ── Section 12: Temporal Split Validation (Step 17, plasma only) ──
@@ -1498,6 +1615,85 @@ def generate_report(
 </script>"""
     else:
         mbias_body = "<p style='color:#aaa'>M-bias SVG not yet generated — run --step mbias first</p>"
+
+    # ── Fragment size distribution ────────────────────────────────
+    frag_img_src = _copy_img(os.path.join(result_dir, "fragment_size_distribution.png"), imgs_dir)
+    frag_stats_records = _read_csv_safe(os.path.join(result_dir, "fragment_size_stats.csv"))
+
+    if frag_img_src:
+        frag_img_html = (
+            f"<img src='{frag_img_src}' style='max-width:100%;margin:10px 0'/>"
+        )
+    else:
+        frag_img_html = ("<p style='color:#aaa;font-size:.9em'>"
+                         "fragment_size_distribution.png not found — "
+                         "run --step mbias to generate.</p>")
+
+    if frag_stats_records:
+        n_frag      = len(frag_stats_records)
+        page_size   = 10
+        n_pages     = max(1, (n_frag + page_size - 1) // page_size)
+        first_end   = min(page_size, n_frag)
+        rows_js     = json.dumps([
+            {"sample": r.get("sample", ""),
+             "n":      r.get("n_reads", ""),
+             "med":    r.get("median", ""),
+             "mean":   r.get("mean", ""),
+             "pct":    r.get("pct_100_220", "")}
+            for r in frag_stats_records
+        ])
+        btn_style = ("cursor:pointer;padding:5px 14px;border:1px solid #1a6fbb;"
+                     "border-radius:4px;background:#fff;color:#1a6fbb;font-size:.88em")
+        frag_stats_html = f"""
+<div style='margin-top:10px'>
+<div style='display:flex;align-items:center;gap:14px;margin-bottom:8px;flex-wrap:wrap'>
+  <button onclick='fragPrev()' style='{btn_style}'>&#9664; Previous</button>
+  <span id='frag-counter' style='font-weight:600;color:#1a6fbb;min-width:100px;text-align:center'>
+    1–{first_end} / {n_frag}
+  </span>
+  <button onclick='fragNext()' style='{btn_style}'>Next &#9654;</button>
+  <span style='color:#888;font-size:.83em;margin-left:4px'>({n_pages} page(s), {page_size} rows/page)</span>
+</div>
+<table id='frag-table' style='font-size:.83em'>
+  <tr>
+    <th>Sample</th><th>Reads sampled</th>
+    <th>Median (bp)</th><th>Mean (bp)</th><th>% in 100–220 bp</th>
+  </tr>
+  <tbody id='frag-tbody'></tbody>
+</table>
+</div>
+<script>
+(function(){{
+  var data={rows_js};
+  var PAGE={page_size}, page=0, total=data.length;
+  var pages=Math.ceil(total/PAGE);
+  function render(){{
+    var tbody=document.getElementById('frag-tbody');
+    var start=page*PAGE, end=Math.min(start+PAGE,total);
+    var html='';
+    for(var i=start;i<end;i++){{
+      var r=data[i];
+      html+='<tr>'
+        +'<td>'+r.sample+'</td>'
+        +'<td style="text-align:right">'+r.n+'</td>'
+        +'<td style="text-align:right">'+r.med+'</td>'
+        +'<td style="text-align:right">'+r.mean+'</td>'
+        +'<td style="text-align:right">'+r.pct+'%</td>'
+        +'</tr>';
+    }}
+    tbody.innerHTML=html;
+    document.getElementById('frag-counter').textContent=
+      (start+1)+'–'+end+' / '+total;
+  }}
+  window.fragPrev=function(){{if(page>0){{page--;render();}}}};
+  window.fragNext=function(){{if(page<pages-1){{page++;render();}}}};
+  render();
+}})();
+</script>"""
+    else:
+        frag_stats_html = ""
+
+    fragment_body = frag_img_html + frag_stats_html
 
     # ── Group labels ──────────────────────────────────────────────
     g1_label = "Benign"
@@ -1729,7 +1925,6 @@ def generate_report(
   <div class="card"><div class="num">{len(malignant_samples)}</div><div class="lbl">Malignant</div></div>
   <div class="card"><div class="num">{_fmt_num(n_cand1 + n_cand2)}</div><div class="lbl">Candidate Region CpGs</div></div>
   <div class="card"><div class="num">{n_dmc}</div><div class="lbl">DMC Sites</div></div>
-  <div class="card"><div class="num">{mean_diff:.3f}</div><div class="lbl">Mean |Δβ|</div></div>
 </div>
 
 <!-- 1. Data Quality Overview -->
@@ -1759,6 +1954,13 @@ def generate_report(
 <h2>Step 8. M-bias Check — MethylDackel mbias</h2>
 <p style="color:#666;font-size:.85em">OT = Watson-strand methylation (~99% of reads). If the R2 3' curve drops, increase trim_tail2 and re-run from --step extract.</p>
 {mbias_body}
+<h3 style="margin-top:20px">cfDNA Fragment Size Distribution</h3>
+<p style="color:#666;font-size:.85em">
+  Insert sizes from paired-end BAM (TLEN, samtools view -f 0x2 -F 0x904).
+  Expected mono-nucleosomal cfDNA peak: 147–167 bp.
+  Shaded zone 100–220 bp; dashed line at 167 bp.
+</p>
+{fragment_body}
 </div>
 
 <!-- 4. Sample Grouping -->

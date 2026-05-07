@@ -12,7 +12,7 @@ tissue_dir = "/mnt/f/meth/OC_tissue"
 # Plasma sample data directory
 plasma_dir = "/mnt/f/meth/OC_plasma"
 # Sample info Excel file path
-sample_info_excel = "ovarian_fq_series_samples_v3.xlsx"
+sample_info_excel = "ovarian_fq_series_samples_v4.xlsx"
 # Probe panel BED file path
 # probe_panel_bed = "panel_B10308.bed"
 probe_panel_bed = "panel_P10001.bed"
@@ -182,7 +182,11 @@ sample_delta_beta_88 = 0.1   # |Δβ| threshold (sites within 88 tissue candidat
 # Maximum number of input features for the classifier (0 = no limit; recommend ~n_samples/10 to prevent overfitting)
 # 120 samples → recommend 10–20; when limit is exceeded, retain top-N by combined LASSO+RF score
 max_features_clf = 20
-# LASSO (L1 logistic) cross-validation folds
+# Classifier cross-validation strategy for Step 15 (classify)
+# 0 = Leave-One-Out CV (maximally data-efficient; slow on large cohorts)
+# k > 0 = stratified k-fold CV (faster; k=5 recommended for n≥50)
+cv_folds = 5
+# LASSO (L1 logistic) cross-validation folds (inner CV within each outer fold)
 lasso_cv_folds = 5
 # Random forest number of trees (used for both feature selection and classification)
 rf_n_estimators = 500
@@ -235,8 +239,20 @@ pubmed_max_hits = 20
 [temporal_validate]
 # Samples collected before this date go to the train set; on/after → validation set
 cutoff_date = "2024-07-01"
-# Number of top features (by LOO-CV selection frequency) to use for training
+# Feature selection mode:
+#   true  (default) — re-run Wilcoxon+LASSO∪RF on training-period samples only (leakage-free;
+#                     validation samples never seen during feature selection)
+#   false           — use top-N features from feature_selection_freq.csv written by classify step
+#                     (minor temporal leakage: validation-period samples contributed to that table)
+reselect_features = true
+# Number of top features to retain when reselect_features = false
 top_n_features = 20
+# When true, borderline-category samples in the validation period are added to the
+# validation set as benign (y=0) to supplement the typically small benign validation
+# group.  They are loaded from their bedGraph files at runtime and never affect the
+# train set or feature selection.  true_label in predictions CSV is "borderline" so
+# they can be distinguished from confirmed benign samples.
+borderline_as_benign = false
 
 # Logging configuration
 [logging]

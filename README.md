@@ -196,6 +196,8 @@ bwameth c2t index files (all required, total ~17 GB):
 | 13 | `outlier_detect` | Sample outlier detection (coverage / PCA z-score / Isolation Forest); suspect samples excluded from feature selection | scikit-learn |
 | 14 | `feature_select` | Feature selection (LASSO + RF union); outlier samples excluded from computation; hard-filter sites with <80% samples at ≥10x depth | scikit-learn |
 | 15 | `classify` | Diagnostic classifiers, Nested LOO-CV | LR / SVM / RF / XGB / LGBM |
+| 15b | `fs_benchmark` | **Optional.** Feature selection ablation: compare Wilcoxon-only / LASSO-only / RF-only / LASSO∪RF AUC on same CV | scikit-learn |
+| 15c | `ca125_compare` | **Optional.** CA-125 vs classifier AUC on matched subset. Requires `ca125` column in sample info Excel. | scikit-learn |
 | 16 | `subtype_classify` | Subtype multi-class LOO-CV (malignant + borderline) | RF + SVM OvR |
 | 17 | `temporal_validate` | **Plasma only.** Temporal split validation: train on samples collected before 2024-07-01, evaluate on samples collected on/after that date. Covers both binary (benign/malignant) and subtype classification. Requires `data/plasma_exp.xlsx` (columns: `case_id`, `datetime`). | scikit-learn / XGB / LGBM |
 | 18 | `annotate` | Panel CpG annotation: gene context / CpG island / EWAS Catalog / EWAS Atlas / PubMed plasma hits | Ensembl REST + UCSC + EWAS Catalog + CNCB NGDC + NCBI |
@@ -306,6 +308,10 @@ run-analysis --mode plasma --step feature_select --workdir $WORKDIR
 
 # Steps 15–16: classification
 run-analysis --mode plasma --step classify         --workdir $WORKDIR
+# Step 15b (optional): feature selection ablation — wilcoxon / lasso / rf / union AUC comparison
+run-analysis --mode plasma --step fs_benchmark     --workdir $WORKDIR
+# Step 15c (optional): CA-125 vs classifier AUC — requires 'ca125' column in sample Excel
+run-analysis --mode plasma --step ca125_compare    --workdir $WORKDIR
 run-analysis --mode plasma --step subtype_classify --workdir $WORKDIR
 
 # Step 17: temporal split validation (plasma only; requires data/plasma_exp.xlsx)
@@ -369,7 +375,9 @@ $PY src/scripts/run_analysis.py --mode plasma --step diff           --workdir $W
 $PY src/scripts/run_analysis.py --mode plasma --step visualize      --workdir $WORKDIR
 $PY src/scripts/run_analysis.py --mode plasma --step outlier_detect --workdir $WORKDIR
 $PY src/scripts/run_analysis.py --mode plasma --step feature_select --workdir $WORKDIR
-$PY src/scripts/run_analysis.py --mode plasma --step classify        --workdir $WORKDIR
+$PY src/scripts/run_analysis.py --mode plasma --step classify         --workdir $WORKDIR
+$PY src/scripts/run_analysis.py --mode plasma --step fs_benchmark     --workdir $WORKDIR
+$PY src/scripts/run_analysis.py --mode plasma --step ca125_compare    --workdir $WORKDIR
 $PY src/scripts/run_analysis.py --mode plasma --step subtype_classify --workdir $WORKDIR
 $PY src/scripts/run_analysis.py --mode plasma --step temporal_validate --workdir $WORKDIR
 $PY src/scripts/run_analysis.py --mode plasma --step annotate        --workdir $WORKDIR
@@ -457,7 +465,7 @@ methyldackel    = 4
 
 ```toml
 # Feature selection
-feature_selection_mode = "union"   # "union" | "lasso" | "rf"
+feature_selection_mode = "union"   # "union" | "lasso" | "rf" | "wilcoxon"
 min_feature_coverage   = 0.5       # keep CpG sites covered in ≥50% of samples
 
 # Two-tier Wilcoxon pre-filter (relaxed thresholds for 88 candidate regions)
@@ -524,6 +532,9 @@ API responses are cached in `result/annotation_cache.json` — re-runs are insta
 | `result/` | `feature_selection_freq.csv` | LOO-CV per-fold feature selection frequency |
 | `result/` | `outlier_report.csv` | Outlier report (coverage / PCA z / Isolation Forest) |
 | `result/` | `classifier_summary.csv` | 5 classifiers AUC / Acc / Sens / Spec |
+| `result/` | `feature_selection_benchmark.csv` | Feature selection ablation: AUC / Acc / Sens / Spec for wilcoxon / lasso / rf / union × 5 classifiers |
+| `result/` | `ca125_comparison.csv` | CA-125 vs classifier AUC (bootstrap 95% CI) on the CA-125-available subset |
+| `result/` | `ca125_values.csv` | Per-sample CA-125 value + true label for the matched subset |
 | `result/` | `classifier_predictions.csv` | Per-sample predictions |
 | `result/` | `roc_curve.png` | ROC curves comparison |
 | `result/` | `confusion_matrix.png` | Confusion matrices (2 rows × 3 cols) |
@@ -705,6 +716,8 @@ run-analysis --mode plasma --step external_validate --workdir result/20260406
 - Both the dedup and target steps support idempotent re-runs: if output files already exist they are automatically skipped
 - **M-bias auto-detection**: `--step mbias` writes `mbias_auto_trim.json` with converted skip counts. MethylDackel outputs *inclusion positions* (`--OT a,b,c,d`); the pipeline converts them: 5' skip = position directly; 3' skip = `read_len − pos − 1` (e.g. `--OT 0,0,0,110` + `read_len=150` → `nOT "0,0,0,39"`). Set `nOT = "auto"` / `nOB = "auto"` to use in `extract`; explicit skip-count strings override auto. Changing `trim_tail2` requires re-running from `preprocess`; changing `nOT`/`nOB` only requires re-running from `extract`.
 - **Outlier exclusion**: Step 13 generates the report and saves suspect sample IDs to pipeline state. Step 14 (`feature_select`) automatically excludes these samples from LASSO/RF computation — the saved `feature_matrix.npz` still contains all samples so classifiers can apply their own exclusion via `exclude_samples`. Add confirmed outlier IDs to `exclude_samples` and re-run `classify`.
+- **CA-125 comparison (Step 15c, optional)**: add a `ca125` column (numeric, U/mL) to the sample info Excel, then run `--step ca125_compare` after `classify`. The step matches sample IDs from `classifier_predictions.csv` to `case_id` in the Excel, computes CA-125 AUC with 95% bootstrap CI, and re-evaluates each classifier on the same CA-125-available subset for a fair comparison. Outputs: `ca125_comparison.csv`, `ca125_values.csv`. If the column is absent the step logs a warning and exits cleanly. The results table appears automatically in the Step 15 section of the HTML report.
+- **Feature selection ablation (Step 15b, optional)**: run `--step fs_benchmark` after `classify` to compare four feature selection strategies (wilcoxon-only / lasso-only / rf-only / lasso∪rf) using the same CV, classifiers, and cohort. Results in `feature_selection_benchmark.csv`; automatically embedded in Step 15 of the HTML report. In the 116-sample ovarian cancer cohort, ML-based methods (best AUC 0.804–0.809) substantially outperformed wilcoxon-only top-Δβ ranking (best AUC 0.759). `feature_selection_mode = "wilcoxon"` is also available in `config.toml` for single-mode runs.
 - **Temporal split validation (Step 17, plasma only)**: run `--step temporal_validate` after Steps 15 and 16 to evaluate the pre-selected panel on prospectively collected samples. Requires `data/plasma_exp.xlsx` with columns `case_id` and `datetime` (format `YYYYMMDD`). Samples with `datetime < 2024-07-01` form the train set; samples on/after that date form the validation set. Covers both binary classification (LR/SVM/RF/XGB/LGBM) and subtype classification (RF/SVM). If the file is absent the step logs a warning and exits cleanly. Outputs: `temporal_validation_summary.csv`, `temporal_validation_predictions.csv`, `subtype_temporal_summary.csv`, `subtype_temporal_predictions.csv`.
 - The 88 candidate regions (`OC_tissue_88_regions.hg38.txt`) are now a **soft prior**: sites within these regions use more relaxed Wilcoxon thresholds (p<0.10, |Δβ|≥0.05) and are no longer a hard filter condition
 - **Annotation (Step 18)**: runs before `report` so the annotation table is embedded in the HTML. Requires internet access on first run; all API responses (Ensembl, EWAS Catalog, EWAS Atlas, PubMed) are cached in `annotation_cache.json` — re-runs are instant. If `annotate` is skipped, the report section is simply omitted.

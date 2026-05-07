@@ -78,7 +78,14 @@ def _check_region_membership(feature_names, candidate_regions_file):
 # Feature matrix construction
 # ──────────────────────────────────────────────────────
 
-def build_feature_matrix(workdir, result_dir, benign_samples, malignant_samples, config=None):
+def build_feature_matrix(
+    workdir,
+    result_dir,
+    benign_samples,
+    malignant_samples,
+    config=None,
+    borderline_samples=None,
+):
     """
     Build feature matrix and depth matrix from per-sample _CpG.bedGraph files.
 
@@ -87,15 +94,18 @@ def build_feature_matrix(workdir, result_dir, benign_samples, malignant_samples,
     inside the 88 tissue candidate regions (used for stratified Wilcoxon filtering).
 
     Args:
-        workdir:           Temp dir containing {sample}_CpG.bedGraph files
-        result_dir:        Result dir (diff_methylation.txt read for info only)
-        benign_samples:    List of benign sample IDs
-        malignant_samples: List of malignant sample IDs
-        config:            Config dict
+        workdir:            Temp dir containing {sample}_CpG.bedGraph files
+        result_dir:         Result dir (diff_methylation.txt read for info only)
+        benign_samples:     List of benign sample IDs  (y=0)
+        malignant_samples:  List of malignant sample IDs (y=1)
+        config:             Config dict
+        borderline_samples: Optional list of borderline sample IDs (y=2).
+                            Included in the matrix for QC / temporal validation but
+                            excluded from downstream feature selection and classifiers.
 
     Returns:
         X:             np.ndarray (n_samples, n_features), methylation 0-1, NaN = no coverage
-        y:             np.ndarray (n_samples,), 0=benign 1=malignant
+        y:             np.ndarray (n_samples,), 0=benign 1=malignant 2=borderline
         sample_ids:    list[str]
         feature_names: list[str], format "chr:pos"
         D:             np.ndarray (n_samples, n_features), depth, 0 = no coverage
@@ -104,8 +114,9 @@ def build_feature_matrix(workdir, result_dir, benign_samples, malignant_samples,
     ml_cfg = (config or {}).get("ml", {})
     min_coverage = ml_cfg.get("min_feature_coverage", 0.5)
 
-    all_samples = [(sid, 0) for sid in benign_samples] + \
-                  [(sid, 1) for sid in malignant_samples]
+    all_samples = ([(sid, 0) for sid in benign_samples] +
+                   [(sid, 1) for sid in malignant_samples] +
+                   [(sid, 2) for sid in (borderline_samples or [])])
     n_samples = len(all_samples)
 
     # ── Pass 1: read all bedGraphs, aggregate site coverage counts ──
@@ -336,7 +347,7 @@ def detect_sample_outliers(X, y, sample_ids, config=None):
     pca_z_scores = np.full(n_samples, np.nan)
     iforest_flag = np.zeros(n_samples, dtype=bool)
 
-    for label in (0, 1):
+    for label in (0, 1, 2):
         grp_idx = np.where(y == label)[0]
         if len(grp_idx) < 4:
             continue
@@ -378,7 +389,7 @@ def detect_sample_outliers(X, y, sample_ids, config=None):
     n_flags = flag_cov.astype(int) + flag_pca.astype(int) + flag_if.astype(int)
     suspect  = n_flags >= 2
 
-    label_names = {0: "benign", 1: "malignant"}
+    label_names = {0: "benign", 1: "malignant", 2: "borderline"}
     for i, sid in enumerate(sample_ids):
         rows.append({
             "sample_id":       sid,
@@ -463,6 +474,11 @@ def select_features(workdir, result_dir, config, benign_samples, malignant_sampl
             D = np.zeros((X.shape[0], X.shape[1]))
         region_in_88 = (_fm["region_in_88"] if "region_in_88" in _fm
                         else np.zeros(X.shape[1], dtype=bool))
+        # Drop borderline samples (y=2) — not used for feature selection or classifiers
+        _bm = y != 2
+        if not _bm.all():
+            X, y, D = X[_bm], y[_bm], D[_bm]
+            sample_ids = [s for s, k in zip(sample_ids, _bm) if k]
         logger.info(f"  Cached: {X.shape[0]} samples × {X.shape[1]} features")
     else:
         X, y, sample_ids, feature_names, D, region_in_88 = build_feature_matrix(

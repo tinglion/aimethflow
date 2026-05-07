@@ -85,6 +85,7 @@ from scripts.modules import (
     extract_target_regions,
     check_mbias,
     extract_methylation_methyldackel,
+    plot_fragment_size,
     extract_methylation_info,
     merge_methylation_files,
     filter_methylation_data,
@@ -187,6 +188,8 @@ PIPELINE_STEPS = [
     ("outlier_detect",     "13",  "Sample QC: coverage fraction / PCA z / Isolation Forest",       "diff"),
     ("feature_select",     "14",  "Feature selection: LASSO(L1) ∪ RF; outliers excluded; ≥10× QC", "outlier_detect"),
     ("classify",           "15",  "Classifiers LOO-CV: LR / SVM / RF / XGBoost / LightGBM",       "feature_select"),
+    ("fs_benchmark",       "15b", "Feature selection ablation: wilcoxon/lasso/rf/union AUC table", "feature_select"),
+    ("ca125_compare",      "15c", "CA-125 vs classifier AUC (optional; requires 'ca125' column in Excel)", "classify"),
     ("subtype_classify",   "16",  "Subtype LOO-CV (malignant+borderline): RF + SVM OvR",          "classify"),
     ("temporal_validate",  "17",  "Temporal split validation (plasma only): train/test by date",  "classify"),
     ("annotate",           "18",  "Site annotation: gene / CpG island / EWAS Catalog+Atlas",      "feature_select"),
@@ -443,12 +446,17 @@ def main():
     target_files          = state.get("target_files", deduplicated_files)
     sample1_methylation   = state.get("sample1_methylation")
     sample2_methylation   = state.get("sample2_methylation")
+    borderline_methylation = state.get("borderline_methylation")
     filtered_sample1      = state.get("filtered_sample1")
     filtered_sample2      = state.get("filtered_sample2")
+    borderline_samples    = state.get("borderline_samples")
     candidate_sample1     = state.get("candidate_sample1")
     candidate_sample2     = state.get("candidate_sample2")
+    candidate_borderline = state.get("candidate_borderline")
     benign_samples        = state.get("benign_samples", [])
     malignant_samples     = state.get("malignant_samples", [])
+    borderline_samples        = state.get("borderline_samples", [])
+    borderline_suspect_ids    = state.get("borderline_suspect_ids", [])
 
     single_step = args.step  # None → full pipeline
 
@@ -561,6 +569,7 @@ def main():
                 logger.info("  → M-bias SVGs saved to workdir — review R2 3' bias before extract")
             else:
                 logger.warning("7.5. Skipping M-bias check (reference genome not found)")
+            plot_fragment_size(mbias_input, result_dir, config=config)
         else:
             logger.warning("7.5. Skipping M-bias check (no BAM available)")
 
@@ -585,13 +594,17 @@ def main():
                     _mode_cfg = config.get(mode, {})
                     _excel_sheet = _mode_cfg.get("excel_sheet", mode)
                     logger.info(f"  [Excel sheet: {_excel_sheet}]")
-                    benign_files, malignant_files = group_methylation_files_v2(
+                    benign_files, malignant_files, borderline_files = group_methylation_files_v2(
                         meth_files, category=_excel_sheet
                     )
-                    logger.info(f"  → Grouped: {len(benign_files)} benign, {len(malignant_files)} malignant")
+                    logger.info(
+                        f"  → Grouped: {len(benign_files)} benign, "
+                        f"{len(malignant_files)} malignant, {len(borderline_files)} borderline"
+                    )
 
                     s1_path = os.path.join(workdir, "sample1_methylation.bedGraph")
                     s2_path = os.path.join(workdir, "sample2_methylation.bedGraph")
+                    borderline_path = os.path.join(workdir, "borderline_methylation.bedGraph")
 
                     def _sample_id(path):
                         return os.path.basename(path).split("_CpG")[0].split(".")[0].split("_")[0]
@@ -613,10 +626,19 @@ def main():
                         sample2_methylation = meth_files[1] if len(meth_files) > 1 else meth_files[0]
                         malignant_samples = [_sample_id(sample2_methylation)]
                         logger.warning("  → No malignant files found — using second file as sample2")
+                        
+                    if borderline_files:
+                        merge_methylation_files(borderline_files, borderline_path)
+                        borderline_methylation = borderline_path
+                        borderline_samples = [_sample_id(f) for f in borderline_files]
+                    else:
+                        borderline_methylation = None
+                        borderline_samples = []
+                        logger.warning("  → No borderline files found — skipping borderline analysis")
             else:
                 logger.info("  [Extractor: bismark_methylation_extractor (aligner=bismark)]")
                 precomputed_bams = bam_input if mode == "plasma" else None
-                sample1_methylation, sample2_methylation = extract_methylation_info(
+                sample1_methylation, sample2_methylation, borderline_methylation = extract_methylation_info(
                     workdir, fastq_files,
                     group_method=args.group_method,
                     config=config,
@@ -627,15 +649,19 @@ def main():
             _save_state(workdir, {
                 "sample1_methylation": sample1_methylation,
                 "sample2_methylation": sample2_methylation,
-                "benign_samples": benign_samples,
-                "malignant_samples": malignant_samples,
+                "borderline_methylation": borderline_methylation,
+                "benign_samples":      benign_samples,
+                "malignant_samples":   malignant_samples,
+                "borderline_samples":  borderline_samples,
                 "completed_steps": state.get("completed_steps", []) + ["extract"],
             })
             state["sample1_methylation"] = sample1_methylation
             state["sample2_methylation"] = sample2_methylation
-            state["benign_samples"] = benign_samples
-            state["malignant_samples"] = malignant_samples
-            logger.info(f"  → Methylation files: {sample1_methylation}, {sample2_methylation}")
+            state["borderline_methylation"] = borderline_methylation
+            state["benign_samples"]      = benign_samples
+            state["malignant_samples"]   = malignant_samples
+            state["borderline_samples"]  = borderline_samples
+            logger.info(f"  → Methylation files: {sample1_methylation}, {sample2_methylation}, {borderline_methylation}")
         else:
             logger.error("No BAM files available for methylation extraction")
             if single_step:
@@ -644,6 +670,7 @@ def main():
         logger.info("8. Using provided methylation files")
         sample1_methylation = methylation_files_input[0] if methylation_files_input else None
         sample2_methylation = methylation_files_input[1] if len(methylation_files_input) > 1 else sample1_methylation
+        borderline_methylation = methylation_files_input[2] if len(methylation_files_input) > 2 else None
     elif not single_step:
         logger.info("8. Skipping methylation extraction")
 
@@ -656,21 +683,33 @@ def main():
             filtered_sample1 = filter_methylation_data(sample1_methylation, workdir, config)
         if sample2_methylation:
             filtered_sample2 = filter_methylation_data(sample2_methylation, workdir, config)
+        if borderline_methylation:
+            filtered_borderline = filter_methylation_data(borderline_methylation, workdir, config)
         if not args.skip_candidate_regions:
             if filtered_sample1:
                 candidate_sample1 = filter_to_candidate_regions_wrapper(filtered_sample1, workdir, config)
             if filtered_sample2:
                 candidate_sample2 = filter_to_candidate_regions_wrapper(filtered_sample2, workdir, config)
+            if filtered_borderline:
+                candidate_borderline = filter_to_candidate_regions_wrapper(filtered_borderline, workdir, config)
         _save_state(workdir, {
-            "filtered_sample1": filtered_sample1, "filtered_sample2": filtered_sample2,
-            "candidate_sample1": candidate_sample1, "candidate_sample2": candidate_sample2,
+            "filtered_sample1": filtered_sample1, 
+            "filtered_sample2": filtered_sample2,
+            "filtered_borderline": filtered_borderline,
+            "candidate_sample1": candidate_sample1, 
+            "candidate_sample2": candidate_sample2,
+            "candidate_borderline": candidate_borderline,
             "completed_steps": state.get("completed_steps", []) + ["filter"],
         })
         state.update({
-            "filtered_sample1": filtered_sample1, "filtered_sample2": filtered_sample2,
-            "candidate_sample1": candidate_sample1, "candidate_sample2": candidate_sample2,
+            "filtered_sample1": filtered_sample1, 
+            "filtered_sample2": filtered_sample2,
+            "filtered_borderline": filtered_borderline,
+            "candidate_sample1": candidate_sample1, 
+            "candidate_sample2": candidate_sample2,
+            "candidate_borderline": candidate_borderline,
         })
-        logger.info(f"  → Candidate region files: {candidate_sample1}, {candidate_sample2}")
+        logger.info(f"  → Candidate region files: {candidate_sample1}, {candidate_sample2}, {candidate_borderline}")
     elif not single_step:
         logger.info("9. Skipping methylation filtering")
 
@@ -713,13 +752,18 @@ def main():
                 X_od    = data["X"]
                 y_od    = data["y"]
                 sids_od = list(data["sample_ids"])
-                logger.info(f"  Loaded cached feature matrix: {X_od.shape[0]} × {X_od.shape[1]}")
+                feat_od = list(data["feature_names"])
+                logger.info(f"  Loaded cached feature matrix {fm_path}: {X_od.shape[0]} × {X_od.shape[1]}")
             else:
                 logger.info("  Building feature matrix from bedGraphs...")
                 X_od, y_od, sids_od, feat_od, D_od, ri88_od = build_feature_matrix(
-                    workdir, result_dir, benign_samples, malignant_samples, config
+                    workdir, 
+                    result_dir, 
+                    benign_samples, 
+                    malignant_samples, 
+                    config,
+                    borderline_samples=borderline_samples,
                 )
-                # Save so feature_select (Step 14) can load from cache
                 np.savez(fm_path,
                          X=X_od, y=y_od,
                          sample_ids=np.array(sids_od, dtype=object),
@@ -728,13 +772,22 @@ def main():
                          region_in_88=ri88_od)
                 logger.info(f"  Feature matrix cached: {fm_path} "
                             f"({X_od.shape[0]} samples × {X_od.shape[1]} features)")
+
             outlier_df, suspect_ids = detect_sample_outliers(X_od, y_od, sids_od, config)
             if not outlier_df.empty:
                 outlier_path = os.path.join(result_dir, "outlier_report.csv")
                 outlier_df.to_csv(outlier_path, index=False)
                 logger.info(f"  → Outlier report saved: {outlier_path}")
+
+            # Separate borderline suspects from benign/malignant suspects.
+            # Only benign/malignant suspects feed into feature selection exclusion;
+            # borderline suspects are excluded from temporal_validate instead.
+            _bl_set = set(borderline_samples)
+            borderline_suspect_ids = [s for s in suspect_ids if s in _bl_set]
+            suspect_ids            = [s for s in suspect_ids if s not in _bl_set]
+
             if suspect_ids:
-                logger.warning(f"  ⚠ Suspected outliers (≥2 flags): {suspect_ids}")
+                logger.warning(f"  ⚠ Suspected outliers (benign/malignant, ≥2 flags): {suspect_ids}")
                 logger.warning(
                     "  ⚠ These samples will be EXCLUDED from feature selection (Step 14)."
                 )
@@ -743,12 +796,27 @@ def main():
                     "config.toml [ml] exclude_samples to also exclude from classifiers."
                 )
             else:
-                logger.info("  No suspect samples detected")
+                logger.info("  No suspect benign/malignant samples detected")
+            if borderline_suspect_ids:
+                logger.warning(
+                    f"  ⚠ Suspected borderline outliers (≥2 flags): {borderline_suspect_ids}"
+                )
+                logger.warning(
+                    "  ⚠ These will be excluded from temporal_validate automatically."
+                )
             _save_state(workdir, {
-                "suspect_ids": suspect_ids,
+                "suspect_ids":             suspect_ids,
+                "borderline_suspect_ids":  borderline_suspect_ids,
                 "completed_steps": state.get("completed_steps", []) + ["outlier_detect"],
             })
-            state["suspect_ids"] = suspect_ids
+            state["suspect_ids"]            = suspect_ids
+            state["borderline_suspect_ids"] = borderline_suspect_ids
+
+            try:
+                from scripts.plot_pca_outliers import plot_pca_outliers
+                plot_pca_outliers(result_dir)
+            except Exception as _e:
+                logger.warning(f"  PCA outlier plot skipped: {_e}")
         else:
             logger.error("outlier_detect requires benign_samples and malignant_samples — "
                          "complete the extract step first")
@@ -775,6 +843,12 @@ def main():
             )
             _save_state(workdir, {"completed_steps": state.get("completed_steps", []) + ["feature_select"]})
             logger.info(f"  → {len(panel_features)} features selected — saved to {result_dir}")
+
+            try:
+                from scripts.plot_feature_funnel import plot_funnel
+                plot_funnel(result_dir)
+            except Exception as _e:
+                logger.warning(f"  Feature funnel plot skipped: {_e}")
         else:
             logger.error("feature_select requires benign_samples and malignant_samples — "
                          "complete the extract step first (or ensure pipeline_state.json has grouping info)")
@@ -796,6 +870,39 @@ def main():
         else:
             logger.error("classify requires benign_samples and malignant_samples — "
                          "complete the extract step first")
+            if single_step:
+                return
+
+    # =========================================================
+    # Step 15b: fs_benchmark — feature selection ablation
+    # =========================================================
+    if _should_run("fs_benchmark", False):
+        if benign_samples and malignant_samples:
+            logger.info("━━ Step 15b: Feature selection ablation (wilcoxon/lasso/rf/union) ━━")
+            from scripts.modules.classifier_utils import run_feature_selection_benchmark
+            run_feature_selection_benchmark(
+                workdir, result_dir, config, benign_samples, malignant_samples
+            )
+            _save_state(workdir, {"completed_steps": state.get("completed_steps", []) + ["fs_benchmark"]})
+            logger.info(f"  → Benchmark table saved to {result_dir}/feature_selection_benchmark.csv")
+        else:
+            logger.error("fs_benchmark requires benign_samples and malignant_samples")
+            if single_step:
+                return
+
+    # =========================================================
+    # Step 15c: ca125_compare — CA-125 vs classifier AUC
+    # =========================================================
+    if _should_run("ca125_compare", False):
+        if benign_samples and malignant_samples:
+            logger.info("━━ Step 15c: CA-125 vs classifier AUC comparison ━━")
+            from scripts.modules.classifier_utils import run_ca125_comparison
+            run_ca125_comparison(
+                workdir, result_dir, config, benign_samples, malignant_samples
+            )
+            _save_state(workdir, {"completed_steps": state.get("completed_steps", []) + ["ca125_compare"]})
+        else:
+            logger.error("ca125_compare requires benign_samples and malignant_samples")
             if single_step:
                 return
 
@@ -825,7 +932,13 @@ def main():
         else:
             from scripts.modules.classifier_utils import run_temporal_validation
             from scripts.modules.subtype_utils import run_subtype_temporal_validation
-            run_temporal_validation(workdir, result_dir, config, benign_samples, malignant_samples)
+            _bl_clean = [s for s in borderline_samples if s not in set(borderline_suspect_ids)]
+            if borderline_suspect_ids:
+                logger.info(
+                    f"  [temporal] Excluding {len(borderline_suspect_ids)} borderline outlier(s) "
+                    f"from validation: {borderline_suspect_ids}"
+                )
+            run_temporal_validation(workdir, result_dir, config, benign_samples, malignant_samples, _bl_clean)
             # run_subtype_temporal_validation(result_dir, config)
             _save_state(workdir, {"completed_steps": state.get("completed_steps", []) + ["temporal_validate"]})
             logger.info(f"  → Temporal validation results saved to {result_dir}")

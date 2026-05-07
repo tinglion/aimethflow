@@ -652,6 +652,147 @@ def check_mbias(bam_files, temp_dir, reference_genome, config=None):
 
 
 # ──────────────────────────────────────────────
+# cfDNA fragment size distribution
+# ──────────────────────────────────────────────
+
+def plot_fragment_size(bam_files, result_dir, config=None):
+    """
+    Plot insert-size distribution from paired BAM files (TLEN field).
+    Samples up to 200 000 reads per BAM to stay fast.
+    Saves fragment_size_distribution.png and fragment_size_stats.csv to result_dir.
+    """
+    try:
+        import numpy as np
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError as exc:
+        logger.warning(f"[fragment_size] Cannot import plotting libraries: {exc}")
+        return None
+
+    samtools  = _resolve_tool("samtools", config or {})
+    MAX_READS = 200_000
+    SIZE_MIN, SIZE_MAX = 0, 600
+
+    all_sizes: list   = []
+    sample_names: list = []
+    stats_rows: list  = []
+
+    for bam_file in bam_files:
+        sample_name = os.path.basename(bam_file).split(".")[0]
+        sample_names.append(sample_name)
+        sizes: list = []
+
+        try:
+            # Proper pairs only (-f 0x2); exclude unmapped / secondary / supplementary (-F 0x904)
+            cmd  = [samtools, "view", "-f", "0x2", "-F", "0x904", bam_file]
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                    stderr=subprocess.DEVNULL, text=True)
+            for line in proc.stdout:
+                parts = line.split("\t")
+                if len(parts) < 9:
+                    continue
+                try:
+                    tlen = int(parts[8])
+                except ValueError:
+                    continue
+                if tlen > 0:          # keep one end per pair (positive TLEN)
+                    sizes.append(tlen)
+                    if len(sizes) >= MAX_READS:
+                        proc.stdout.close()
+                        proc.wait()
+                        break
+            else:
+                proc.wait()
+        except Exception as exc:
+            logger.warning(f"[fragment_size] samtools view failed for {sample_name}: {exc}")
+            all_sizes.append([])
+            stats_rows.append({"sample": sample_name, "n_reads": 0,
+                                "median": "NA", "mean": "NA", "pct_100_220": "NA"})
+            continue
+
+        if sizes:
+            arr = np.array(sizes, dtype=np.int32)
+            arr = arr[(arr >= SIZE_MIN) & (arr <= SIZE_MAX)]
+            in_peak = np.sum((arr >= 100) & (arr <= 220)) / max(len(arr), 1) * 100
+            stats_rows.append({
+                "sample":      sample_name,
+                "n_reads":     len(arr),
+                "median":      int(np.median(arr)),
+                "mean":        round(float(np.mean(arr)), 1),
+                "pct_100_220": round(in_peak, 1),
+            })
+            all_sizes.append(arr.tolist())
+            logger.info(
+                f"[fragment_size] {sample_name}: n={len(arr):,d}  "
+                f"median={int(np.median(arr))}bp  "
+                f"mean={np.mean(arr):.1f}bp  "
+                f"pct_100-220bp={in_peak:.1f}%"
+            )
+        else:
+            all_sizes.append([])
+            stats_rows.append({"sample": sample_name, "n_reads": 0,
+                                "median": "NA", "mean": "NA", "pct_100_220": "NA"})
+
+    # ── plot ──────────────────────────────────────────────────────────
+    fig, ax = plt.subplots(figsize=(10, 5))
+    bins     = np.arange(SIZE_MIN, SIZE_MAX + 2, 2)
+    centres  = (bins[:-1] + bins[1:]) / 2
+    agg_all: list = []
+
+    for sname, sizes_i in zip(sample_names, all_sizes):
+        if not sizes_i:
+            continue
+        agg_all.extend(sizes_i)
+        hist, _ = np.histogram(np.array(sizes_i), bins=bins, density=True)
+        ax.plot(centres, hist, color="#3a86ff", alpha=0.3, linewidth=0.8, label=sname)
+
+    if agg_all:
+        hist_agg, _ = np.histogram(np.array(agg_all), bins=bins, density=True)
+        ax.plot(centres, hist_agg, color="#e63946", linewidth=2.0, label="Aggregate")
+
+    ax.axvspan(100, 220, color="#f4a261", alpha=0.15, label="cfDNA zone 100–220 bp")
+    ax.axvline(167, color="#f4a261", linestyle="--", linewidth=1.0,
+               label="167 bp mono-nucleosome")
+
+    ax.set_xlabel("Fragment size (bp)", fontsize=12)
+    ax.set_ylabel("Density", fontsize=12)
+    ax.set_title("cfDNA Fragment Size Distribution", fontsize=13)
+    ax.set_xlim(SIZE_MIN, SIZE_MAX)
+
+    # Deduplicate legend: keep only the first occurrence of each label
+    handles, labels = ax.get_legend_handles_labels()
+    seen: dict = {}
+    unique_h, unique_l = [], []
+    for h, lbl in zip(handles, labels):
+        if lbl not in seen:
+            seen[lbl] = True
+            unique_h.append(h)
+            unique_l.append(lbl)
+    ax.legend(unique_h, unique_l, fontsize=9, loc="upper right")
+
+    os.makedirs(result_dir, exist_ok=True)
+    png_path = os.path.join(result_dir, "fragment_size_distribution.png")
+    fig.tight_layout()
+    fig.savefig(png_path, dpi=150)
+    plt.close(fig)
+    logger.info(f"[fragment_size] Plot saved: {png_path}")
+
+    # ── stats CSV ──────────────────────────────────────────────────────
+    if stats_rows:
+        import csv as _csv
+        csv_path = os.path.join(result_dir, "fragment_size_stats.csv")
+        fieldnames = ["sample", "n_reads", "median", "mean", "pct_100_220"]
+        with open(csv_path, "w", newline="") as f:
+            writer = _csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(stats_rows)
+        logger.info(f"[fragment_size] Stats saved: {csv_path}")
+
+    return png_path
+
+
+# ──────────────────────────────────────────────
 # Methylation extraction: MethylDackel (for bwameth alignments)
 # ──────────────────────────────────────────────
 

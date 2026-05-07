@@ -12,7 +12,7 @@ tissue_dir = "/mnt/OC_tissue"
 # Plasma sample data directory
 plasma_dir = "/mnt/OC_plasma"
 # Sample info Excel file path
-sample_info_excel = "ovarian_fq_series_samples_v3.xlsx"
+sample_info_excel = "ovarian_fq_series_samples_v4.xlsx"
 # Probe panel BED file path
 probe_panel_bed = "panel_B10308.bed"
 # Candidate regions file path
@@ -224,6 +224,12 @@ pubmed_max_hits = 20
 cutoff_date = "2024-07-01"
 # Number of top features (by LOO-CV selection frequency) to use for training
 top_n_features = 20
+# When true, borderline-category samples in the validation period are added to the
+# validation set as benign (y=0) to supplement the typically small benign validation
+# group.  They are loaded from their bedGraph files at runtime and never affect the
+# train set or feature selection.  true_label in predictions CSV is "borderline" so
+# they can be distinguished from confirmed benign samples.
+borderline_as_benign = false
 
 # Logging configuration
 [logging]

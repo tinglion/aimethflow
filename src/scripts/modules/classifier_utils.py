@@ -2,7 +2,10 @@
 """
 classifier_utils.py - Diagnostic classifier module (Step 15)
 
-Evaluates five classifiers with leave-one-out cross-validation (LOO-CV):
+Evaluates five classifiers with configurable cross-validation (ml.cv_folds in config.toml):
+  cv_folds = 0  → Leave-One-Out CV (LOO-CV; default for very small cohorts)
+  cv_folds = k  → Stratified k-fold CV (default k=5; recommended for n≥50)
+
   LR    — L2 logistic regression (interpretable, well-suited for small samples)
   SVM   — RBF-kernel SVM (non-linear decision boundary)
   RF    — Random Forest (ensemble method with built-in feature importance)
@@ -20,7 +23,6 @@ Dependencies: scikit-learn, matplotlib, xgboost, lightgbm
 
 import os
 import warnings
-import traceback
 import numpy as np
 import pandas as pd
 
@@ -33,7 +35,7 @@ from sklearn.metrics import roc_auc_score, confusion_matrix, accuracy_score
 from xgboost import XGBClassifier
 from lightgbm import LGBMClassifier
 
-from sklearn.model_selection import LeaveOneOut
+from sklearn.model_selection import LeaveOneOut, StratifiedKFold
 
 from utils.logger import logger
 
@@ -55,6 +57,12 @@ def _load_feature_matrix(workdir, result_dir, benign_samples, malignant_samples,
         sample_ids    = list(data["sample_ids"])
         feature_names = list(data["feature_names"])
         region_in_88  = data["region_in_88"] if "region_in_88" in data else np.zeros(X.shape[1], dtype=bool)
+        # Drop borderline rows (y=2) — not used in classifiers or feature selection
+        _bm = y != 2
+        if not _bm.all():
+            X, y = X[_bm], y[_bm]
+            sample_ids   = [s for s, k in zip(sample_ids, _bm) if k]
+            region_in_88 = region_in_88  # feature-axis, unchanged
     else:
         logger.info("feature_matrix.npz not found — rebuilding from bedGraph...")
         from scripts.modules.feature_utils import build_feature_matrix
@@ -162,6 +170,19 @@ def _select_features_in_fold(X_train, y_train, region_in_88, config):
         wilcox_mask = np.ones(n_features, dtype=bool)
 
     wilcox_indices = np.where(wilcox_mask)[0]
+
+    # "wilcoxon" mode: skip LASSO/RF, rank candidates by |Δβ| (if available), cap, return early
+    if selection_mode == "wilcoxon":
+        if _HAS_SCIPY:
+            order = np.argsort(deltas[wilcox_indices])[::-1]
+            ranked = wilcox_indices[order]
+        else:
+            ranked = wilcox_indices   # no delta scores available; keep original order
+        max_feat = ml_cfg.get("max_features_clf", 0)
+        if max_feat > 0 and len(ranked) > max_feat:
+            ranked = ranked[:max_feat]
+        return ranked
+
     X_w = X_imp[:, wilcox_indices]
 
     # 3. LASSO (in-fold speedup: Cs=10, cv≤3)
@@ -325,15 +346,64 @@ def _save_confusion_matrix_plot(results, result_dir):
     return cm_path
 
 
+def _build_classifiers(ml_cfg, spw):
+    """Instantiate the 5 standard classifiers from config. spw = scale_pos_weight."""
+    return {
+        "LR": LogisticRegression(
+            C=ml_cfg.get("lr_C", 1.0),
+            class_weight="balanced",
+            max_iter=2000,
+            random_state=42,
+        ),
+        "SVM": SVC(
+            kernel="rbf",
+            C=ml_cfg.get("svm_C", 1.0),
+            probability=True,
+            class_weight="balanced",
+            random_state=42,
+        ),
+        "RF": RandomForestClassifier(
+            n_estimators=ml_cfg.get("rf_n_estimators", 200),
+            class_weight="balanced",
+            random_state=42,
+            n_jobs=-1,
+        ),
+        "XGB": XGBClassifier(
+            n_estimators=ml_cfg.get("xgb_n_estimators", 200),
+            max_depth=ml_cfg.get("xgb_max_depth", 4),
+            learning_rate=ml_cfg.get("xgb_learning_rate", 0.1),
+            scale_pos_weight=spw,
+            use_label_encoder=False,
+            eval_metric="logloss",
+            random_state=42,
+            n_jobs=-1,
+            verbosity=0,
+        ),
+        "LGBM": LGBMClassifier(
+            n_estimators=ml_cfg.get("lgbm_n_estimators", 200),
+            max_depth=ml_cfg.get("lgbm_max_depth", 4),
+            learning_rate=ml_cfg.get("lgbm_learning_rate", 0.1),
+            scale_pos_weight=spw,
+            random_state=42,
+            n_jobs=-1,
+            verbosity=-1,
+        ),
+    }
+
+
 # ──────────────────────────────────────────────────────
 # Step 15 entry point
 # ──────────────────────────────────────────────────────
 
 def run_classifiers(workdir, result_dir, config, benign_samples, malignant_samples):
     """
-    Step 15 entry point: Nested LOO-CV evaluation of LR / SVM / RF / XGB / LGBM classifiers.
+    Step 15 entry point: Nested CV evaluation of LR / SVM / RF / XGB / LGBM classifiers.
 
-    Feature selection (Wilcoxon + LASSO + RF) is performed independently on each LOO fold
+    CV strategy is controlled by ml.cv_folds in config.toml:
+      cv_folds = 0  → Leave-One-Out CV (maximally data-efficient, slow)
+      cv_folds = k  → Stratified k-fold CV (default 5; faster, recommended for n≥50)
+
+    Feature selection (Wilcoxon + LASSO + RF) is performed independently on each fold's
     training set; test samples are never used during feature selection or scaler fitting —
     no data leakage.
 
@@ -350,8 +420,11 @@ def run_classifiers(workdir, result_dir, config, benign_samples, malignant_sampl
                                     sensitivity, specificity, confusion_matrix}}
         summary_df: pd.DataFrame of per-classifier summary metrics
     """
+    ml_cfg_cv = (config or {}).get("ml", {})
+    cv_folds = ml_cfg_cv.get("cv_folds", 5)
+    cv_name  = "LOO-CV" if cv_folds <= 0 else f"{cv_folds}-fold CV"
 
-    logger.info(f"Starting classifier evaluation (Nested LOO-CV)  "
+    logger.info(f"Starting classifier evaluation ({cv_name})  "
                 f"(benign={len(benign_samples)}, malignant={len(malignant_samples)})")
 
     # 1. load full feature matrix (post-coverage filter, pre-Wilcoxon)
@@ -398,50 +471,17 @@ def run_classifiers(workdir, result_dir, config, benign_samples, malignant_sampl
     n_pos = int(sum(y == 1))
     spw   = n_neg / n_pos if n_pos > 0 else 1.0
 
-    classifiers = {
-        "LR": LogisticRegression(
-            C=ml_cfg.get("lr_C", 1.0),
-            class_weight="balanced",
-            max_iter=2000,
-            random_state=42,
-        ),
-        "SVM": SVC(
-            kernel="rbf",
-            C=ml_cfg.get("svm_C", 1.0),
-            probability=True,
-            class_weight="balanced",
-            random_state=42,
-        ),
-        "RF": RandomForestClassifier(
-            n_estimators=ml_cfg.get("rf_n_estimators", 200),
-            class_weight="balanced",
-            random_state=42,
-            n_jobs=-1,
-        ),
-        "XGB": XGBClassifier(
-            n_estimators=ml_cfg.get("xgb_n_estimators", 200),
-            max_depth=ml_cfg.get("xgb_max_depth", 4),
-            learning_rate=ml_cfg.get("xgb_learning_rate", 0.1),
-            scale_pos_weight=spw,
-            use_label_encoder=False,
-            eval_metric="logloss",
-            random_state=42,
-            n_jobs=-1,
-            verbosity=0,
-        ),
-        "LGBM": LGBMClassifier(
-            n_estimators=ml_cfg.get("lgbm_n_estimators", 200),
-            max_depth=ml_cfg.get("lgbm_max_depth", 4),
-            learning_rate=ml_cfg.get("lgbm_learning_rate", 0.1),
-            scale_pos_weight=spw,
-            random_state=42,
-            n_jobs=-1,
-            verbosity=-1,
-        ),
-    }
+    classifiers = _build_classifiers(ml_cfg, spw)
 
-    # 3. Nested LOO-CV
-    loo = LeaveOneOut()
+    # 3. Nested CV (LOO or stratified k-fold)
+    if cv_folds <= 0:
+        splitter = LeaveOneOut()
+        n_folds  = X.shape[0]
+    else:
+        splitter = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=42)
+        n_folds  = cv_folds
+    logger.info(f"  CV strategy: {cv_name}  ({n_folds} folds)")
+
     clf_names = list(classifiers.keys())
 
     # per-classifier prediction storage
@@ -452,10 +492,9 @@ def run_classifiers(workdir, result_dir, config, benign_samples, malignant_sampl
     fold_n_features    = []  # features selected per fold
     fold_selected_names = []  # selected feature names per fold (for frequency stats)
 
-    n_folds = X.shape[0]
     log_interval = max(1, n_folds // 10)
 
-    for fold_idx, (train_idx, test_idx) in enumerate(loo.split(X)):
+    for fold_idx, (train_idx, test_idx) in enumerate(splitter.split(X, y)):
         X_train_raw, X_test_raw = X[train_idx], X[test_idx]
         y_train, y_test         = y[train_idx], y[test_idx]
 
@@ -489,11 +528,11 @@ def run_classifiers(workdir, result_dir, config, benign_samples, malignant_sampl
             )
             for clf_name, clf in classifiers.items():
                 clf.fit(X_tr_sc, y_train)
-                prob = clf.predict_proba(X_te_sc)[0, 1]
-                pred = clf.predict(X_te_sc)[0]
-                clf_y_true[clf_name].append(int(y_test[0]))
-                clf_y_prob[clf_name].append(float(prob))
-                clf_y_pred[clf_name].append(int(pred))
+                prob = clf.predict_proba(X_te_sc)[:, 1]
+                pred = clf.predict(X_te_sc)
+                clf_y_true[clf_name].extend(y_test.tolist())
+                clf_y_prob[clf_name].extend(prob.tolist())
+                clf_y_pred[clf_name].extend(pred.tolist())
 
         if (fold_idx + 1) % log_interval == 0 or fold_idx == n_folds - 1:
             logger.info(f"    fold {fold_idx+1}/{n_folds}  "
@@ -646,40 +685,70 @@ def run_classifiers(workdir, result_dir, config, benign_samples, malignant_sampl
     return results, summary_df
 
 
+def _norm_id(raw):
+    """Normalise Excel case_id: '640849.0' → '640849'; non-numeric strings kept as-is."""
+    s = str(raw).strip()
+    try:
+        return str(int(float(s)))
+    except (ValueError, OverflowError):
+        return s
+
+
+def _build_sid_to_case_map(config):
+    """
+    Build {sample_id: case_id} by reading the sample info Excel.
+
+    sample_id = fq_R1 filename prefix (e.g. 'B10001'), same key used in
+    feature_matrix.npz and classifier_predictions.csv.
+    case_id   = normalized value of the Excel 'case_id' column
+    (Excel often stores integers as floats; _norm_id handles '640849.0' → '640849').
+
+    Returns an empty dict on any failure.
+    """
+    excel_file = (config or {}).get("data", {}).get("sample_info_excel", "")
+    if not excel_file or not os.path.exists(excel_file):
+        logger.warning(f"[id-map] sample_info_excel not found: {excel_file!r}")
+        return {}
+    sid_to_case = {}
+    try:
+        xl = pd.ExcelFile(excel_file)
+        for sheet in xl.sheet_names:
+            df = pd.read_excel(excel_file, sheet_name=sheet)
+            if "fq_R1" not in df.columns or "case_id" not in df.columns:
+                continue
+            for _, row in df.iterrows():
+                cid = _norm_id(row.get("case_id", ""))
+                r1  = str(row.get("fq_R1", "")).strip()
+                sid = r1.split(".")[0]
+                if cid and cid != "nan" and sid and sid != "nan":
+                    sid_to_case[sid] = cid
+    except Exception as exc:
+        logger.warning(f"[id-map] Failed to read sample_info_excel: {exc}")
+    logger.debug(f"[id-map] {len(sid_to_case)} sample_id → case_id mappings built")
+    return sid_to_case
+
+
 def _build_sample_date_map(config):
     """
-    Build {sample_id: collection_date} keyed by fq_R1 prefix (same as feature matrix).
+    Build {sample_id: collection_date} keyed by fq_R1 prefix.
 
-    Two-step join:
-      1. plasma_exp.xlsx  : case_id → collection_date
-      2. sample_info_excel: fq_R1 prefix (sample_id) → case_id
-    Both tables store integer case_ids as Excel floats ("640849.0"); normalise to "640849".
-
-    Returns an empty dict on any failure (caller should check and skip).
+    Two-step join via _build_sid_to_case_map:
+      plasma_exp.xlsx  : case_id → collection_date
+      sample_info_excel: sample_id (fq_R1 prefix) → case_id
     """
-
-    def _norm_id(raw):
-        """'640849.0' → '640849'; non-numeric strings kept as-is."""
-        s = str(raw).strip()
-        try:
-            return str(int(float(s)))
-        except (ValueError, OverflowError):
-            return s
-
     # Step 1: plasma_exp.xlsx → {case_id: timestamp}
-    exp_path = None
-    for candidate in ["data/plasma_exp.xlsx", "plasma_exp.xlsx"]:
-        if os.path.exists(candidate):
-            exp_path = candidate
-            break
+    exp_path = next(
+        (p for p in ["data/plasma_exp.xlsx", "plasma_exp.xlsx"] if os.path.exists(p)),
+        None,
+    )
     if exp_path is None:
         logger.warning("[temporal] plasma_exp.xlsx not found — skipping temporal validation")
         return {}
 
     try:
         df_exp = pd.read_excel(exp_path)
-    except Exception as e:
-        logger.warning(f"[temporal] Failed to read {exp_path}: {e}")
+    except Exception as exc:
+        logger.warning(f"[temporal] Failed to read {exp_path}: {exc}")
         return {}
 
     df_exp.columns = df_exp.columns.str.strip().str.lower()
@@ -689,9 +758,9 @@ def _build_sample_date_map(config):
 
     case_date = {}
     for _, row in df_exp.iterrows():
-        cid = _norm_id(row["case_id"])
+        cid    = _norm_id(row["case_id"])
         dt_raw = str(row["datetime"]).strip()
-        ts = pd.to_datetime(dt_raw, format="%Y%m%d", errors="coerce")
+        ts     = pd.to_datetime(dt_raw, format="%Y%m%d", errors="coerce")
         if pd.isna(ts):
             ts = pd.to_datetime(dt_raw, errors="coerce")
         if not pd.isna(ts):
@@ -701,31 +770,12 @@ def _build_sample_date_map(config):
         logger.warning("[temporal] No valid dates parsed from plasma_exp.xlsx")
         return {}
 
-    # Step 2: sample_info_excel → {sample_id (fq_R1 prefix): case_id}
-    excel_file = (config or {}).get("data", {}).get("sample_info_excel", "")
-    if not excel_file or not os.path.exists(excel_file):
-        logger.warning(f"[temporal] sample_info_excel not found: {excel_file!r}")
+    # Step 2: sample_id → case_id from sample_info_excel
+    sid_to_case = _build_sid_to_case_map(config)
+    if not sid_to_case:
         return {}
 
-    sid_to_case = {}
-    try:
-        xl = pd.ExcelFile(excel_file)
-        for sheet in xl.sheet_names:
-            df = pd.read_excel(excel_file, sheet_name=sheet)
-            # df.columns = df.columns.str.strip()
-            if "fq_R1" not in df.columns or "case_id" not in df.columns:
-                continue
-            for _, row in df.iterrows():
-                cid = _norm_id(row.get("case_id", ""))
-                r1  = str(row.get("fq_R1", "")).strip()
-                sid = r1.split(".")[0]
-                if cid and cid != "nan" and sid and sid != "nan":
-                    sid_to_case[sid] = cid
-    except Exception as e:
-        logger.warning(f"[temporal] Failed to read sample_info_excel: {e} {traceback.format_exc()}")
-        return {}
-
-    # Step 3: join → {sample_id: date}
+    # Step 3: join
     sample_date_map = {
         sid: case_date[cid]
         for sid, cid in sid_to_case.items()
@@ -739,7 +789,222 @@ def _build_sample_date_map(config):
     return sample_date_map
 
 
-def run_temporal_validation(workdir, result_dir, config, benign_samples, malignant_samples):
+def _load_borderline_features(workdir, borderline_samples, feature_names, date_map, cutoff):
+    """
+    Load per-sample feature vectors for borderline-category plasma samples whose
+    collection date falls in the validation period (>= cutoff).
+
+    Returns:
+        X_bl    : np.ndarray (n, len(feature_names)), methylation 0-1, NaN = not covered
+        sids_bl : list[str]  sample IDs
+        dates_bl: list[pd.Timestamp]
+    """
+    _empty = (np.empty((0, len(feature_names))), [], [])
+
+    if not borderline_samples:
+        logger.info("[temporal/borderline] No borderline samples in pipeline state")
+        return _empty
+
+    # Filter to validation period (>= cutoff); log those excluded
+    test_sids  = [s for s in borderline_samples if s in date_map and date_map[s] >= cutoff]
+    n_train_bl = sum(1 for s in borderline_samples if s in date_map and date_map[s] < cutoff)
+    n_nodate   = sum(1 for s in borderline_samples if s not in date_map)
+    if n_nodate:
+        logger.info(f"[temporal/borderline] {n_nodate} borderline sample(s) not in date map — excluded")
+    if n_train_bl:
+        logger.info(f"[temporal/borderline] {n_train_bl} borderline sample(s) in train period — excluded from validation")
+    if not test_sids:
+        logger.info("[temporal/borderline] No borderline samples fall in the validation period")
+        return _empty
+
+    # Parse feature_names ("chrom:pos") into (chrom, int_pos) lookup keys
+    feat_keys = []
+    for fn in feature_names:
+        parts = fn.rsplit(":", 1)
+        if len(parts) == 2:
+            try:
+                feat_keys.append((parts[0], int(parts[1])))
+            except ValueError:
+                feat_keys.append(None)
+        else:
+            feat_keys.append(None)
+
+    # Read each borderline bedGraph and extract values for panel features
+    X_rows, sids_out, dates_out = [], [], []
+    for sid in test_sids:
+        bg_path = os.path.join(workdir, f"{sid}_CpG.bedGraph")
+        if not os.path.exists(bg_path):
+            logger.warning(f"[temporal/borderline] bedGraph not found: {bg_path} — skipping {sid}")
+            continue
+        try:
+            bg = pd.read_csv(bg_path, sep="\t", header=None,
+                             names=["chrom", "start", "end", "meth_pct",
+                                    "meth_count", "unmeth_count"])
+            bg = bg[pd.to_numeric(bg["start"], errors="coerce").notna()].copy()
+            bg["start"] = bg["start"].astype(int)
+            site_map = {(row.chrom, row.start): float(row.meth_pct)
+                        for row in bg.itertuples(index=False)}
+        except Exception as e:
+            logger.warning(f"[temporal/borderline] Failed to read bedGraph for {sid}: {e}")
+            continue
+
+        row_vals = np.full(len(feature_names), np.nan)
+        for j, key in enumerate(feat_keys):
+            if key is not None and key in site_map:
+                row_vals[j] = site_map[key]
+        X_rows.append(row_vals)
+        sids_out.append(sid)
+        dates_out.append(date_map[sid])
+
+    if not X_rows:
+        return _empty
+
+    logger.info(
+        f"[temporal/borderline] Added {len(X_rows)} borderline sample(s) to validation benign: {sids_out}"
+    )
+    return np.array(X_rows), sids_out, dates_out
+
+
+def run_feature_selection_benchmark(workdir, result_dir, config, benign_samples, malignant_samples):
+    """
+    Ablation study: run 5-fold CV for each feature_selection_mode and compare AUC.
+
+    Modes tested: wilcoxon | lasso | rf | union
+    Reuses the existing feature matrix (feature_matrix.npz) — no re-alignment needed.
+    Saves result/feature_selection_benchmark.csv.
+
+    Returns: pd.DataFrame with columns
+        [mode, classifier, n_features_mean, auc, accuracy, sensitivity, specificity]
+    """
+    import copy
+
+    logger.info("━━ Feature Selection Benchmark (ablation) ━━")
+
+    X, y, sample_ids, feature_names, region_in_88 = _load_feature_matrix(
+        workdir, result_dir, benign_samples, malignant_samples, config
+    )
+    if X.shape[1] == 0:
+        logger.error("[benchmark] Feature matrix empty — aborting")
+        return pd.DataFrame()
+
+    ml_cfg_base  = (config or {}).get("ml", {})
+    exclude_set  = set(ml_cfg_base.get("exclude_samples", []))
+    if exclude_set:
+        keep = np.array([sid not in exclude_set for sid in sample_ids])
+        X, y = X[keep], y[keep]
+        sample_ids = [s for s, k in zip(sample_ids, keep) if k]
+
+    n_neg = int((y == 0).sum())
+    n_pos = int((y == 1).sum())
+    spw   = n_neg / n_pos if n_pos > 0 else 1.0
+
+    cv_folds = ml_cfg_base.get("cv_folds", 5)
+    if cv_folds <= 0:
+        splitter = LeaveOneOut()
+    else:
+        splitter = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=42)
+
+    modes = ["wilcoxon", "lasso", "rf", "union"]
+    all_rows = []
+
+    for mode in modes:
+        logger.info(f"  [benchmark] mode={mode} ...")
+        cfg_mode = copy.deepcopy(config)
+        cfg_mode.setdefault("ml", {})["feature_selection_mode"] = mode
+
+        classifiers = _build_classifiers(ml_cfg_base, spw)
+        clf_names   = list(classifiers.keys())
+        clf_y_true  = {n: [] for n in clf_names}
+        clf_y_prob  = {n: [] for n in clf_names}
+        clf_y_pred  = {n: [] for n in clf_names}
+        fold_n_feat = []
+
+        for train_idx, test_idx in splitter.split(X, y):
+            X_tr_raw, X_te_raw = X[train_idx], X[test_idx]
+            y_tr, y_te         = y[train_idx], y[test_idx]
+
+            sel_idx = _select_features_in_fold(X_tr_raw, y_tr, region_in_88, cfg_mode)
+            if len(sel_idx) == 0:
+                sel_idx = np.arange(X.shape[1])
+            fold_n_feat.append(len(sel_idx))
+
+            X_tr = X_tr_raw[:, sel_idx]
+            X_te = X_te_raw[:, sel_idx]
+            X_tr_imp, meds = _impute_fit(X_tr)
+            X_te_imp       = _impute_transform(X_te, meds)
+            scaler         = StandardScaler()
+            X_tr_sc        = scaler.fit_transform(X_tr_imp)
+            X_te_sc        = scaler.transform(X_te_imp)
+
+            for clf_name, clf in classifiers.items():
+                try:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        clf.fit(X_tr_sc, y_tr)
+                    prob = clf.predict_proba(X_te_sc)[:, 1]
+                    pred = clf.predict(X_te_sc)
+                    clf_y_true[clf_name].extend(y_te.tolist())
+                    clf_y_prob[clf_name].extend(prob.tolist())
+                    clf_y_pred[clf_name].extend(pred.tolist())
+                except Exception as exc:
+                    logger.debug(f"[benchmark] {mode}/{clf_name} fold error: {exc}")
+
+        n_feat_mean = int(round(np.mean(fold_n_feat))) if fold_n_feat else 0
+
+        for clf_name in clf_names:
+            y_true = np.array(clf_y_true[clf_name])
+            y_prob = np.array(clf_y_prob[clf_name])
+            y_pred = np.array(clf_y_pred[clf_name])
+            if len(y_true) == 0 or len(np.unique(y_true)) < 2:
+                continue
+            auc  = roc_auc_score(y_true, y_prob)
+            acc  = accuracy_score(y_true, y_pred)
+            cm   = confusion_matrix(y_true, y_pred, labels=[0, 1])
+            tn, fp, fn, tp = cm.ravel()
+            sens = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            spec = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+            all_rows.append({
+                "mode":            mode,
+                "classifier":      clf_name,
+                "n_features_mean": n_feat_mean,
+                "auc":             round(auc,  4),
+                "accuracy":        round(acc,  4),
+                "sensitivity":     round(sens, 4),
+                "specificity":     round(spec, 4),
+            })
+
+        mode_aucs = {r["classifier"]: r["auc"] for r in all_rows if r["mode"] == mode}
+        logger.info(
+            f"    {mode}: AUCs = " +
+            "  ".join(f"{clf}={v:.3f}" for clf, v in mode_aucs.items())
+        )
+
+    df = pd.DataFrame(all_rows)
+    out_path = os.path.join(result_dir, "feature_selection_benchmark.csv")
+    df.to_csv(out_path, index=False, encoding="utf-8")
+    logger.info(f"  [benchmark] Saved: {out_path}")
+
+    # Print summary table
+    logger.info("\n  Feature Selection Benchmark — Best AUC per mode")
+    logger.info("  ┌────────────┬──────────┬─────────────────┬────────┐")
+    logger.info("  │ Mode       │ Best clf │ n_features_mean │  AUC   │")
+    logger.info("  ├────────────┼──────────┼─────────────────┼────────┤")
+    for mode in modes:
+        mode_rows = df[df["mode"] == mode]
+        if mode_rows.empty:
+            continue
+        best = mode_rows.loc[mode_rows["auc"].idxmax()]
+        logger.info(
+            f"  │ {best['mode']:<10} │ {best['classifier']:<8} │"
+            f" {int(best['n_features_mean']):>15} │ {best['auc']:.3f}  │"
+        )
+    logger.info("  └────────────┴──────────┴─────────────────┴────────┘")
+
+    return df
+
+
+def run_temporal_validation(workdir, result_dir, config, benign_samples, malignant_samples,
+                            borderline_samples=None):
     """
     Supplementary temporal split validation (plasma mode only).
 
@@ -763,53 +1028,12 @@ def run_temporal_validation(workdir, result_dir, config, benign_samples, maligna
     if not date_map:
         return None, None
 
-    # 3. Load full feature matrix (no panel filter — use freq-selected features below)
+    # 3. Load full feature matrix (all features retained until feature selection below)
     X, y, sample_ids, feature_names, region_in_88 = _load_feature_matrix(
         workdir, result_dir, benign_samples, malignant_samples, config
     )
 
-    # 4. Restrict to top-N features from feature_selection_freq.csv.
-    #    If panel_cpg_blood_filtered.csv exists (written by Step 19 external_validate),
-    #    additionally exclude blood-contaminated sites (blood_mean_beta >= 0.10).
-    #    These were selected per LOO fold on training data in run_classifiers,
-    #    so they carry no information from the temporal test set.
-    freq_path = os.path.join(result_dir, "feature_selection_freq.csv")
-    if not os.path.exists(freq_path):
-        logger.warning(f"[temporal] feature_selection_freq.csv not found — run classify first: {freq_path}")
-        return None, None
-    freq_df = pd.read_csv(freq_path)
-    top_features = set(freq_df["feature"].iloc[:TOP_N].tolist())
-
-    # Apply blood-filter whitelist if available (Step 19 must have run first)
-    blood_filtered_path = os.path.join(result_dir, "panel_cpg_blood_filtered.csv")
-    if os.path.exists(blood_filtered_path):
-        blood_panel_df = pd.read_csv(blood_filtered_path)
-        blood_whitelist = set(blood_panel_df["feature"].tolist())
-        n_before = len(top_features)
-        top_features = top_features & blood_whitelist
-        n_removed = n_before - len(top_features)
-        if n_removed:
-            logger.info(
-                f"[temporal] Blood-filter applied: {n_removed} blood-contaminated site(s) "
-                f"removed from top features → {len(top_features)} features retained"
-            )
-        else:
-            logger.info("[temporal] Blood-filter: no top features were blood-contaminated")
-    else:
-        logger.debug(
-            "[temporal] panel_cpg_blood_filtered.csv not found — "
-            "run --step external_validate to enable blood-site exclusion"
-        )
-
-    top_idx = [i for i, fn in enumerate(feature_names) if fn in top_features]
-    if not top_idx:
-        logger.warning("[temporal] None of the top features found in feature matrix — skipping")
-        return None, None
-    X = X[:, top_idx]
-    feature_names = [feature_names[i] for i in top_idx]
-    logger.info(f"[temporal] Using top {len(top_idx)} features from feature_selection_freq.csv")
-
-    # 5. Apply exclude_samples (consistent with run_classifiers)
+    # 4. Apply exclude_samples (consistent with run_classifiers)
     ml_cfg = (config or {}).get("ml", {})
     exclude_set = set(ml_cfg.get("exclude_samples", []))
     if exclude_set:
@@ -818,7 +1042,8 @@ def run_temporal_validation(workdir, result_dir, config, benign_samples, maligna
         y          = y[[i for i, k in enumerate(keep_mask) if k]]
         sample_ids = [sid for sid, k in zip(sample_ids, keep_mask) if k]
 
-    # 6. Partition by collection date — no test-set info leaks into train
+    # 5. Partition by collection date — must happen BEFORE feature selection so that
+    #    validation samples never influence the feature set (true temporal leakage-free split)
     train_idx, test_idx = [], []
     no_date_count = 0
     for i, sid in enumerate(sample_ids):
@@ -842,8 +1067,125 @@ def run_temporal_validation(workdir, result_dir, config, benign_samples, maligna
         logger.warning("[temporal] No validation samples — skipping")
         return None, None
 
+    # 6. Feature selection — two modes controlled by temporal_validate.reselect_features:
+    #
+    #   reselect_features = true  (default, leakage-free):
+    #     Run Wilcoxon + LASSO∪RF on training-period samples only.
+    #     Validation samples are never seen during feature selection.
+    #
+    #   reselect_features = false  (legacy, minor leakage):
+    #     Use top-N features from feature_selection_freq.csv (computed by classify step on
+    #     all samples including the validation-period ones — introduces minor temporal leakage).
+    #
+    # Blood-contaminated sites are excluded in both modes when panel_cpg_blood_filtered.csv exists.
+
+    # Build blood whitelist (used by both paths below)
+    blood_whitelist = None
+    blood_filtered_path = os.path.join(result_dir, "panel_cpg_blood_filtered.csv")
+    if os.path.exists(blood_filtered_path):
+        blood_panel_df = pd.read_csv(blood_filtered_path)
+        blood_whitelist = set(blood_panel_df["feature"].tolist())
+    else:
+        logger.debug(
+            "[temporal] panel_cpg_blood_filtered.csv not found — "
+            "run --step external_validate to enable blood-site exclusion"
+        )
+
+    reselect = tv_cfg.get("reselect_features", True)
+
+    if reselect:
+        # Leakage-free: select features from training-period samples only.
+        # Disable the internal max_features_clf cap so _select_features_in_fold returns
+        # the full ranked candidate set; we apply the cap ourselves after blood filtering,
+        # ensuring max_feat clean features rather than fewer due to filter shrinkage.
+        train_idx_arr = np.array(train_idx)
+        max_feat = ml_cfg.get("max_features_clf", 20)
+        _cfg_no_cap = {**config, "ml": {**ml_cfg, "max_features_clf": 0}}
+        sel_idx = list(_select_features_in_fold(
+            X[train_idx_arr], y[train_idx_arr], region_in_88, _cfg_no_cap
+        ))
+        if not sel_idx:
+            sel_idx = list(range(X.shape[1]))
+        # Blood filter: remove contaminated sites, then trim to max_feat from the clean set.
+        if blood_whitelist is not None:
+            n_before = len(sel_idx)
+            sel_idx  = [i for i in sel_idx if feature_names[i] in blood_whitelist]
+            n_removed = n_before - len(sel_idx)
+            if n_removed:
+                logger.info(
+                    f"[temporal] Blood-filter: {n_removed} contaminated site(s) removed "
+                    f"→ {len(sel_idx)} clean features remaining"
+                )
+        if max_feat > 0 and len(sel_idx) > max_feat:
+            sel_idx = sel_idx[:max_feat]
+        if not sel_idx:
+            logger.warning("[temporal] No features remain after selection — skipping")
+            return None, None
+        X = X[:, np.array(sel_idx)]
+        feature_names = [feature_names[i] for i in sel_idx]
+        logger.info(
+            f"[temporal] Leakage-free feature selection on training data: "
+            f"{len(sel_idx)} features selected"
+        )
+    else:
+        # Legacy: top-N from classify-step frequency table (minor temporal leakage)
+        freq_path = os.path.join(result_dir, "feature_selection_freq.csv")
+        if not os.path.exists(freq_path):
+            logger.warning(
+                f"[temporal] feature_selection_freq.csv not found — run classify first: {freq_path}"
+            )
+            return None, None
+        freq_df = pd.read_csv(freq_path)
+        top_features = set(freq_df["feature"].iloc[:TOP_N].tolist())
+        if blood_whitelist is not None:
+            n_before = len(top_features)
+            top_features = top_features & blood_whitelist
+            n_removed = n_before - len(top_features)
+            if n_removed:
+                logger.info(
+                    f"[temporal] Blood-filter applied: {n_removed} site(s) removed "
+                    f"from top features → {len(top_features)} retained"
+                )
+        top_idx = [i for i, fn in enumerate(feature_names) if fn in top_features]
+        if not top_idx:
+            logger.warning("[temporal] None of the top features found in feature matrix — skipping")
+            return None, None
+        X = X[:, top_idx]
+        feature_names = [feature_names[i] for i in top_idx]
+        logger.info(
+            f"[temporal] Using top {len(top_idx)} features from feature_selection_freq.csv "
+            f"(NOTE: computed on all samples — minor temporal leakage)"
+        )
+
     X_train, y_train = X[train_idx], y[train_idx]
     X_test,  y_test  = X[test_idx],  y[test_idx]
+    val_sample_ids  = [sample_ids[i] for i in test_idx]
+    val_true_labels = ["malignant" if y[i] == 1 else "benign" for i in test_idx]
+    test_dates      = [date_map.get(sample_ids[i]) for i in test_idx]
+
+    # 6b. Optionally augment validation set with borderline samples (treated as benign / y=0).
+    #     Borderline samples are NOT in the feature matrix; their bedGraph files are read on the fly.
+    #     They are never added to the train set — only to the validation set.
+    if tv_cfg.get("borderline_as_benign", False):
+        X_bl, sids_bl, dates_bl = _load_borderline_features(
+            workdir, borderline_samples or [], feature_names, date_map, CUTOFF
+        )
+        if len(sids_bl) > 0:
+            if exclude_set:
+                keep_bl  = [i for i, s in enumerate(sids_bl) if s not in exclude_set]
+                X_bl     = X_bl[keep_bl]
+                sids_bl  = [sids_bl[i]  for i in keep_bl]
+                dates_bl = [dates_bl[i] for i in keep_bl]
+            if len(sids_bl) > 0:
+                X_test          = np.vstack([X_test, X_bl])
+                y_test          = np.concatenate([y_test, np.zeros(len(sids_bl), dtype=int)])
+                val_sample_ids  = val_sample_ids  + sids_bl
+                val_true_labels = val_true_labels + ["borderline"] * len(sids_bl)
+                test_dates      = test_dates      + dates_bl
+                logger.info(
+                    f"[temporal] borderline_as_benign: {len(sids_bl)} borderline sample(s) "
+                    f"added to validation as benign (y=0): {sids_bl}"
+                )
 
     # 7. Impute then scale — both fitted on train only to prevent leakage
     X_train_imp, col_medians = _impute_fit(X_train)
@@ -904,7 +1246,6 @@ def run_temporal_validation(workdir, result_dir, config, benign_samples, maligna
 
     # 8. Train and evaluate
     results = {}
-    test_dates = [date_map.get(sample_ids[i]) for i in test_idx]
 
     for clf_name, clf in classifiers.items():
         clf.fit(X_train_sc, y_train)
@@ -939,13 +1280,12 @@ def run_temporal_validation(workdir, result_dir, config, benign_samples, maligna
         }
 
     # 9. Save predictions
-    val_sample_ids = [sample_ids[i] for i in test_idx]
     pred_rows = []
     for clf_name, res in results.items():
         for i, sid in enumerate(val_sample_ids):
             pred_rows.append({
                 "sample_id":       sid,
-                "true_label":      "malignant" if res["y_true"][i] == 1 else "benign",
+                "true_label":      val_true_labels[i],
                 "classifier":      clf_name,
                 "prob_malignant":  round(float(res["y_prob"][i]), 4),
                 "predicted":       "malignant" if res["y_pred"][i] == 1 else "benign",
@@ -977,3 +1317,151 @@ def run_temporal_validation(workdir, result_dir, config, benign_samples, maligna
     logger.info(f"[temporal] Summary saved: {summary_path}")
 
     return results, summary_df
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Step 15c: CA-125 vs classifier AUC comparison
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run_ca125_comparison(workdir, result_dir, config, benign_samples, malignant_samples):
+    """
+    Compare CA-125 AUC with classifier AUCs on the same matched sample subset.
+
+    Reads CA-125 values from the sample info Excel (column 'ca125' / 'CA-125').
+    If no CA-125 data is available, logs a warning and returns (None, None).
+
+    Outputs
+    -------
+    result/ca125_comparison.csv  — AUC ± 95% CI for CA-125 and each classifier
+                                   (evaluated on the CA-125-available subset)
+    result/ca125_values.csv      — per-sample CA-125 value + true label
+    """
+    from methylation.sample_grouping import load_ca125_map
+
+    mode_cfg    = (config or {}).get("plasma", {})
+    excel_sheet = mode_cfg.get("excel_sheet", "plasma")
+
+    # ca125_map is keyed by normalised case_id (may be numeric like "640849")
+    ca125_map = load_ca125_map(category=excel_sheet)
+    if not ca125_map:
+        logger.warning("[ca125] No CA-125 values found in Excel — skipping CA-125 comparison. "
+                       "Add a 'ca125' column to the sample info Excel to enable this step.")
+        return None, None
+
+    pred_path = os.path.join(result_dir, "classifier_predictions.csv")
+    if not os.path.exists(pred_path):
+        logger.warning("[ca125] classifier_predictions.csv not found — run --step classify first.")
+        return None, None
+
+    pred_df = pd.read_csv(pred_path, encoding="utf-8")
+    clfs = [c for c in ["LR", "SVM", "RF", "XGB", "LGBM"] if c in pred_df["classifier"].values]
+    if not clfs:
+        logger.warning("[ca125] No classifiers found in classifier_predictions.csv")
+        return None, None
+
+    # Two-step join: sample_id (fq_R1 prefix) → case_id → ca125 value
+    # Same join used by _build_sample_date_map for temporal validation.
+    sid_to_case = _build_sid_to_case_map(config)
+    logger.info(f"[ca125] sid→case map: {len(sid_to_case)} entries; "
+                f"ca125 map: {len(ca125_map)} entries")
+
+    # Reference sample order from the first classifier
+    ref = pred_df[pred_df["classifier"] == clfs[0]].sort_values("sample_id").reset_index(drop=True)
+    sample_ids = ref["sample_id"].tolist()
+    y_true_all = (ref["true_label"] == "malignant").astype(int).values
+
+    def _lookup_ca125(sid):
+        case_id = sid_to_case.get(sid) or sid   # fall back to sid itself if no mapping
+        return ca125_map.get(_norm_id(case_id), np.nan)
+
+    ca125_vals = np.array([_lookup_ca125(sid) for sid in sample_ids])
+    has_ca125  = ~np.isnan(ca125_vals)
+    n_total    = len(sample_ids)
+    n_ca125    = int(has_ca125.sum())
+
+    if n_ca125 == 0:
+        logger.warning(
+            "[ca125] No CA-125 values matched any classifier sample ID.\n"
+            f"  sample_ids (first 5): {sample_ids[:5]}\n"
+            f"  sid_to_case (first 5): {dict(list(sid_to_case.items())[:5])}\n"
+            f"  ca125_map keys (first 5): {list(ca125_map.keys())[:5]}\n"
+            "  Check that 'case_id' in the Excel links fq_R1 prefixes to the ca125 column."
+        )
+        return None, None
+
+    logger.info(f"[ca125] {n_ca125}/{n_total} samples have CA-125 data")
+    sub_idx   = np.where(has_ca125)[0]
+    y_sub     = y_true_all[sub_idx]
+    ca125_sub = ca125_vals[sub_idx]
+
+    if len(np.unique(y_sub)) < 2:
+        logger.warning("[ca125] CA-125 subset contains only one class — cannot compute AUC")
+        return None, None
+
+    rows = []
+
+    # CA-125 AUC with bootstrap CI
+    ca125_auc  = roc_auc_score(y_sub, ca125_sub)
+    ca125_pred = (ca125_sub >= float(np.median(ca125_sub))).astype(int)
+    ci_ca125   = _bootstrap_ci(y_sub, ca125_sub, ca125_pred)
+    auc_lo, auc_hi = ci_ca125["auc"]
+    rows.append({
+        "method":          "CA-125",
+        "n_total":         n_total,
+        "n_ca125_subset":  n_ca125,
+        "auc":             round(ca125_auc, 4),
+        "auc_ci95_lo":     round(auc_lo, 4),
+        "auc_ci95_hi":     round(auc_hi, 4),
+    })
+
+    # Classifier AUCs re-computed on the same subset for fair comparison
+    sub_sids = {sample_ids[i] for i in sub_idx}
+    for clf in clfs:
+        clf_df = (pred_df[pred_df["classifier"] == clf]
+                  .sort_values("sample_id")
+                  .reset_index(drop=True))
+        clf_df = clf_df[clf_df["sample_id"].isin(sub_sids)].set_index("sample_id")
+        sid_order = [sample_ids[i] for i in sub_idx]
+        clf_df = clf_df.reindex(sid_order)
+        probs  = clf_df["prob_malignant"].astype(float).values
+        preds  = (probs >= 0.5).astype(int)
+        valid  = ~np.isnan(probs)
+        if valid.sum() < 5 or len(np.unique(y_sub[valid])) < 2:
+            continue
+        clf_auc = roc_auc_score(y_sub[valid], probs[valid])
+        ci_clf  = _bootstrap_ci(y_sub[valid], probs[valid], preds[valid])
+        a_lo, a_hi = ci_clf["auc"]
+        rows.append({
+            "method":          clf,
+            "n_total":         n_total,
+            "n_ca125_subset":  int(valid.sum()),
+            "auc":             round(clf_auc, 4),
+            "auc_ci95_lo":     round(a_lo, 4),
+            "auc_ci95_hi":     round(a_hi, 4),
+        })
+
+    df_out = pd.DataFrame(rows)
+    comp_path = os.path.join(result_dir, "ca125_comparison.csv")
+    df_out.to_csv(comp_path, index=False, encoding="utf-8")
+    logger.info(f"[ca125] Comparison saved: {comp_path}")
+
+    df_vals = pd.DataFrame({
+        "sample_id":  [sample_ids[i] for i in sub_idx],
+        "true_label": ["malignant" if y == 1 else "benign" for y in y_sub],
+        "ca125":      ca125_sub,
+    })
+    vals_path = os.path.join(result_dir, "ca125_values.csv")
+    df_vals.to_csv(vals_path, index=False, encoding="utf-8")
+    logger.info(f"[ca125] Per-sample values saved: {vals_path}")
+
+    logger.info("\n  ┌────────────────────────────────────────────────────────┐")
+    logger.info(f"  │  CA-125 vs Classifier AUC  (n_ca125={n_ca125}, 95% CI)         │")
+    logger.info("  ├──────────┬─────────────────────────────────────────────┤")
+    for _, r in df_out.iterrows():
+        logger.info(
+            f"  │  {r['method']:<8} │  AUC {r['auc']:.3f}"
+            f"  ({r['auc_ci95_lo']:.3f}–{r['auc_ci95_hi']:.3f})                    │"
+        )
+    logger.info("  └──────────┴─────────────────────────────────────────────┘")
+
+    return df_out, df_vals

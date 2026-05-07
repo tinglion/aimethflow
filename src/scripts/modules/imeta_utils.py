@@ -165,6 +165,131 @@ def _delong_bootstrap(clf_pred_path, out_csv_path, n_boot=2000):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# DeLong 1988 — formal variance estimation (fastDeLong algorithm)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _fastdelong_cov(y_true, score_matrix):
+    """
+    fastDeLong covariance matrix for K classifiers.
+
+    y_true      : 1-D array of 0/1 labels, length n
+    score_matrix: (K, n) array — row k is classifier k's probability scores
+
+    Returns
+    -------
+    aucs : (K,) AUC for each classifier
+    cov  : (K, K) covariance matrix of the K AUC estimates
+    """
+    pos_idx = np.where(y_true == 1)[0]
+    neg_idx = np.where(y_true == 0)[0]
+    n_pos, n_neg = len(pos_idx), len(neg_idx)
+
+    K = score_matrix.shape[0]
+    V10 = np.empty((K, n_pos))   # placement values for positives
+    V01 = np.empty((K, n_neg))   # placement values for negatives
+
+    for k in range(K):
+        ps = score_matrix[k, pos_idx]   # (n_pos,)
+        ns = score_matrix[k, neg_idx]   # (n_neg,)
+        # V10[k, i]: fraction of negatives strictly below ps[i] + 0.5 × ties
+        cmp10 = ns[np.newaxis, :] < ps[:, np.newaxis]    # (n_pos, n_neg)
+        tie10 = ns[np.newaxis, :] == ps[:, np.newaxis]
+        V10[k] = cmp10.mean(axis=1) + 0.5 * tie10.mean(axis=1)
+        # V01[k, j]: fraction of positives strictly above ns[j] + 0.5 × ties
+        cmp01 = ps[np.newaxis, :] > ns[:, np.newaxis]    # (n_neg, n_pos)
+        tie01 = ps[np.newaxis, :] == ns[:, np.newaxis]
+        V01[k] = cmp01.mean(axis=1) + 0.5 * tie01.mean(axis=1)
+
+    aucs = V10.mean(axis=1)   # AUC_k = mean placement value
+
+    # Structural-component covariance (DeLong 1988, eq. 7)
+    # Cov(AUC_a, AUC_b) = Cov_sample(V10_a, V10_b)/n_pos + Cov_sample(V01_a, V01_b)/n_neg
+    S10 = np.cov(V10, ddof=1) if n_pos > 1 else np.zeros((K, K))  # (K, K)
+    S01 = np.cov(V01, ddof=1) if n_neg > 1 else np.zeros((K, K))  # (K, K)
+    # np.cov returns scalar when K==1; force (1,1) shape
+    if K == 1:
+        S10 = np.atleast_2d(S10)
+        S01 = np.atleast_2d(S01)
+    cov = S10 / n_pos + S01 / n_neg
+
+    return aucs, cov
+
+
+def _delong_formal(clf_pred_path, out_csv_path):
+    """
+    Formal pairwise AUC comparison using the fastDeLong variance estimator.
+    Produces a normal Z-test (two-sided) for each classifier pair.
+    Saves result/imeta_delong_formal.csv.
+    """
+    import pandas as pd
+    from scipy import stats
+
+    df = _read_csv(clf_pred_path)
+    if df is None:
+        return None
+
+    # Build (K, n) score matrix — requires identical sample order per classifier
+    ref_clf = None
+    ref_ids = None
+    data = {}
+    for clf in _CLF_ORDER:
+        sub = df[df["classifier"] == clf].copy()
+        if sub.empty:
+            continue
+        sub = sub.sort_values("sample_id").reset_index(drop=True)
+        if ref_ids is None:
+            ref_ids = sub["sample_id"].values
+            ref_clf = clf
+        elif not np.array_equal(sub["sample_id"].values, ref_ids):
+            logger.warning(
+                "[delong] sample_id mismatch between %s and %s — skipping DeLong", ref_clf, clf
+            )
+            return None
+        data[clf] = {
+            "y_true": (sub["true_label"] == "malignant").astype(int).values,
+            "y_prob": sub["prob_malignant"].astype(float).values,
+        }
+
+    clfs = list(data.keys())
+    if len(clfs) < 2:
+        return None
+
+    y_true = data[clfs[0]]["y_true"]
+    score_matrix = np.vstack([data[c]["y_prob"] for c in clfs])   # (K, n)
+
+    aucs, cov = _fastdelong_cov(y_true, score_matrix)
+
+    rows = []
+    for i, ca in enumerate(clfs):
+        for j in range(i + 1, len(clfs)):
+            cb  = clfs[j]
+            d   = aucs[i] - aucs[j]
+            var = cov[i, i] + cov[j, j] - 2 * cov[i, j]
+            se  = np.sqrt(max(var, 0.0))
+            z   = d / se if se > 0 else float("nan")
+            p   = float(2 * stats.norm.sf(abs(z))) if np.isfinite(z) else float("nan")
+            rows.append({
+                "classifier_A": ca,
+                "classifier_B": cb,
+                "auc_A":        round(float(aucs[i]), 4),
+                "auc_B":        round(float(aucs[j]), 4),
+                "delta_auc":    round(float(d),  4),
+                "se_delta":     round(float(se), 6),
+                "z_stat":       round(float(z),  4) if np.isfinite(z) else "NA",
+                "p_delong":     round(float(p),  4) if np.isfinite(p) else "NA",
+                "significant":  "Yes" if (np.isfinite(p) and p < 0.05) else "No",
+            })
+
+    df_out = pd.DataFrame(rows)
+    df_out.to_csv(out_csv_path, index=False, encoding="utf-8")
+    logger.info(
+        "[delong] %d pairs tested; formal DeLong saved → %s",
+        len(rows), os.path.basename(out_csv_path),
+    )
+    return df_out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Figure 4B: Classifier metric comparison bar chart
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -448,15 +573,24 @@ def generate_imeta_figures(result_dir, report_dir):
         except Exception as exc:
             logger.warning("[imeta] %s failed: %s", key, exc)
 
-    # DeLong bootstrap table
+    # Bootstrap pairwise AUC table
     delong_path = os.path.join(result_dir, "imeta_delong_test.csv")
     try:
         df_dl = _delong_bootstrap(clf_pred, delong_path)
         if df_dl is not None:
             out["delong_csv"] = delong_path
-            logger.info("[imeta] delong table → %s", os.path.basename(delong_path))
+            logger.info("[imeta] bootstrap AUC table → %s", os.path.basename(delong_path))
     except Exception as exc:
-        logger.warning("[imeta] delong failed: %s", exc)
+        logger.warning("[imeta] bootstrap AUC table failed: %s", exc)
+
+    # Formal DeLong test (fastDeLong variance estimator)
+    delong_formal_path = os.path.join(result_dir, "imeta_delong_formal.csv")
+    try:
+        df_dl_formal = _delong_formal(clf_pred, delong_formal_path)
+        if df_dl_formal is not None:
+            out["delong_formal_csv"] = delong_formal_path
+    except Exception as exc:
+        logger.warning("[imeta] formal DeLong test failed: %s", exc)
 
     return out
 
@@ -488,25 +622,46 @@ def build_imeta_section(result_dir, imgs_dir):
             f'</figcaption></figure>'
         )
 
-    # DeLong table HTML
+    import pandas as pd
+
+    def _auc_table_html(df_tbl, mode):
+        """Build HTML for either bootstrap or formal DeLong table."""
+        rows = ""
+        for _, r in df_tbl.iterrows():
+            sig = ("<strong style='color:#c0392b'>Yes ✱</strong>"
+                   if str(r.get("significant", "No")) == "Yes" else
+                   "<span style='color:#aaa'>No</span>")
+            if mode == "bootstrap":
+                p_val = f"{float(r['p_bootstrap']):.4f}"
+                ci    = f"{float(r['ci95_lo']):+.4f} to {float(r['ci95_hi']):+.4f}"
+                rows += (
+                    f"<tr><td>{r['classifier_A']} vs {r['classifier_B']}</td>"
+                    f"<td>{float(r['auc_A']):.4f}</td><td>{float(r['auc_B']):.4f}</td>"
+                    f"<td>{float(r['delta_auc']):+.4f}</td>"
+                    f"<td>{ci}</td>"
+                    f"<td>{p_val}</td><td>{sig}</td></tr>\n"
+                )
+            else:
+                z_s  = r['z_stat']
+                p_s  = r['p_delong']
+                z_fmt = f"{float(z_s):.3f}" if z_s != "NA" else "NA"
+                p_fmt = f"{float(p_s):.4f}" if p_s != "NA" else "NA"
+                rows += (
+                    f"<tr><td>{r['classifier_A']} vs {r['classifier_B']}</td>"
+                    f"<td>{float(r['auc_A']):.4f}</td><td>{float(r['auc_B']):.4f}</td>"
+                    f"<td>{float(r['delta_auc']):+.4f}</td>"
+                    f"<td>{float(r['se_delta']):.5f}</td>"
+                    f"<td>{z_fmt}</td><td>{p_fmt}</td><td>{sig}</td></tr>\n"
+                )
+        return rows
+
+    # Bootstrap table
     delong_html = ""
     dp = fig_paths.get("delong_csv")
     if dp and os.path.exists(dp):
         try:
-            import pandas as pd
             dl = pd.read_csv(dp, encoding="utf-8")
-            rows = ""
-            for _, r in dl.iterrows():
-                sig = ("<strong style='color:#c0392b'>Yes ✱</strong>"
-                       if r["significant"] == "Yes" else
-                       "<span style='color:#aaa'>No</span>")
-                rows += (
-                    f"<tr><td>{r['classifier_A']} vs {r['classifier_B']}</td>"
-                    f"<td>{r['auc_A']:.4f}</td><td>{r['auc_B']:.4f}</td>"
-                    f"<td>{r['delta_auc']:+.4f}</td>"
-                    f"<td>{r['ci95_lo']:+.4f} to {r['ci95_hi']:+.4f}</td>"
-                    f"<td>{r['p_bootstrap']:.4f}</td><td>{sig}</td></tr>\n"
-                )
+            rows = _auc_table_html(dl, "bootstrap")
             delong_html = f"""
 <h3 style="margin-top:18px">Bootstrap Pairwise AUC Comparison (2,000 resamples)</h3>
 <table style="font-size:.88em">
@@ -519,7 +674,30 @@ def build_imeta_section(result_dir, imgs_dir):
   ✱ <em>p</em> &lt; 0.05. Full table: <code>imeta_delong_test.csv</code>
 </p>"""
         except Exception as exc:
-            logger.warning("[imeta] delong HTML: %s", exc)
+            logger.warning("[imeta] bootstrap HTML: %s", exc)
+
+    # Formal DeLong table
+    delong_formal_html = ""
+    dfp = fig_paths.get("delong_formal_csv")
+    if dfp and os.path.exists(dfp):
+        try:
+            dl_f = pd.read_csv(dfp, encoding="utf-8")
+            rows_f = _auc_table_html(dl_f, "formal")
+            delong_formal_html = f"""
+<h3 style="margin-top:18px">Formal DeLong Test — fastDeLong Variance Estimator</h3>
+<table style="font-size:.88em">
+  <tr><th>Comparison</th><th>AUC A</th><th>AUC B</th><th>Δ AUC</th>
+      <th>SE(Δ AUC)</th><th><em>Z</em></th>
+      <th><em>p</em> (DeLong)</th><th>Significant</th></tr>
+  {rows_f}
+</table>
+<p style="color:#666;font-size:.82em;margin-top:4px">
+  Two-sided Z-test using the structural-component variance estimator of DeLong <em>et al.</em> (1988).
+  SE estimated from placement-value covariance; correlated AUCs handled jointly.
+  ✱ <em>p</em> &lt; 0.05. Full table: <code>imeta_delong_formal.csv</code>
+</p>"""
+        except Exception as exc:
+            logger.warning("[imeta] formal DeLong HTML: %s", exc)
 
     return f"""
 <!-- iMeta Publication Figures — auto-generated by Step 20 -->
@@ -536,6 +714,7 @@ def build_imeta_section(result_dir, imgs_dir):
     "ROC curves for LR, SVM, RF, XGB, and LGBM evaluated via leave-one-out cross-validation "
     "(n=116: 56 benign, 60 malignant). AUC and 95% CIs from 1,000-resample bootstrap.")}
 {delong_html}
+{delong_formal_html}
 
 <h3 style="margin-top:22px">Figure 4B — Classifier Performance Comparison</h3>
 {_img_block("fig4_clf", "Classifier Comparison", "Figure 4B",
