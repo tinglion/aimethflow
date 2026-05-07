@@ -52,6 +52,25 @@
       background: #adb5bd
     }
 
+    .module-row td {
+      background: #eef2f7;
+      font-weight: 600;
+      font-size: .8rem;
+      color: #495057;
+      padding: .25rem .5rem;
+      border-top: 2px solid #ced4da;
+    }
+
+    .step-row td {
+      font-size: .85rem;
+    }
+
+    .step-key {
+      color: #6c757d;
+      font-family: monospace;
+      font-size: .78rem;
+    }
+
     textarea.toml {
       font-family: monospace;
       font-size: .82rem;
@@ -194,15 +213,23 @@
       const r = await fetch(url).then(r => r.json());
       if (r.workdir) document.getElementById('nav-workdir').textContent = r.workdir;
       const tbody = document.getElementById('step-tbody');
-      tbody.innerHTML = r.steps.map(s => {
+      let html = '';
+      let lastModule = null;
+      for (const s of r.steps) {
+        if (s.module && s.module !== lastModule) {
+          html += `<tr class="module-row"><td colspan="3">${s.module}</td></tr>`;
+          lastModule = s.module;
+        }
         const cls = STATUS_CLASS[s.status] || 'badge-pending';
         const lbl = STATUS_LABEL[s.status] || s.status;
-        return `<tr class="step-row">
-      <td>${s.label}</td>
+        const safeLabel = s.label.replace(/'/g, "\\'");
+        html += `<tr class="step-row">
+      <td>${s.label} <span class="step-key">[${s.key}]</span></td>
       <td><span class="badge ${cls}">${lbl}</span></td>
-      <td><button class="btn btn-sm btn-outline-primary py-0" onclick="runStep('${s.key}','${s.label}')">▶</button></td>
+      <td><button class="btn btn-sm btn-outline-primary py-0" onclick="runStep('${s.key}','${safeLabel}')">▶</button></td>
     </tr>`;
-      }).join('');
+      }
+      tbody.innerHTML = html;
     }
 
     async function runStep(key, label) {

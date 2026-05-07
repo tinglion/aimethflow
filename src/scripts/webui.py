@@ -47,26 +47,35 @@ app = FastAPI(title="AIMethFlow")
 page_router = APIRouter(prefix="/meth")  # HTML pages
 api_router = APIRouter(prefix="/methapi")  # REST / SSE
 
+# Pipeline step list — must stay in sync with PIPELINE_STEPS in run_analysis.py.
+# (We don't import run_analysis here because it has top-level side effects:
+#  load_config() reads config.toml and setup_logger() creates a log file.)
+# Each entry is (key, "Step <num>  <description>", "<module>").
 STEPS = [
-    ("preprocess",        "Step 4    Preprocessing (fastp)"),
-    ("align",             "Step 5    Alignment (bwameth)"),
-    ("dedup",             "Step 6    Deduplication (umi_tools)"),
-    ("target",            "Step 7    Target Region Filter"),
-    ("mbias",             "Step 8    M-bias Check"),
-    ("extract",           "Step 9    Methylation Extraction"),
-    ("filter",            "Step 10   Filtering"),
-    ("diff",              "Step 11   Differential Analysis"),
-    ("visualize",         "Step 12   Visualization"),
-    ("feature_select",    "Step 13   Feature Selection"),
-    ("outlier_detect",    "Step 14   Outlier Detection"),
-    ("classify",          "Step 15   Diagnostic Classification"),
-    ("subtype_classify",  "Step 16   Subtype Classification"),
-    ("temporal_validate", "Step 17   Temporal Validation (plasma)"),
-    ("annotate",          "Step 18   Site Annotation"),
-    ("external_validate", "Step 19   External Validation"),
-    ("report",            "Step 20   Report Generation"),
+    ("data_check",        "Step 1   Validate config",                 "A · Setup"),
+    ("ref_index",         "Step 2   bwameth hg38 index (one-time)",   "A · Setup"),
+    ("panel_derive",      "Step 3   Derive panel BED",                "A · Setup"),
+    ("preprocess",        "Step 4   Preprocessing (fastp + UMI)",     "B · Preprocessing"),
+    ("align",             "Step 5   Alignment (bwameth)",             "B · Preprocessing"),
+    ("dedup",             "Step 6   Deduplication (umi_tools)",       "B · Preprocessing"),
+    ("target",            "Step 7   On-target filter",                "B · Preprocessing"),
+    ("mbias",             "Step 8   M-bias check",                    "B · Preprocessing"),
+    ("extract",           "Step 9   Methylation extraction",          "C · Methylation"),
+    ("filter",            "Step 10  Depth + repeat filter",           "C · Methylation"),
+    ("diff",              "Step 11  Differential methylation",        "C · Methylation"),
+    ("visualize",         "Step 12  Density / scatter / heatmap",     "C · Methylation"),
+    ("outlier_detect",    "Step 13  Sample outlier detection",        "D · QC + Features"),
+    ("feature_select",    "Step 14  Feature selection (LASSO + RF)",  "D · QC + Features"),
+    ("fs_benchmark",      "Step 14b Feature selection ablation",      "D · QC + Features"),
+    ("classify",          "Step 15  Diagnostic classification",       "E · Classification"),
+    ("ca125_compare",     "Step 15c CA-125 vs cfDNA AUC",             "E · Classification"),
+    ("subtype_classify",  "Step 16  Subtype classification",          "E · Classification"),
+    ("temporal_validate", "Step 17  Temporal split validation",       "E · Classification"),
+    ("annotate",          "Step 18  Site annotation",                 "E · Classification"),
+    ("external_validate", "Step 19  External validation",             "F · Output"),
+    ("report",            "Step 20  HTML + JSON report",              "F · Output"),
 ]
-_STEP_KEYS = {k for k, _ in STEPS}
+_STEP_KEYS = {s[0] for s in STEPS}
 
 # job_id -> {proc, queue, step, status, workdir}
 _jobs: dict[str, dict] = {}
@@ -159,14 +168,14 @@ def get_steps(workdir: Optional[str] = None):
     )
 
     rows = []
-    for key, label in STEPS:
+    for key, label, module in STEPS:
         if key == running_step:
             status = "running"
         elif key in completed:
             status = "done"
         else:
             status = "pending"
-        rows.append({"key": key, "label": label, "status": status})
+        rows.append({"key": key, "label": label, "module": module, "status": status})
     return {"steps": rows, "workdir": str(wd) if wd else None}
 
 
