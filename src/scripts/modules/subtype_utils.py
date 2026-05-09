@@ -695,13 +695,14 @@ def _build_sample_date_map():
         except (ValueError, OverflowError):
             return s
 
-    exp_path = None
-    for candidate in ["data/plasma_exp.xlsx", "plasma_exp.xlsx"]:
-        if os.path.exists(candidate):
-            exp_path = candidate
-            break
-    if exp_path is None:
-        logger.warning("[subtype-temporal] plasma_exp.xlsx not found — skipping")
+    from methylation.sample_grouping import _resolve_excel
+    exp_filename = _cfg.get("data", {}).get("plasma_exp_excel", "plasma_exp.xlsx")
+    exp_path = _resolve_excel(exp_filename) if exp_filename else None
+    if not exp_path or not os.path.exists(exp_path):
+        logger.warning(
+            f"[subtype-temporal] plasma collection-date Excel '{exp_filename}' not found "
+            f"(searched data/{exp_filename}, {exp_filename}) — skipping"
+        )
         return {}
 
     try:

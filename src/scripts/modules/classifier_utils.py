@@ -737,12 +737,14 @@ def _build_sample_date_map(config):
       sample_info_excel: sample_id (fq_R1 prefix) → case_id
     """
     # Step 1: plasma_exp.xlsx → {case_id: timestamp}
-    exp_path = next(
-        (p for p in ["data/plasma_exp.xlsx", "plasma_exp.xlsx"] if os.path.exists(p)),
-        None,
-    )
-    if exp_path is None:
-        logger.warning("[temporal] plasma_exp.xlsx not found — skipping temporal validation")
+    from methylation.sample_grouping import _resolve_excel
+    exp_filename = (config or {}).get("data", {}).get("plasma_exp_excel", "plasma_exp.xlsx")
+    exp_path = _resolve_excel(exp_filename) if exp_filename else None
+    if not exp_path or not os.path.exists(exp_path):
+        logger.warning(
+            f"[temporal] plasma collection-date Excel '{exp_filename}' not found "
+            f"(searched data/{exp_filename}, {exp_filename}) — skipping temporal validation"
+        )
         return {}
 
     try:

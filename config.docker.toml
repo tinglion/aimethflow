@@ -13,6 +13,7 @@ tissue_dir = "/mnt/OC_tissue"
 plasma_dir = "/mnt/OC_plasma"
 # Sample info Excel file path
 sample_info_excel = "ovarian_fq_series_samples_v4.xlsx"
+plasma_exp_excel = "/mnt/data/plasma_exp.xlsx"
 # Probe panel BED file path
 probe_panel_bed = "panel_B10308.bed"
 # Candidate regions file path

@@ -13,6 +13,8 @@ tissue_dir = "/mnt/f/meth/OC_tissue"
 plasma_dir = "/mnt/f/meth/OC_plasma"
 # Sample info Excel file path
 sample_info_excel = "ovarian_fq_series_samples_v4.xlsx"
+# Plasma sample collection-date Excel (used by Step 17 temporal_validate; columns: case_id, datetime as YYYYMMDD)
+plasma_exp_excel = "data/plasma_exp.xlsx"
 # Probe panel BED file path
 # probe_panel_bed = "panel_B10308.bed"
 probe_panel_bed = "panel_P10001.bed"
