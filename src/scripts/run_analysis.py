@@ -381,12 +381,31 @@ def main():
         logger.error("Prerequisite check failed — aborting")
         return
 
+    def _record_setup_step(step_key):
+        """Persist a Step 1/2 completion into the workdir state (if --workdir given)."""
+        if not args.workdir:
+            logger.info(f"  (no --workdir given; not recording {step_key} completion in any state file)")
+            return
+        wd = args.workdir
+        os.makedirs(wd, exist_ok=True)
+        prev = _load_state(wd)
+        completed = list(prev.get("completed_steps", []))
+        if step_key not in completed:
+            completed.append(step_key)
+            _save_state(wd, {"completed_steps": completed})
+            logger.info(f"  → recorded {step_key} completion in {wd}/{_STATE_FILE}")
+        else:
+            logger.info(f"  ({step_key} already marked complete in {wd}/{_STATE_FILE})")
+
     # Early-exit setup steps (no workdir / FASTQ needed)
     if args.step == "data_check":
         logger.info("✓  Step [data_check] complete — prerequisites verified above")
+        _record_setup_step("data_check")
         return
     if args.step == "ref_index":
         _run_ref_index(config)
+        logger.info("✓  Step [ref_index] complete")
+        _record_setup_step("ref_index")
         return
 
     # Resolve working directory
@@ -406,6 +425,25 @@ def main():
     logger.info(f"Working directory: {workdir}")
 
     state = _load_state(workdir)
+
+    # check_presets() passed → Step 1 (data_check) is implicitly complete for this workdir.
+    # Also mark Step 2 (ref_index) as complete if the bwameth index files actually exist.
+    _setup_completed = set(state.get("completed_steps", []))
+    _setup_dirty = False
+    if "data_check" not in _setup_completed:
+        _setup_completed.add("data_check")
+        _setup_dirty = True
+    _ref_genome = config.get("extraction", {}).get("reference_genome", "")
+    if _ref_genome and os.path.exists(_ref_genome + ".bwameth.c2t") and "ref_index" not in _setup_completed:
+        _setup_completed.add("ref_index")
+        _setup_dirty = True
+    if _setup_dirty:
+        # Preserve insertion order based on PIPELINE_STEPS for clean display
+        ordered = [k for k, *_ in PIPELINE_STEPS if k in _setup_completed]
+        # Append any leftover keys not in PIPELINE_STEPS (defensive)
+        ordered += [k for k in _setup_completed if k not in {s[0] for s in PIPELINE_STEPS}]
+        _save_state(workdir, {"completed_steps": ordered})
+        state["completed_steps"] = ordered
 
     # Resolve input files
     # Only preprocess / align / panel_derive (or full-pipeline start) strictly need FastQ files
@@ -468,17 +506,30 @@ def main():
     # =========================================================
     # Step 3: panel_derive  (setup step — skipped in full pipeline)
     # =========================================================
-    if _should_run("panel_derive", True) and fastq_files:
+    if _should_run("panel_derive", True):
         logger.info("━━ Step 3: Derive panel BED from FASTQ alignments ━━")
-        from scripts.derive_panel_bed import derive_panel_bed as _derive_panel
         out_bed = config.get("data", {}).get("probe_panel_bed") or "data/panel_B10308.bed"
-        ok = _derive_panel(fastq_files, out_bed, config=config, workdir=workdir)
-        if ok:
-            _save_state(workdir, {"completed_steps": state.get("completed_steps", []) + ["panel_derive"],
-                                  "panel_bed": out_bed})
-            logger.info(f"✓  Step [panel_derive] complete — {out_bed}")
+
+        # Skip if target BED already exists and is non-empty (idempotent re-run).
+        if os.path.isfile(out_bed) and os.path.getsize(out_bed) > 0:
+            logger.info(f"✓  Step [panel_derive] skipped — target BED already exists: "
+                        f"{out_bed} ({os.path.getsize(out_bed):,} bytes)")
+            existing = state.get("completed_steps", [])
+            if "panel_derive" not in existing:
+                _save_state(workdir, {"completed_steps": existing + ["panel_derive"],
+                                      "panel_bed": out_bed})
+        elif fastq_files:
+            from scripts.derive_panel_bed import derive_panel_bed as _derive_panel
+            ok = _derive_panel(fastq_files, out_bed, config=config, workdir=workdir)
+            if ok:
+                _save_state(workdir, {"completed_steps": state.get("completed_steps", []) + ["panel_derive"],
+                                      "panel_bed": out_bed})
+                logger.info(f"✓  Step [panel_derive] complete — {out_bed}")
+            else:
+                logger.error("panel_derive failed")
         else:
-            logger.error("panel_derive failed")
+            logger.error(f"panel_derive: target BED not found ({out_bed}) and no FASTQ files "
+                         "provided to derive it from")
         if single_step:
             return
 
