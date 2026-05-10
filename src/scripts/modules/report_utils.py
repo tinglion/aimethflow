@@ -1552,6 +1552,19 @@ def generate_report(
     all_fastp_files = sorted(glob.glob(os.path.join(temp_dir, "*.fastp.json")))
     all_samples     = [os.path.basename(f).replace(".fastp.json", "") for f in all_fastp_files]
 
+    # Fallback: if no fastp.json files (workdir cleaned, regenerated standalone, or
+    # different temp_dir), use grouped sample IDs from pipeline state. Without this
+    # the "Total Samples" card shows 0 even when classifiers ran on 116 samples.
+    grouped_ids = sorted(set((benign_samples or []) + (malignant_samples or [])))
+    if not all_samples and grouped_ids:
+        logger.info(f"  No fastp.json found in {temp_dir} — falling back to "
+                    f"{len(grouped_ids)} grouped sample IDs from pipeline state")
+        all_samples = grouped_ids
+
+    # Total-samples count for the header card: union of fastp-discovered and
+    # grouped IDs. Robust whether or not the workdir has been cleaned.
+    n_total_samples = len(set(all_samples) | set(grouped_ids))
+
     # ── Per-sample QC stats ──────────────────────────────────────
     fastp  = {s: _parse_fastp_json(os.path.join(temp_dir, f"{s}.fastp.json")) for s in all_samples}
     dedup  = {s: _parse_dedup_stats(os.path.join(temp_dir, f"{s}.bwameth_pe.dedup.stats")) for s in all_samples}
@@ -1779,7 +1792,7 @@ def generate_report(
     n_benign    = len(benign_samples)
     n_malignant = len(malignant_samples)
     interp_items.append(
-        f"<li>Analysis includes <strong>{len(all_samples)}</strong> samples: "
+        f"<li>Analysis includes <strong>{n_total_samples}</strong> samples: "
         f"<strong>{n_benign}</strong> benign and <strong>{n_malignant}</strong> malignant.</li>"
     )
 
@@ -1877,9 +1890,9 @@ def generate_report(
         logger.warning("iMeta figure generation skipped: %s", _imeta_exc)
         sec_imeta_html = ""
 
-    # QC table rows
+    # QC table rows (paginated — see _pagination_widget below)
     qc_rows = ""
-    for s in all_samples:
+    for idx, s in enumerate(all_samples):
         fp = fastp.get(s, {})
         pairs_in   = fp.get("total_reads_before", 0) // 2
         pairs_out  = fp.get("total_reads_after",  0) // 2
@@ -1889,21 +1902,24 @@ def generate_report(
                       f"<span class='badge badge-red'>{g2_label}</span>"   if s in malignant_samples else
                       "<span class='badge badge-grey'>Ungrouped</span>")
         qc_rows += (
-            f"<tr><td>{s}</td><td>{grp_badge}</td>"
+            f"<tr data-row='{idx}'><td>{s}</td><td>{grp_badge}</td>"
             f"<td>{_fmt_num(pairs_in)}</td><td>{_fmt_num(pairs_out)}</td>"
             f"<td>{_fmt_pct(pass_rate)}</td><td>{_fmt_pct(q30)}</td></tr>\n"
         )
+    QC_PAGE_SIZE = 10
+    qc_controls, qc_js = _pagination_widget("qc_tbl", "qc_ctrl",
+                                            len(all_samples), QC_PAGE_SIZE)
 
-    # Alignment / dedup / on-target table rows
+    # Alignment / dedup / on-target table rows (paginated)
     aln_rows = ""
-    for s in all_samples:
+    for idx, s in enumerate(all_samples):
         dp = dedup.get(s, {})
         inp  = dp.get("input_pairs", 0)
         out  = dp.get("output_reads", 0) // 2
         dr   = dp.get("dup_rate", None)
         ont_r = (bam_target[s] / bam_dedup[s]) if bam_dedup[s] else None
         aln_rows += (
-            f"<tr><td>{s}</td>"
+            f"<tr data-row='{idx}'><td>{s}</td>"
             f"<td>{_fmt_gb(bam_sorted[s])}</td>"
             f"<td>{_fmt_num(inp)}</td>"
             f"<td>{_fmt_num(out)}</td>"
@@ -1911,19 +1927,23 @@ def generate_report(
             f"<td>{_fmt_mb(bam_target[s])}</td>"
             f"<td>{_fmt_pct(ont_r)}</td></tr>\n"
         )
+    aln_controls, aln_js = _pagination_widget("aln_tbl", "aln_ctrl",
+                                              len(all_samples), QC_PAGE_SIZE)
 
-    # Per-sample CpG table rows
+    # Per-sample CpG table rows (paginated)
     cpg_rows = ""
-    for s in all_samples:
+    for idx, s in enumerate(all_samples):
         c = cpg_per_sample.get(s, {})
         grp_badge = (f"<span class='badge badge-blue'>{g1_label}</span>"  if s in benign_samples else
                      f"<span class='badge badge-red'>{g2_label}</span>"   if s in malignant_samples else
                      "<span class='badge badge-grey'>Ungrouped</span>")
         cpg_rows += (
-            f"<tr><td>{s}</td><td>{grp_badge}</td>"
+            f"<tr data-row='{idx}'><td>{s}</td><td>{grp_badge}</td>"
             f"<td>{_fmt_num(c.get('count', 0))}</td>"
             f"<td>{c.get('avg', 0):.1f}%</td></tr>\n"
         )
+    cpg_controls, cpg_js = _pagination_widget("cpg_tbl", "cpg_ctrl",
+                                              len(all_samples), QC_PAGE_SIZE)
 
     # Chromosome distribution table
     chrom_rows = "".join(
@@ -1990,12 +2010,12 @@ def generate_report(
 
 <h1>Plasma cfDNA Targeted Methylation Analysis Report
   <br/><span>Analysis date: {analysis_date} &nbsp;|&nbsp;
-  {len(all_samples)} samples ({g1_label}: {len(benign_samples)} / {g2_label}: {len(malignant_samples)})</span>
+  {n_total_samples} samples ({g1_label}: {len(benign_samples)} / {g2_label}: {len(malignant_samples)})</span>
 </h1>
 
 <!-- Key metric cards -->
 <div class="cards">
-  <div class="card"><div class="num">{len(all_samples)}</div><div class="lbl">Total Samples</div></div>
+  <div class="card"><div class="num">{n_total_samples}</div><div class="lbl">Total Samples</div></div>
   <div class="card"><div class="num">{len(benign_samples)}</div><div class="lbl">Benign</div></div>
   <div class="card"><div class="num">{len(malignant_samples)}</div><div class="lbl">Malignant</div></div>
   <div class="card"><div class="num">{_fmt_num(n_cand1 + n_cand2)}</div><div class="lbl">Candidate Region CpGs</div></div>
@@ -2007,23 +2027,33 @@ def generate_report(
 <!-- 1. Data Quality Overview -->
 <div class="section">
 <h2>Step 4. Data Quality Overview — fastp QC</h2>
-<table>
-  <tr><th>Sample</th><th>Group</th><th>Raw Read Pairs</th><th>Filtered Pairs</th><th>Pass Rate</th><th>Q30 (post-QC)</th></tr>
+<div style="overflow-x:auto">
+{qc_controls}
+<table id="qc_tbl">
+  <thead><tr><th>Sample</th><th>Group</th><th>Raw Read Pairs</th><th>Filtered Pairs</th><th>Pass Rate</th><th>Q30 (post-QC)</th></tr></thead>
+  <tbody>
   {qc_rows}
+  </tbody>
 </table>
+</div>
 <p style="color:#666;font-size:.83em">Parameters: UMI extraction (R2 5' 6 N) + trim_front1=12 + trim_front2=12 + trim_tail2=5 + min_length=35 + Q20</p>
+{qc_js}
 </div>
 
 <!-- 2. Alignment & Deduplication -->
 <div class="section">
 <h2>Steps 5–7. Alignment, Deduplication &amp; On-target Filter</h2>
 <div style="overflow-x:auto">
-<table>
-  <tr><th>Sample</th><th>Sorted BAM</th><th>Input Pairs (pre-dedup)</th><th>Dedup Pairs</th><th>Dup Rate</th><th>On-target BAM</th><th>On-target Rate</th></tr>
+{aln_controls}
+<table id="aln_tbl">
+  <thead><tr><th>Sample</th><th>Sorted BAM</th><th>Input Pairs (pre-dedup)</th><th>Dedup Pairs</th><th>Dup Rate</th><th>On-target BAM</th><th>On-target Rate</th></tr></thead>
+  <tbody>
   {aln_rows}
+  </tbody>
 </table>
 </div>
 <p style="color:#666;font-size:.83em">Dedup: umi_tools dedup --paired; On-target: bedtools intersect panel_B10308.bed; BAM size of 0 means the file was auto-cleaned (expected).</p>
+{aln_js}
 </div>
 
 <!-- 3. M-bias Check -->
@@ -2059,10 +2089,16 @@ def generate_report(
 <!-- 5. Methylation Extraction -->
 <div class="section">
 <h2>Step 9. Methylation Extraction — MethylDackel extract</h2>
-<table>
-  <tr><th>Sample</th><th>Group</th><th>CpG Sites Detected</th><th>Mean Methylation</th></tr>
+<div style="overflow-x:auto">
+{cpg_controls}
+<table id="cpg_tbl">
+  <thead><tr><th>Sample</th><th>Group</th><th>CpG Sites Detected</th><th>Mean Methylation</th></tr></thead>
+  <tbody>
   {cpg_rows}
+  </tbody>
 </table>
+{cpg_js}
+</div>
 <table style="margin-top:16px">
   <tr><th>Metric</th><th>{g1_label} (merged)</th><th>{g2_label} (merged)</th></tr>
   <tr><td>Total CpG sites detected</td><td>{_fmt_num(n_cpg1)}</td><td>{_fmt_num(n_cpg2)}</td></tr>

@@ -68,7 +68,7 @@ STEPS = [
     ("feature_select",    "Step 14  Feature selection (LASSO + RF)",  "D · QC + Features"),
     ("fs_benchmark",      "Step 14b Feature selection ablation",      "D · QC + Features"),
     ("classify",          "Step 15  Diagnostic classification",       "E · Classification"),
-    ("ca125_compare",     "Step 15c CA-125 vs cfDNA AUC",             "E · Classification"),
+    ("final_model",       "Step 15c Train production models (full cohort)", "E · Classification"),
     ("subtype_classify",  "Step 16  Subtype classification",          "E · Classification"),
     ("temporal_validate", "Step 17  Temporal split validation",       "E · Classification"),
     ("annotate",          "Step 18  Site annotation",                 "E · Classification"),

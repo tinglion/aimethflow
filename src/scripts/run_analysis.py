@@ -189,7 +189,7 @@ PIPELINE_STEPS = [
     ("feature_select",     "14",  "Feature selection: LASSO(L1) ∪ RF; outliers excluded; ≥10× QC", "outlier_detect"),
     ("classify",           "15",  "Classifiers LOO-CV: LR / SVM / RF / XGBoost / LightGBM",       "feature_select"),
     ("fs_benchmark",       "15b", "Feature selection ablation: wilcoxon/lasso/rf/union AUC table", "feature_select"),
-    ("ca125_compare",      "15c", "CA-125 vs classifier AUC (optional; requires 'ca125' column in Excel)", "classify"),
+    ("final_model",        "15c", "Train production models on the full cohort (no CV holdout); save artefacts to result/<wd>/model/ for inference / WebUI diagnosis page", "classify"),
     ("subtype_classify",   "16",  "Subtype LOO-CV (malignant+borderline): RF + SVM OvR",          "classify"),
     ("temporal_validate",  "17",  "Temporal split validation (plasma only): train/test by date",  "classify"),
     ("annotate",           "18",  "Site annotation: gene / CpG island / EWAS Catalog+Atlas",      "feature_select"),
@@ -930,7 +930,7 @@ def main():
     if _should_run("fs_benchmark", False):
         if benign_samples and malignant_samples:
             logger.info("━━ Step 15b: Feature selection ablation (wilcoxon/lasso/rf/union) ━━")
-            from scripts.modules.classifier_utils import run_feature_selection_benchmark
+            from scripts.modules.fs_benchmark import run_feature_selection_benchmark
             run_feature_selection_benchmark(
                 workdir, result_dir, config, benign_samples, malignant_samples
             )
@@ -942,18 +942,23 @@ def main():
                 return
 
     # =========================================================
-    # Step 15c: ca125_compare — CA-125 vs classifier AUC
+    # Step 15c: final_model — train production models on the full cohort
+    #
+    # Step 15 (classify) evaluates models with cross-validation; here we re-fit
+    # the same model lineup on ALL samples (no CV holdout) and persist the
+    # resulting artefacts to result/<wd>/model/ so they can drive the WebUI
+    # diagnosis page or external inference.
     # =========================================================
-    if _should_run("ca125_compare", False):
+    if _should_run("final_model", False):
         if benign_samples and malignant_samples:
-            logger.info("━━ Step 15c: CA-125 vs classifier AUC comparison ━━")
-            from scripts.modules.classifier_utils import run_ca125_comparison
-            run_ca125_comparison(
+            logger.info("━━ Step 15c: Train production models on full cohort ━━")
+            from scripts.modules.final_model import run_train_final_models
+            run_train_final_models(
                 workdir, result_dir, config, benign_samples, malignant_samples
             )
-            _save_state(workdir, {"completed_steps": state.get("completed_steps", []) + ["ca125_compare"]})
+            _save_state(workdir, {"completed_steps": state.get("completed_steps", []) + ["final_model"]})
         else:
-            logger.error("ca125_compare requires benign_samples and malignant_samples")
+            logger.error("final_model requires benign_samples and malignant_samples")
             if single_step:
                 return
 
@@ -981,8 +986,7 @@ def main():
             if single_step:
                 return
         else:
-            from scripts.modules.classifier_utils import run_temporal_validation
-            from scripts.modules.subtype_utils import run_subtype_temporal_validation
+            from scripts.modules.temporal_utils import run_temporal_validation
             _bl_clean = [s for s in borderline_samples if s not in set(borderline_suspect_ids)]
             if borderline_suspect_ids:
                 logger.info(

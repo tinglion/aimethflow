@@ -16,8 +16,8 @@ sample_info_excel = "ovarian_fq_series_samples_v4.xlsx"
 # Plasma sample collection-date Excel (used by Step 17 temporal_validate; columns: case_id, datetime as YYYYMMDD)
 plasma_exp_excel = "data/plasma_exp.xlsx"
 # Probe panel BED file path
-# probe_panel_bed = "panel_B10308.bed"
-probe_panel_bed = "panel_P10001.bed"
+probe_panel_bed = "panel_B10308.bed"
+# probe_panel_bed = "panel_P10001.bed"
 # Candidate regions file path
 candidate_regions = "OC_tissue_88_regions.hg38.txt"
 
@@ -215,6 +215,8 @@ outlier_pca_z = 2.5
 min_10x_coverage_rate = 0.80
 # Confirmed excluded sample IDs (fill in after reviewing outlier_report.csv)
 exclude_samples = ['B10013', 'B10022', 'B10018', 'B10268']
+include_ca125_baseline = true   # set false to skip CA-125 + all *+CA125 fusion models
+ca125_threshold        = 35.0   # clinical cutoff (U/mL) for CA-125 hard predictions
 
 # Site annotation configuration (Step 17)
 [annotation]
@@ -240,7 +242,7 @@ pubmed_max_hits = 20
 # Temporal validation configuration (Step 17 — plasma mode only)
 [temporal_validate]
 # Samples collected before this date go to the train set; on/after → validation set
-cutoff_date = "2024-07-01"
+cutoff_date = "2024-01-01"
 # Feature selection mode:
 #   true  (default) — re-run Wilcoxon+LASSO∪RF on training-period samples only (leakage-free;
 #                     validation samples never seen during feature selection)

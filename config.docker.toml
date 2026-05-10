@@ -197,6 +197,8 @@ outlier_pca_z = 2.5
 min_10x_coverage_rate = 0.80
 # Sample IDs confirmed for exclusion (fill in after reviewing outlier_report.csv)
 exclude_samples = ['B10013', 'B10022', 'B10018', 'B10268']
+include_ca125_baseline = true   # set false to skip CA-125 + all *+CA125 fusion models
+ca125_threshold        = 35.0   # clinical cutoff (U/mL) for CA-125 hard predictions
 
 # Site annotation configuration (Step 17)
 [annotation]
@@ -222,7 +224,7 @@ pubmed_max_hits = 20
 # Temporal validation configuration (Step 17 — plasma mode only)
 [temporal_validate]
 # Samples collected before this date go to the train set; on/after → validation set
-cutoff_date = "2024-07-01"
+cutoff_date = "2024-01-01"
 # Number of top features (by LOO-CV selection frequency) to use for training
 top_n_features = 20
 # When true, borderline-category samples in the validation period are added to the
