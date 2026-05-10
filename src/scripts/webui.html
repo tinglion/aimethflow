@@ -522,22 +522,57 @@
           '<p class="text-muted small p-3 mb-0">No feature data available.</p>';
         return;
       }
+      const annotated = !!d.annotation_present;
       const featRows = feats.map(f => {
-        const sign = f.delta > 0 ? 'up' : 'down';
         const color = f.delta > 0 ? '#dc3545' : (f.delta < 0 ? '#1d4ed8' : '#6c757d');
         const arrow = f.delta > 0.05 ? '↑↑' : (f.delta > 0.01 ? '↑' : (f.delta < -0.05 ? '↓↓' : (f.delta < -0.01 ? '↓' : '·')));
         const missing = f.missing ? '<span class="badge bg-secondary">imputed</span>' : '';
-        return `<tr>
-          <td><code>${f.name}</code></td>
+
+        // Step 18 annotation columns (empty cells when annotation not available)
+        const geneCell = f.gene
+          ? `<span class="fw-bold" title="${f.region_type}">${f.gene}</span>` +
+            (f.region_type ? ` <small class="text-muted">${f.region_type}</small>` : '')
+          : '<span class="text-muted">—</span>';
+        const ctxCell = f.cpg_context
+          ? `<span class="text-secondary">${f.cpg_context}</span>` +
+            (f.in_88_regions ? ' <span class="badge bg-warning text-dark" title="overlaps OC tissue 88-region candidate set">88R</span>' : '')
+          : '<span class="text-muted">—</span>';
+        const evidenceBits = [];
+        if (f.ewas_n_hits   > 0) evidenceBits.push(`<span class="badge bg-info text-dark" title="EWAS Catalog hits">E:${f.ewas_n_hits}</span>`);
+        if (f.atlas_n_hits  > 0) evidenceBits.push(`<span class="badge bg-info text-dark" title="EWAS Atlas hits">A:${f.atlas_n_hits}</span>`);
+        if (f.pubmed_n_hits > 0) evidenceBits.push(`<span class="badge bg-success" title="PubMed plasma+methylation+cancer hits">P:${f.pubmed_n_hits}</span>`);
+        const evidenceCell = evidenceBits.length ? evidenceBits.join(' ') : '<span class="text-muted">—</span>';
+        const ucscCell = f.ucsc_url ? `<a href="${f.ucsc_url}" target="_blank" rel="noopener" title="open in UCSC Genome Browser">UCSC</a>` : '';
+
+        const baseRow = `
+          <td><code>${f.name}</code> ${ucscCell}</td>
           <td class="text-end">${f.beta == null ? '<span class="text-muted">—</span>' : f.beta.toFixed(3)} ${missing}</td>
           <td class="text-end">${f.training_median.toFixed(3)}</td>
-          <td class="text-end" style="color:${color};font-weight:bold">${arrow} ${(f.delta).toFixed(3)}</td>
-        </tr>`;
+          <td class="text-end" style="color:${color};font-weight:bold">${arrow} ${(f.delta).toFixed(3)}</td>`;
+        const annoCells = annotated
+          ? `<td>${geneCell}</td><td>${ctxCell}</td><td>${evidenceCell}</td>`
+          : '';
+        return `<tr>${baseRow}${annoCells}</tr>`;
       }).join('');
+
+      const annoHeaders = annotated
+        ? '<th>Gene</th><th>CpG context</th><th title="EWAS Catalog / EWAS Atlas / PubMed evidence">Evidence</th>'
+        : '';
+      const annoNote = annotated
+        ? ''
+        : '<div class="text-muted small p-2">Step 18 (annotate) has not been run on this workdir — gene/CpG-island/EWAS columns are hidden. Run <code>--step annotate</code> to populate.</div>';
+
       document.getElementById('dx-features-pane').innerHTML = `
+        ${annoNote}
         <table class="table table-sm table-striped mb-0" style="font-size:.82rem">
           <thead style="position:sticky;top:0;background:white">
-            <tr><th>CpG site</th><th class="text-end">Patient β</th><th class="text-end">Training median</th><th class="text-end">Δ</th></tr>
+            <tr>
+              <th>CpG site</th>
+              <th class="text-end">Patient β</th>
+              <th class="text-end">Training median</th>
+              <th class="text-end">Δ</th>
+              ${annoHeaders}
+            </tr>
           </thead>
           <tbody>${featRows}</tbody>
         </table>

@@ -463,6 +463,27 @@ async def predict_diagnosis(
     feature_names = list(pre["feature_names"])
     col_medians   = np.asarray(pre["col_medians"], dtype=float)
 
+    # Optional Step 18 annotation (panel_annotation.csv) — graceful fallback when missing
+    annot_map = {}
+    annot_path = _result_root() / workdir / "panel_annotation.csv"
+    if annot_path.exists():
+        try:
+            import csv
+            with open(annot_path, encoding="utf-8") as af:
+                for row in csv.DictReader(af):
+                    annot_map[row.get("feature", "")] = {
+                        "gene":           row.get("nearest_gene", "") or "",
+                        "region_type":    row.get("region_type", "") or "",
+                        "cpg_context":    row.get("cpg_context", "") or "",
+                        "in_88_regions":  str(row.get("in_88_regions", "")).strip().lower() == "true",
+                        "ewas_n_hits":    int(float(row.get("ewas_n_hits") or 0)),
+                        "atlas_n_hits":   int(float(row.get("atlas_n_hits") or 0)),
+                        "pubmed_n_hits":  int(float(row.get("pubmed_n_hits") or 0)),
+                        "ucsc_url":       row.get("ucsc_url", "") or "",
+                    }
+        except Exception as exc:
+            print(f"[diagnosis] failed to read panel_annotation.csv: {exc}")
+
     # 2. Validate / parse uploaded file
     fname = (file.filename or "").lower()
     file_bytes = await file.read()
@@ -491,12 +512,22 @@ async def predict_diagnosis(
         train_med  = float(col_medians[i])
         is_missing = bool(np.isnan(beta_raw))
         beta_used  = train_med if is_missing else float(beta_raw)
+        ann        = annot_map.get(name, {})
         features_payload.append({
             "name":            name,
             "beta":            None if is_missing else float(beta_raw),
             "training_median": train_med,
             "delta":           beta_used - train_med,   # positive → above cohort median
             "missing":         is_missing,
+            # Step 18 annotation (empty when Step 18 not yet run on this workdir)
+            "gene":            ann.get("gene", ""),
+            "region_type":     ann.get("region_type", ""),
+            "cpg_context":     ann.get("cpg_context", ""),
+            "in_88_regions":   ann.get("in_88_regions", False),
+            "ewas_n_hits":     ann.get("ewas_n_hits", 0),
+            "atlas_n_hits":    ann.get("atlas_n_hits", 0),
+            "pubmed_n_hits":   ann.get("pubmed_n_hits", 0),
+            "ucsc_url":        ann.get("ucsc_url", ""),
         })
 
     # 4. Optional CA-125 augmented vector for fusion models
@@ -562,13 +593,14 @@ async def predict_diagnosis(
         consensus = {"label": "borderline", "n_voters": n_voters, "malignant_votes": mal_votes, "mean_prob": mean_prob}
 
     return {
-        "workdir":            workdir,
-        "n_panel_features":   len(feature_names),
+        "workdir":             workdir,
+        "n_panel_features":    len(feature_names),
         "n_features_resolved": int(sum(1 for f in features_payload if not f["missing"])),
-        "ca125_supplied":     ca_val,
-        "models":             models_payload,
-        "consensus":          consensus,
-        "features":           features_payload,
+        "ca125_supplied":      ca_val,
+        "models":              models_payload,
+        "consensus":           consensus,
+        "features":            features_payload,
+        "annotation_present":  bool(annot_map),
     }
 
 
