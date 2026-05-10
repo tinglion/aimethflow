@@ -99,6 +99,7 @@
       <li class="nav-item"><a class="nav-link" data-tab="config" href="#">Config</a></li>
       <li class="nav-item"><a class="nav-link" data-tab="results" href="#">Results</a></li>
       <li class="nav-item"><a class="nav-link" data-tab="report" href="#">Report</a></li>
+      <li class="nav-item"><a class="nav-link" data-tab="diagnosis" href="#">Aided Diagnosis</a></li>
     </ul>
 
     <!-- 流程 -->
@@ -171,6 +172,77 @@
         </div>
       </div>
     </div>
+
+    <!-- Aided Diagnosis -->
+    <div id="tab-diagnosis" class="tab-content d-none">
+      <div class="row">
+        <!-- LEFT: input form -->
+        <div class="col-lg-4">
+          <div class="card">
+            <div class="card-header py-2">
+              <small class="fw-bold">Patient Input</small>
+            </div>
+            <div class="card-body" style="font-size:.88rem">
+
+              <div class="mb-3">
+                <label class="form-label small fw-bold mb-1">Pre-trained model (workdir)</label>
+                <select class="form-select form-select-sm" id="dx-model-select"></select>
+                <small class="text-muted" id="dx-model-info"></small>
+              </div>
+
+              <div class="mb-3">
+                <label class="form-label small fw-bold mb-1">Input file</label>
+                <input type="file" class="form-control form-control-sm" id="dx-file"
+                       accept=".bedGraph,.bedgraph,.gz,.fq,.fq.gz,.fastq,.fastq.gz" />
+                <small class="text-muted">
+                  Accepts: <code>*.bedGraph</code> (recommended, fast — output of Step 9 extract)
+                  &nbsp;or&nbsp; <code>*.fq.gz / *.fastq.gz</code> (slower; will run pipeline Steps 4–9 first)
+                </small>
+              </div>
+
+              <div class="mb-3">
+                <label class="form-label small fw-bold mb-1">CA-125 (optional, U/mL)</label>
+                <input type="number" class="form-control form-control-sm" id="dx-ca125"
+                       step="0.1" min="0" placeholder="e.g. 28.0  — leave blank if unknown" />
+                <small class="text-muted">Leave blank to use cfDNA-only models. Provide a value to additionally run cfDNA + CA-125 fusion models.</small>
+              </div>
+
+              <button class="btn btn-primary btn-sm w-100" id="dx-run-btn" onclick="runDiagnosis()">
+                <span id="dx-run-label">Run Diagnosis</span>
+              </button>
+              <div id="dx-status" class="text-muted small mt-2"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- RIGHT: results -->
+        <div class="col-lg-8">
+          <div class="card mb-3">
+            <div class="card-header py-2 d-flex justify-content-between align-items-center">
+              <small class="fw-bold">Diagnostic Result</small>
+              <span class="text-muted small" id="dx-summary-meta"></span>
+            </div>
+            <div class="card-body" id="dx-results-pane">
+              <p class="text-muted small mb-0">Run a diagnosis to see results here.</p>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-header py-2">
+              <small class="fw-bold">Methylation Site Contributions</small>
+              <span class="text-muted small ms-2">
+                Per-panel-CpG β-values vs training cohort medians.
+              </span>
+            </div>
+            <div class="card-body p-0">
+              <div id="dx-features-pane" style="max-height:520px; overflow-y:auto;">
+                <p class="text-muted small p-3 mb-0">Site-level contributions appear after running a diagnosis.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <script>
@@ -193,6 +265,7 @@
         if (a.dataset.tab === 'config') loadConfig();
         if (a.dataset.tab === 'results') loadResults();
         if (a.dataset.tab === 'report') loadReports();
+        if (a.dataset.tab === 'diagnosis') loadDiagnosisModels();
       });
     });
 
@@ -328,6 +401,147 @@
       document.querySelectorAll('#report-list a').forEach(a => a.classList.remove('active'));
       el.classList.add('active');
       document.getElementById('report-frame').src = '/meth/report-files/' + el.dataset.path;
+    }
+
+    // ── Aided Diagnosis ──────────────────────────────────────────────────────────
+    async function loadDiagnosisModels() {
+      const sel = document.getElementById('dx-model-select');
+      const info = document.getElementById('dx-model-info');
+      try {
+        const r = await fetch(`${BASE}/api/diagnosis/model_workdirs`).then(r => r.json());
+        const wds = r.model_workdirs || [];
+        if (wds.length === 0) {
+          sel.innerHTML = '<option value="">(no trained models — run --step final_model first)</option>';
+          info.textContent = '';
+          return;
+        }
+        sel.innerHTML = wds.map((w, i) =>
+          `<option value="${w.workdir}">${w.workdir} — ${w.n_models} models, ${w.n_features} CpGs${w.ca125 ? ', +CA-125' : ''}${i === 0 ? ' (latest)' : ''}</option>`
+        ).join('');
+        sel.onchange = () => updateDiagnosisModelInfo();
+        updateDiagnosisModelInfo();
+      } catch (e) {
+        sel.innerHTML = '<option value="">(error loading models)</option>';
+        info.textContent = String(e);
+      }
+    }
+
+    function updateDiagnosisModelInfo() {
+      const sel = document.getElementById('dx-model-select');
+      const opt = sel.options[sel.selectedIndex];
+      document.getElementById('dx-model-info').textContent = opt && opt.text ? opt.text : '';
+    }
+
+    async function runDiagnosis() {
+      const wd = document.getElementById('dx-model-select').value;
+      const f  = document.getElementById('dx-file').files[0];
+      const ca = document.getElementById('dx-ca125').value;
+      const status = document.getElementById('dx-status');
+      const btn    = document.getElementById('dx-run-btn');
+      const lbl    = document.getElementById('dx-run-label');
+
+      if (!wd)  { status.textContent = '✗ Please select a trained model.'; return; }
+      if (!f)   { status.textContent = '✗ Please upload a file.'; return; }
+
+      btn.disabled = true;
+      lbl.textContent = 'Running…';
+      status.textContent = 'Uploading & predicting…';
+      document.getElementById('dx-results-pane').innerHTML = '<p class="text-muted small mb-0">Running…</p>';
+      document.getElementById('dx-features-pane').innerHTML = '<p class="text-muted small p-3 mb-0">Running…</p>';
+
+      const fd = new FormData();
+      fd.append('file', f);
+      fd.append('workdir', wd);
+      if (ca !== '') fd.append('ca125', ca);
+
+      try {
+        const r = await fetch(`${BASE}/api/diagnosis/predict`, { method: 'POST', body: fd });
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.detail || ('HTTP ' + r.status));
+        renderDiagnosis(j);
+        status.textContent = '✓ Done — ' + (j.n_features_resolved || '?') + ' / ' + (j.n_panel_features || '?') + ' panel sites resolved from input.';
+      } catch (e) {
+        status.textContent = '✗ ' + e.message;
+        document.getElementById('dx-results-pane').innerHTML =
+          `<p class="text-danger small mb-0">Prediction failed: ${escHtml(e.message)}</p>`;
+      } finally {
+        btn.disabled = false;
+        lbl.textContent = 'Run Diagnosis';
+      }
+    }
+
+    function renderDiagnosis(d) {
+      // d = { models: [{name, prob_malignant, predicted_label, uses_ca125}], consensus, features: [...], n_features_resolved, n_panel_features }
+      const meta = document.getElementById('dx-summary-meta');
+      meta.textContent = `model: ${d.workdir} · panel: ${d.n_panel_features} CpGs · resolved: ${d.n_features_resolved}`;
+
+      // Consensus card
+      const c = d.consensus || {};
+      const verdictColor = c.label === 'malignant' ? '#dc3545' : (c.label === 'benign' ? '#198754' : '#6c757d');
+      const consensusHtml = `
+        <div style="background:#f8f9fa;border-left:4px solid ${verdictColor};padding:10px 14px;border-radius:6px;margin-bottom:14px">
+          <div class="small text-muted">Consensus (majority vote across ${c.n_voters || 0} models)</div>
+          <div class="fs-5 fw-bold" style="color:${verdictColor}">
+            ${(c.label || 'unknown').toUpperCase()}
+            <span class="text-muted small fw-normal ms-2">
+              ${c.malignant_votes != null ? `(${c.malignant_votes} / ${c.n_voters} voted malignant; mean prob = ${(c.mean_prob || 0).toFixed(3)})` : ''}
+            </span>
+          </div>
+        </div>
+      `;
+
+      // Per-model table
+      const models = d.models || [];
+      const rowsHtml = models.map(m => {
+        const isMal = m.predicted_label === 'malignant';
+        const badge = isMal ? '<span class="badge bg-danger">malignant</span>' : '<span class="badge bg-success">benign</span>';
+        const fusion = m.uses_ca125 ? '<span class="text-info small">CA-125 +</span>' : '<span class="text-muted small">cfDNA only</span>';
+        const bar = '<div style="background:#e9ecef;border-radius:4px;height:8px;overflow:hidden">' +
+          `<div style="width:${(m.prob_malignant * 100).toFixed(1)}%;height:100%;background:${isMal ? '#dc3545' : '#198754'}"></div></div>`;
+        return `<tr>
+          <td><code>${m.name}</code></td>
+          <td>${fusion}</td>
+          <td class="text-end">${m.prob_malignant.toFixed(4)}</td>
+          <td style="min-width:100px">${bar}</td>
+          <td>${badge}</td>
+        </tr>`;
+      }).join('');
+      const modelsHtml = `
+        <h6 class="small fw-bold mb-2">Per-Model Scores</h6>
+        <table class="table table-sm" style="font-size:.84rem">
+          <thead><tr><th>Model</th><th>Type</th><th class="text-end">P(malignant)</th><th>Score</th><th>Predicted</th></tr></thead>
+          <tbody>${rowsHtml}</tbody>
+        </table>
+      `;
+      document.getElementById('dx-results-pane').innerHTML = consensusHtml + modelsHtml;
+
+      // Per-feature contributions
+      const feats = d.features || [];
+      if (feats.length === 0) {
+        document.getElementById('dx-features-pane').innerHTML =
+          '<p class="text-muted small p-3 mb-0">No feature data available.</p>';
+        return;
+      }
+      const featRows = feats.map(f => {
+        const sign = f.delta > 0 ? 'up' : 'down';
+        const color = f.delta > 0 ? '#dc3545' : (f.delta < 0 ? '#1d4ed8' : '#6c757d');
+        const arrow = f.delta > 0.05 ? '↑↑' : (f.delta > 0.01 ? '↑' : (f.delta < -0.05 ? '↓↓' : (f.delta < -0.01 ? '↓' : '·')));
+        const missing = f.missing ? '<span class="badge bg-secondary">imputed</span>' : '';
+        return `<tr>
+          <td><code>${f.name}</code></td>
+          <td class="text-end">${f.beta == null ? '<span class="text-muted">—</span>' : f.beta.toFixed(3)} ${missing}</td>
+          <td class="text-end">${f.training_median.toFixed(3)}</td>
+          <td class="text-end" style="color:${color};font-weight:bold">${arrow} ${(f.delta).toFixed(3)}</td>
+        </tr>`;
+      }).join('');
+      document.getElementById('dx-features-pane').innerHTML = `
+        <table class="table table-sm table-striped mb-0" style="font-size:.82rem">
+          <thead style="position:sticky;top:0;background:white">
+            <tr><th>CpG site</th><th class="text-end">Patient β</th><th class="text-end">Training median</th><th class="text-end">Δ</th></tr>
+          </thead>
+          <tbody>${featRows}</tbody>
+        </table>
+      `;
     }
 
     // ── init ──────────────────────────────────────────────────────────────────────

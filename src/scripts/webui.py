@@ -12,7 +12,7 @@ from typing import Optional
 
 import toml
 import uvicorn
-from fastapi import APIRouter, FastAPI, HTTPException
+from fastapi import APIRouter, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import (
     FileResponse,
     HTMLResponse,
@@ -327,6 +327,249 @@ def view_report():
 @page_router.get("/", response_class=HTMLResponse)
 def index():
     return HTMLResponse(_HTML)
+
+
+# ── Aided Diagnosis API ───────────────────────────────────────────────────────
+#
+# Endpoints support the "Aided Diagnosis" tab: pick a pre-trained workdir
+# (result/<wd>/model/), upload a bedGraph (or fq.gz, future), enter optional
+# CA-125, and get per-model probabilities + per-CpG contribution against the
+# training cohort medians.
+
+def _result_root() -> Path:
+    """Return absolute path to result/, regardless of cwd."""
+    return ROOT / "result"
+
+
+def _list_model_workdirs():
+    """Walk result/*/model/ and return entries with manifest summary."""
+    out = []
+    root = _result_root()
+    if not root.exists():
+        return out
+    for wd_dir in sorted(root.iterdir(), reverse=True):
+        if not wd_dir.is_dir():
+            continue
+        model_dir = wd_dir / "model"
+        if not model_dir.is_dir():
+            continue
+        manifest_path = model_dir / "manifest.json"
+        if not manifest_path.exists():
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        out.append({
+            "workdir":     wd_dir.name,
+            "n_models":    len(manifest.get("trained_models", [])),
+            "n_features":  manifest.get("panel", {}).get("n_features", 0),
+            "ca125":       bool(manifest.get("ca125_available", False)),
+            "n_train":     manifest.get("training_cohort", {}).get("n_total", 0),
+        })
+    return out
+
+
+@api_router.get("/api/diagnosis/model_workdirs")
+def get_diagnosis_model_workdirs():
+    """List workdirs that have a trained model/ directory (output of Step 15c)."""
+    return {"model_workdirs": _list_model_workdirs()}
+
+
+def _parse_bedgraph_to_feature_vector(file_bytes: bytes, feature_names, filename: str):
+    """
+    Parse a bedGraph file (optionally gzipped) and extract β-values for the
+    panel CpG sites in `feature_names` (formatted as 'chrom:pos').
+
+    Returns (feature_dict, n_resolved) where feature_dict[name] = β (0-1) or
+    np.nan when the site isn't present in the bedGraph.
+    """
+    import gzip, io
+    import numpy as np
+
+    if filename.endswith(".gz"):
+        try:
+            text = gzip.decompress(file_bytes).decode("utf-8", errors="replace")
+        except Exception as exc:
+            raise HTTPException(400, f"Failed to gunzip bedGraph: {exc}")
+    else:
+        text = file_bytes.decode("utf-8", errors="replace")
+
+    # Build a {(chrom, pos): beta} map; bedGraph schema: chrom start end meth_pct ...
+    # MethylDackel writes meth_pct as 0-100 (β × 100). Convert to 0-1 here.
+    site_map = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith(("#", "track", "chrom\t")):
+            continue
+        parts = line.split("\t")
+        if len(parts) < 4:
+            continue
+        try:
+            chrom = parts[0]
+            pos   = int(parts[1])
+            val   = float(parts[3])
+        except (ValueError, TypeError):
+            continue
+        # Heuristic: values >1 → 0-100 percent → divide by 100; values ≤1 → already 0-1
+        if val > 1.0:
+            val = val / 100.0
+        site_map[(chrom, pos)] = val
+
+    feat_dict = {}
+    n_resolved = 0
+    for name in feature_names:
+        if ":" not in name:
+            feat_dict[name] = float("nan")
+            continue
+        chrom, _, pos_str = name.rpartition(":")
+        try:
+            pos = int(pos_str)
+        except ValueError:
+            feat_dict[name] = float("nan")
+            continue
+        v = site_map.get((chrom, pos), float("nan"))
+        feat_dict[name] = v
+        if v == v:  # not NaN
+            n_resolved += 1
+    return feat_dict, n_resolved
+
+
+@api_router.post("/api/diagnosis/predict")
+async def predict_diagnosis(
+    workdir: str = Form(...),
+    file: UploadFile = File(...),
+    ca125: Optional[str] = Form(None),
+):
+    """
+    Run a diagnosis using pre-trained models in result/<workdir>/model/.
+    Currently supports bedGraph input. fq.gz support is stubbed (returns 400
+    pending Step 9 background-run integration).
+    """
+    import joblib
+    import numpy as np
+
+    # 1. Locate model directory
+    model_dir = _result_root() / workdir / "model"
+    if not model_dir.is_dir():
+        raise HTTPException(404, f"Model directory not found: result/{workdir}/model")
+    manifest_path = model_dir / "manifest.json"
+    pre_path      = model_dir / "preprocessing.joblib"
+    if not (manifest_path.exists() and pre_path.exists()):
+        raise HTTPException(404, "manifest.json or preprocessing.joblib missing in model dir")
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    pre      = joblib.load(pre_path)
+    feature_names = list(pre["feature_names"])
+    col_medians   = np.asarray(pre["col_medians"], dtype=float)
+
+    # 2. Validate / parse uploaded file
+    fname = (file.filename or "").lower()
+    file_bytes = await file.read()
+    if fname.endswith((".bedgraph", ".bedgraph.gz", ".bg", ".bg.gz")) or \
+       (fname.endswith(".gz") and "bedgraph" in fname):
+        feat_dict, n_resolved = _parse_bedgraph_to_feature_vector(file_bytes, feature_names, fname)
+    elif fname.endswith((".fq", ".fq.gz", ".fastq", ".fastq.gz")):
+        raise HTTPException(
+            400,
+            "FASTQ input is not yet wired into the diagnosis path. Workaround: "
+            "run --step preprocess/align/dedup/target/extract on the FASTQ to "
+            "produce a *.bedGraph, then upload that file."
+        )
+    else:
+        raise HTTPException(400, f"Unsupported file type: {file.filename!r}. "
+                                  "Expected .bedGraph or .bedGraph.gz.")
+
+    # 3. Build feature vector + per-feature contribution table
+    x_raw  = np.array([feat_dict[name] for name in feature_names], dtype=float)
+    x_imp  = np.where(np.isnan(x_raw), col_medians, x_raw)
+    x_sc   = pre["scaler"].transform(x_imp.reshape(1, -1))
+
+    features_payload = []
+    for i, name in enumerate(feature_names):
+        beta_raw   = x_raw[i]
+        train_med  = float(col_medians[i])
+        is_missing = bool(np.isnan(beta_raw))
+        beta_used  = train_med if is_missing else float(beta_raw)
+        features_payload.append({
+            "name":            name,
+            "beta":            None if is_missing else float(beta_raw),
+            "training_median": train_med,
+            "delta":           beta_used - train_med,   # positive → above cohort median
+            "missing":         is_missing,
+        })
+
+    # 4. Optional CA-125 augmented vector for fusion models
+    ca_val = None
+    x_aug_sc = None
+    if ca125 not in (None, ""):
+        try:
+            ca_val = float(ca125)
+        except ValueError:
+            raise HTTPException(400, f"Invalid ca125 value: {ca125!r}")
+    if pre.get("ca125_scaler") is not None:
+        ca_for_scale = ca_val if ca_val is not None else pre.get("ca125_median", 0.0)
+        ca_sc = pre["ca125_scaler"].transform(np.array([[ca_for_scale]], dtype=float))
+        x_aug_sc = np.hstack([x_sc, ca_sc])
+
+    # 5. Run each available model
+    import warnings as _warnings
+    models_payload = []
+    for name in manifest.get("trained_models", []):
+        clf_path = model_dir / f"{name}.joblib"
+        if not clf_path.exists():
+            continue
+        try:
+            clf = joblib.load(clf_path)
+        except Exception:
+            continue
+        is_fusion = name.endswith("+CA125")
+        if is_fusion:
+            if x_aug_sc is None or ca_val is None:
+                # User didn't provide CA-125 → skip fusion models silently
+                continue
+            x_in = x_aug_sc
+        else:
+            x_in = x_sc
+        try:
+            with _warnings.catch_warnings():
+                _warnings.filterwarnings(
+                    "ignore", message="X does not have valid feature names",
+                    category=UserWarning,
+                )
+                p = float(clf.predict_proba(x_in)[0, 1])
+        except Exception as exc:
+            print(f"[diagnosis] {name} predict failed: {exc}")
+            continue
+        models_payload.append({
+            "name":            name,
+            "uses_ca125":      is_fusion,
+            "prob_malignant":  p,
+            "predicted_label": "malignant" if p >= 0.5 else "benign",
+        })
+
+    # 6. Consensus (majority vote across all available models)
+    n_voters = len(models_payload)
+    mal_votes = sum(1 for m in models_payload if m["predicted_label"] == "malignant")
+    mean_prob = (sum(m["prob_malignant"] for m in models_payload) / n_voters) if n_voters else 0.0
+    if n_voters == 0:
+        consensus = {"label": "unknown", "n_voters": 0, "malignant_votes": 0, "mean_prob": 0.0}
+    elif mal_votes > n_voters / 2:
+        consensus = {"label": "malignant", "n_voters": n_voters, "malignant_votes": mal_votes, "mean_prob": mean_prob}
+    elif mal_votes < n_voters / 2:
+        consensus = {"label": "benign",    "n_voters": n_voters, "malignant_votes": mal_votes, "mean_prob": mean_prob}
+    else:
+        consensus = {"label": "borderline", "n_voters": n_voters, "malignant_votes": mal_votes, "mean_prob": mean_prob}
+
+    return {
+        "workdir":            workdir,
+        "n_panel_features":   len(feature_names),
+        "n_features_resolved": int(sum(1 for f in features_payload if not f["missing"])),
+        "ca125_supplied":     ca_val,
+        "models":             models_payload,
+        "consensus":          consensus,
+        "features":           features_payload,
+    }
 
 
 app.include_router(page_router)
