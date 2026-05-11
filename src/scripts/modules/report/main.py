@@ -478,6 +478,66 @@ def generate_report(
     # Pipeline progress (Steps 1–20 status from pipeline_state.json)
     progress_html = _build_pipeline_progress_section(temp_dir)
 
+    # ── Trim parameters actually applied (for Step 12 visualization context) ──
+    #
+    # mbias_auto_trim.json is written by --step mbias and consumed by --step extract
+    # when nOT/nOB are set to "auto" in config.toml. Surfacing the resolved skip
+    # values in the report makes it explicit which positional filtering produced
+    # the methylation distribution shown below.
+    trim_params_html = ""
+    try:
+        _trim_path = os.path.join(temp_dir, "mbias_auto_trim.json")
+        if os.path.exists(_trim_path):
+            with open(_trim_path, encoding="utf-8") as _f:
+                _trim_info = json.load(_f)
+            _n_ot     = _trim_info.get("nOT", "—")
+            _n_ob     = _trim_info.get("nOB", "—")
+            _rlen     = _trim_info.get("read_len", "—")
+            _n_smp    = _trim_info.get("n_samples", "—")
+            _pct      = _trim_info.get("percentile_used", "—")
+            trim_params_html = f"""
+<details open style="margin:6px 0 14px;border:1px solid #ddd;border-radius:6px;padding:10px 14px;background:#fafbfc">
+  <summary style="cursor:pointer;font-weight:bold;color:#1a6fbb;font-size:.92em">
+    Trim parameters actually applied (data-derived; auto-resolved from M-bias)
+  </summary>
+  <table style="font-size:.85em;margin-top:8px">
+    <thead><tr><th>Stage / parameter</th><th>Value applied</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td>fastp <code>trim_front1</code>, <code>trim_front2</code>, <code>trim_tail2</code></td>
+          <td><code>12, 12, 5</code></td>
+          <td>R1/R2 5′ adapter + R2 3′ poly-C (Step 4; values from <code>config.toml [plasma]</code>)</td></tr>
+      <tr><td>MethylDackel <code>--nOT</code> skip counts</td>
+          <td><code>{_n_ot}</code></td>
+          <td>OT strand 5′,3′,3′,5′ — auto-resolved from M-bias</td></tr>
+      <tr><td>MethylDackel <code>--nOB</code> skip counts</td>
+          <td><code>{_n_ob}</code></td>
+          <td>OB strand 5′,3′,3′,5′ — auto-resolved from M-bias</td></tr>
+      <tr><td>Detected read length</td>
+          <td><code>{_rlen}</code> bp</td>
+          <td>used to convert MethylDackel inclusion positions → skip counts</td></tr>
+      <tr><td>Aggregation across samples</td>
+          <td>{_pct}th percentile of {_n_smp} sample(s)</td>
+          <td><code>mbias_trim_percentile</code> in <code>config.toml [plasma]</code></td></tr>
+    </tbody>
+  </table>
+  <p style="color:#666;font-size:.8em;margin:6px 0 0">
+    Full per-sample distribution: <code>{temp_dir}/mbias_auto_trim.json</code>.
+    The methylation distribution shown below is the outcome of applying these positional skips.
+  </p>
+</details>"""
+        else:
+            trim_params_html = (
+                "<p style='color:#856404;background:#fff3cd;padding:8px 12px;"
+                "border-radius:6px;font-size:.85em;margin:6px 0 14px'>"
+                "&#9888; <code>mbias_auto_trim.json</code> not found — "
+                "<code>--step mbias</code> has not been run, or "
+                "<code>nOT</code>/<code>nOB</code> were set to explicit numeric values "
+                "in <code>config.toml [plasma]</code> (bypassing the auto-trim path).</p>"
+            )
+    except Exception as _exc:
+        logger.warning(f"  [report] Could not read mbias_auto_trim.json: {_exc}")
+        trim_params_html = ""
+
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -630,6 +690,9 @@ def generate_report(
 <!-- 6. Methylation Visualization -->
 <div class="section">
 <h2>Step 12. Methylation Distribution Visualization</h2>
+
+{trim_params_html}
+
 <div class="two-col">
   <div><h3>Density Plot</h3>{_img_tag(density_src, 'Density Plot')}</div>
   <div><h3>Position Scatter Plot</h3>{_img_tag(scatter_src, 'Position Scatter Plot')}</div>

@@ -307,6 +307,177 @@ def perform_diff_analysis(sample1_methylation, sample2_methylation, result_dir):
         logger.error(error_msg)
 
 
+def plot_sample_clustered_heatmap(result_dir, output_file):
+    """
+    Build a samples × CpG-sites heatmap, grouped by benign/malignant class,
+    with hierarchical clustering applied within each class so similar samples
+    are placed adjacent. Reads `feature_matrix.npz` from result_dir (written
+    by Step 14 feature_select); falls back to the old single-sample reshape
+    heatmap when the matrix is unavailable.
+
+    Returns
+    -------
+    True  — sample-clustered heatmap was generated.
+    False — feature_matrix.npz missing; caller should use the fallback path.
+    """
+    import os as _os
+    npz_path = _os.path.join(result_dir, "feature_matrix.npz")
+    if not _os.path.exists(npz_path):
+        return False
+
+    try:
+        import numpy as np
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from matplotlib.colors import LinearSegmentedColormap
+        from scipy.cluster.hierarchy import linkage, leaves_list
+        from scipy.spatial.distance import pdist
+    except ImportError as exc:
+        logger.warning(f"  Heatmap dependencies missing ({exc}); falling back.")
+        return False
+
+    data = np.load(npz_path, allow_pickle=True)
+    X            = data["X"].astype(float)
+    y            = np.asarray(data["y"])
+    sample_ids   = list(data["sample_ids"])
+    feature_names = list(data["feature_names"])
+
+    if X.size == 0 or len(y) == 0:
+        logger.warning("  feature_matrix.npz is empty; skipping clustered heatmap.")
+        return False
+
+    # Restrict to the panel CpG sites when available — smaller, cleaner heatmap
+    # focused on the diagnostically informative subset. Without the panel, fall
+    # back to all features (still valid, just larger).
+    panel_path = _os.path.join(result_dir, "panel_cpg.csv")
+    if _os.path.exists(panel_path):
+        try:
+            import pandas as pd
+            panel_set = set(pd.read_csv(panel_path)["feature"])
+            keep_cols = np.array([fn in panel_set for fn in feature_names])
+            if keep_cols.any():
+                X = X[:, keep_cols]
+                feature_names = [f for f, k in zip(feature_names, keep_cols) if k]
+                logger.info(f"  Heatmap restricted to {len(feature_names)} panel CpG sites")
+        except Exception as exc:
+            logger.debug(f"  Panel restriction failed ({exc}); using full feature matrix.")
+
+    # Median-impute NaNs column-wise so clustering metrics are well-defined.
+    col_medians = np.nanmedian(X, axis=0)
+    # Columns that are entirely NaN → impute with 0.5 (uninformative midpoint).
+    col_medians = np.where(np.isnan(col_medians), 0.5, col_medians)
+    nan_mask = np.isnan(X)
+    if nan_mask.any():
+        X = X.copy()
+        X[nan_mask] = np.take(col_medians, np.where(nan_mask)[1])
+
+    def _cluster_rows(rows):
+        """Return a row permutation that places similar rows adjacent.
+        Uses correlation distance + average linkage; gracefully returns the
+        identity permutation when the data is too small or pdist fails."""
+        if len(rows) < 2 or rows.shape[1] < 2:
+            return np.arange(len(rows))
+        try:
+            D = pdist(rows, metric="correlation")
+            # pdist can produce NaN distances when rows have zero variance;
+            # replace with the max finite distance so linkage still works.
+            if np.any(np.isnan(D)):
+                D = np.nan_to_num(D, nan=np.nanmax(D[~np.isnan(D)]) if np.any(~np.isnan(D)) else 1.0)
+            Z = linkage(D, method="average")
+            return np.array(leaves_list(Z))
+        except Exception as exc:
+            logger.debug(f"    Row clustering failed ({exc}); using natural order.")
+            return np.arange(len(rows))
+
+    benign_idx = np.where(y == 0)[0]
+    malig_idx  = np.where(y == 1)[0]
+    order_b = benign_idx[_cluster_rows(X[benign_idx])] if len(benign_idx) else np.array([], dtype=int)
+    order_m = malig_idx [_cluster_rows(X[malig_idx ])] if len(malig_idx ) else np.array([], dtype=int)
+    row_order = np.concatenate([order_b, order_m])
+
+    # Cluster columns too (similar CpG sites adjacent) — purely cosmetic but
+    # makes block-structured methylation patterns visible to reviewers.
+    if X.shape[1] >= 2:
+        try:
+            D_c = pdist(X.T, metric="correlation")
+            if np.any(np.isnan(D_c)):
+                D_c = np.nan_to_num(D_c, nan=np.nanmax(D_c[~np.isnan(D_c)]) if np.any(~np.isnan(D_c)) else 1.0)
+            Z_c = linkage(D_c, method="average")
+            col_order = np.array(leaves_list(Z_c))
+        except Exception:
+            col_order = np.arange(X.shape[1])
+    else:
+        col_order = np.arange(X.shape[1])
+
+    X_plot = X[row_order][:, col_order]
+    n_samp, n_feat = X_plot.shape
+
+    # Figure geometry — wide enough that adjacent CpGs are distinguishable,
+    # tall enough that ~120 sample rows are individually readable.
+    fig_w = max(9.0, min(20.0, n_feat / 35.0))
+    fig_h = max(4.5, min(14.0, n_samp / 9.0 + 1.5))
+
+    fig, (ax_anno, ax_heat) = plt.subplots(
+        1, 2, figsize=(fig_w, fig_h),
+        gridspec_kw={"width_ratios": [1, 60], "wspace": 0.015},
+    )
+
+    # ── Class annotation strip (left of the main heatmap) ──
+    cls_strip = np.array([[0]] * len(order_b) + [[1]] * len(order_m), dtype=float)
+    anno_cmap = LinearSegmentedColormap.from_list("anno", ["#4878CF", "#D65F5F"])
+    ax_anno.imshow(cls_strip, aspect="auto", cmap=anno_cmap, vmin=0, vmax=1, interpolation="nearest")
+    ax_anno.set_xticks([])
+    ax_anno.set_yticks([])
+    ax_anno.set_title("Class", fontsize=9, pad=4)
+    # Boundary line between classes
+    if len(order_b) and len(order_m):
+        ax_anno.axhline(len(order_b) - 0.5, color="black", lw=0.9)
+
+    # ── Main heatmap ──
+    im = ax_heat.imshow(
+        X_plot, aspect="auto", cmap="RdYlBu_r",
+        vmin=0, vmax=1, interpolation="nearest",
+    )
+    ax_heat.set_yticks([])
+    ax_heat.set_xticks([])
+    if len(order_b) and len(order_m):
+        ax_heat.axhline(len(order_b) - 0.5, color="black", lw=1.2)
+
+    ax_heat.set_xlabel(
+        f"{n_feat} CpG sites (correlation-clustered; similar adjacent)",
+        fontsize=10,
+    )
+    ax_heat.set_title(
+        f"Methylation Heatmap — {len(order_b)} benign (blue strip) / "
+        f"{len(order_m)} malignant (red strip); "
+        f"rows hierarchically clustered within each class",
+        fontsize=11, pad=8,
+    )
+
+    # Colorbar
+    cbar = fig.colorbar(im, ax=ax_heat, shrink=0.55, pad=0.015, fraction=0.025)
+    cbar.set_label("Methylation β (0–1)", fontsize=9)
+    cbar.ax.tick_params(labelsize=8)
+
+    # Legend for the class strip
+    from matplotlib.patches import Patch
+    legend_handles = [
+        Patch(facecolor="#4878CF", label=f"Benign (n={len(order_b)})"),
+        Patch(facecolor="#D65F5F", label=f"Malignant (n={len(order_m)})"),
+    ]
+    ax_heat.legend(
+        handles=legend_handles, loc="upper right",
+        bbox_to_anchor=(1.0, -0.04), ncol=2, frameon=False, fontsize=9,
+    )
+
+    plt.savefig(output_file, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    logger.info(f"  Sample-clustered heatmap saved: {output_file} "
+                f"({n_samp} samples × {n_feat} CpG sites)")
+    return True
+
+
 def visualize_results(sample1_methylation, result_dir):
     """
     Visualize analysis results.
@@ -336,10 +507,18 @@ def visualize_results(sample1_methylation, result_dir):
         error_msg = f"error generating scatter plot: {str(e)}"
         logger.error(error_msg)
 
+    # Prefer the sample-clustered heatmap (samples × CpG sites, grouped by class)
+    # when Step 14's feature_matrix.npz is available. Fall back to the legacy
+    # single-sample reshape only when the matrix doesn't exist yet — e.g. when
+    # Step 12 is run standalone before Step 14.
     try:
-        from methylation.methylation_visualizer import visualize_methylation
-        visualize_methylation(sample1_methylation, heatmap_plot, plot_type="heatmap")
-        logger.info("Heatmap saved")
+        if plot_sample_clustered_heatmap(result_dir, heatmap_plot):
+            pass  # already logged inside
+        else:
+            from methylation.methylation_visualizer import visualize_methylation
+            visualize_methylation(sample1_methylation, heatmap_plot, plot_type="heatmap")
+            logger.info("Heatmap saved (legacy single-sample reshape — "
+                        "run --step feature_select first for sample-clustered version)")
     except Exception as e:
         error_msg = f"error generating heatmap: {str(e)}"
         logger.error(error_msg)

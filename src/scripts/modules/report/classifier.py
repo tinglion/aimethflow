@@ -373,15 +373,37 @@ outputs: <code>panel_cpg.csv</code>, <code>feature_importance.csv</code></p>
     clf_records   = _read_csv_safe(clf_sum_path)
 
     if clf_records is not None:
+        # Format a "point [lo–hi]" cell when CI columns are present (new schema
+        # written by run_classifiers since the bootstrap-CI patch); fall back
+        # to the bare point estimate for older summaries that lack CI columns.
+        def _ci_cell(r, point_key, lo_key, hi_key):
+            try:
+                p = float(r.get(point_key, ""))
+            except (TypeError, ValueError):
+                return "<td>—</td>"
+            lo, hi = r.get(lo_key, ""), r.get(hi_key, "")
+            if lo not in ("", None) and hi not in ("", None):
+                try:
+                    return (f"<td style='white-space:nowrap'>{p:.3f}"
+                            f" <span style='color:#888;font-size:.85em'>"
+                            f"[{float(lo):.3f}–{float(hi):.3f}]</span></td>")
+                except (TypeError, ValueError):
+                    pass
+            return f"<td>{p:.3f}</td>"
+
+        # Detect schema once so the header reflects whether CIs will be shown.
+        _first = clf_records[0] if clf_records else {}
+        _has_ci = "auc_ci95_lo" in _first and "auc_ci95_hi" in _first
+
         clf_rows = ""
         for r in clf_records:
             clf_rows += (
                 f"<tr><td>{r.get('classifier','')}</td>"
-                f"<td>{r.get('auc', 0):.3f}</td>"
-                f"<td>{r.get('accuracy', 0):.3f}</td>"
-                f"<td>{r.get('sensitivity', 0):.3f}</td>"
-                f"<td>{r.get('specificity', 0):.3f}</td>"
-                f"<td>{r.get('n_features', '')}</td></tr>\n"
+                + _ci_cell(r, 'auc',         'auc_ci95_lo',  'auc_ci95_hi')
+                + _ci_cell(r, 'accuracy',    'acc_ci95_lo',  'acc_ci95_hi')
+                + _ci_cell(r, 'sensitivity', 'sens_ci95_lo', 'sens_ci95_hi')
+                + _ci_cell(r, 'specificity', 'spec_ci95_lo', 'spec_ci95_hi')
+                + f"<td>{r.get('n_features_mean', r.get('n_features', ''))}</td></tr>\n"
             )
         roc_note   = _img_tag(roc_src,  "ROC Curve")
         cm_note    = _img_tag(cm_src,   "Confusion Matrix")
@@ -478,13 +500,26 @@ outputs: <code>panel_cpg.csv</code>, <code>feature_importance.csv</code></p>
                 "sample info Excel, then run <code>--step ca125_compare</code>.</p>"
             )
 
+        _ci_note = (
+            "<p style='color:#666;font-size:.82em;margin:6px 0 4px'>"
+            "Each metric is <strong>point estimate</strong> "
+            "<span style='color:#888'>[95% bootstrap CI from 1,000 resamples]</span>. "
+            "Wider intervals reflect higher sampling variance — read them when "
+            "comparing classifiers whose point AUCs are close.</p>"
+            if _has_ci else ""
+        )
         sec10_html = f"""
 <div class="section">
 <h2>Step 15. Diagnostic Classifiers — LOO-CV, Benign vs Malignant</h2>
+{_ci_note}
 <table>
-  <tr><th>Classifier</th><th>AUC</th><th>Accuracy</th><th>Sensitivity</th><th>Specificity</th><th>Features</th></tr>
+  <tr><th>Classifier</th><th>AUC [95% CI]</th><th>Accuracy [95% CI]</th>
+      <th>Sensitivity [95% CI]</th><th>Specificity [95% CI]</th><th>Features</th></tr>
   {clf_rows}
 </table>
+<p style="color:#666;font-size:.82em;margin:4px 0">
+  Full numerical table with all CI bounds: <code>classifier_summary.csv</code>.
+</p>
 <div class="two-col" style="margin-top:14px">
   <div><h3>ROC Curves</h3>{roc_note}</div>
   <div><h3>Confusion Matrices</h3>{cm_note}</div>
@@ -695,6 +730,17 @@ outputs: <code>classifier_summary.csv</code>, <code>classifier_predictions.csv</
             n_used       = first.get("n_validation_used", "")
             n_benign_s   = first.get("n_benign", "")
             n_malign_s   = first.get("n_malignant", "")
+            def _fmt4(v):
+                """Render a CSV string/float as a 4-decimal AUC; '—' on parse failure.
+                4 decimals are required so very close numbers (e.g. full=0.8439 vs
+                subset=0.8405) are visually distinguishable in the table."""
+                if v in ("", None):
+                    return "—"
+                try:
+                    return f"{float(v):.4f}"
+                except (TypeError, ValueError):
+                    return str(v)
+
             low_rows = ""
             for r in low_ca_records:
                 clf  = r.get("classifier", "")
@@ -706,19 +752,22 @@ outputs: <code>classifier_summary.csv</code>, <code>classifier_predictions.csv</
                 if auc_sub is not None and full_auc is not None:
                     delta = auc_sub - full_auc
                     delta_color = "#c0392b" if delta <= -0.10 else ("#e67e22" if delta <= -0.04 else "#22863a")
-                    delta_str = f"<span style='color:{delta_color};font-weight:bold'>{delta:+.3f}</span>"
+                    delta_str = f"<span style='color:{delta_color};font-weight:bold'>{delta:+.4f}</span>"
                 else:
                     delta_str = "—"
                 full_auc_cell = f"{full_auc:.4f}" if full_auc is not None else "—"
+                # Render subset AUC with 4 decimals to expose small but real
+                # differences from the full-cohort AUC; the Δ column is the
+                # canonical comparison so colour-coded magnitude is preserved.
                 low_rows += (
                     f"<tr><td>{clf}</td>"
-                    f"<td>{r.get('auc','')}</td>"
-                    f"<td>{r.get('auc_ci95_lo','')}–{r.get('auc_ci95_hi','')}</td>"
+                    f"<td><strong>{_fmt4(r.get('auc',''))}</strong></td>"
+                    f"<td>{_fmt4(r.get('auc_ci95_lo',''))}–{_fmt4(r.get('auc_ci95_hi',''))}</td>"
                     f"<td>{full_auc_cell}</td>"
                     f"<td>{delta_str}</td>"
-                    f"<td>{r.get('accuracy','')}</td>"
-                    f"<td>{r.get('sensitivity','')}</td>"
-                    f"<td>{r.get('specificity','')}</td></tr>\n"
+                    f"<td>{_fmt4(r.get('accuracy',''))}</td>"
+                    f"<td>{_fmt4(r.get('sensitivity',''))}</td>"
+                    f"<td>{_fmt4(r.get('specificity',''))}</td></tr>\n"
                 )
             low_ca_html = f"""
 <h3 style="margin-top:18px">Low-CA-125 Subgroup (CA-125 &lt; {low_thresh} U/mL)</h3>

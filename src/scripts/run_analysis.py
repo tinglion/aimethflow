@@ -875,22 +875,54 @@ def main():
                 return
 
     # =========================================================
-    # Step 14: feature_select  (reads suspect_ids from Step 13 state
-    #           to exclude outlier samples from LASSO/RF selection)
+    # Step 14: feature_select  (resolves the exclusion list with the
+    #           following precedence:
+    #             (1) config.toml [ml] exclude_samples — clinically-confirmed
+    #                 IDs the user has explicitly committed to via Step 13's
+    #                 manual-review workflow. THIS IS THE PREFERRED SOURCE
+    #                 because it represents an audited, version-controlled
+    #                 decision rather than an automatic flag.
+    #             (2) Step 13 state.suspect_ids — raw PCA/IsolationForest
+    #                 flags only used when no clinical review has happened
+    #                 yet (e.g. first-pass exploratory run).
     # =========================================================
     if _should_run("feature_select", False):
         if benign_samples and malignant_samples:
             logger.info("━━ Step 14: Feature selection (LASSO + RF) ━━")
             from scripts.modules.feature_utils import select_features
-            suspect_ids = state.get("suspect_ids") or []
-            if suspect_ids:
+            cfg_excludes = list((config or {}).get("ml", {}).get("exclude_samples", []) or [])
+            suspect_ids  = list(state.get("suspect_ids") or [])
+            if cfg_excludes:
+                exclude_ids = cfg_excludes
                 logger.info(
-                    f"  Excluding {len(suspect_ids)} outlier sample(s) from feature selection: "
-                    f"{suspect_ids}"
+                    f"  Excluding {len(exclude_ids)} sample(s) from feature selection "
+                    f"per config.toml [ml] exclude_samples (clinically reviewed): "
+                    f"{exclude_ids}"
                 )
+                if suspect_ids:
+                    only_in_suspect = [s for s in suspect_ids if s not in set(cfg_excludes)]
+                    if only_in_suspect:
+                        logger.info(
+                            f"  [Step 13 also flagged {len(only_in_suspect)} additional "
+                            f"sample(s) as statistical outliers but RETAINED by clinical "
+                            f"review: {only_in_suspect}. Add them to config.toml "
+                            f"exclude_samples if you want them dropped here too.]"
+                        )
+            elif suspect_ids:
+                exclude_ids = suspect_ids
+                logger.warning(
+                    f"  config.toml [ml] exclude_samples is empty — falling back to "
+                    f"{len(exclude_ids)} sample(s) auto-flagged by Step 13 outlier_detect: "
+                    f"{exclude_ids}. Review outlier_report.csv against clinical records and "
+                    f"commit confirmed exclusions to config.toml to make this decision auditable."
+                )
+            else:
+                exclude_ids = []
+                logger.info("  No exclusion list set (config empty, Step 13 found no suspects).")
+
             panel_features, _ = select_features(
                 workdir, result_dir, config, benign_samples, malignant_samples,
-                extra_exclude_ids=suspect_ids or None,
+                extra_exclude_ids=exclude_ids or None,
             )
             _save_state(workdir, {"completed_steps": state.get("completed_steps", []) + ["feature_select"]})
             logger.info(f"  → {len(panel_features)} features selected — saved to {result_dir}")

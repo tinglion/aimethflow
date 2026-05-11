@@ -18,6 +18,38 @@ from scripts.modules.report.helpers import (
 logger = logging.getLogger(__name__)
 
 
+def _read_exclude_samples():
+    """Best-effort read of `[ml] exclude_samples` from config.toml.
+
+    Tries a few canonical locations (project root, parent of result_dir
+    isn't reliably known here, so we walk up from CWD). Returns an empty list
+    on any failure — the clinical-review panel still renders, just with all
+    suspect samples shown as 'retained'.
+    """
+    try:
+        import toml  # type: ignore
+    except ImportError:
+        return []
+
+    # Walk up from CWD looking for config.toml (covers `python ... --workdir
+    # temp/<ts>` runs where CWD is the project root, plus tests).
+    here = os.path.abspath(os.getcwd())
+    for _ in range(6):
+        candidate = os.path.join(here, "config.toml")
+        if os.path.isfile(candidate):
+            try:
+                cfg = toml.load(candidate)
+                return list(cfg.get("ml", {}).get("exclude_samples", []) or [])
+            except Exception as exc:
+                logger.debug(f"[outlier] failed to parse {candidate}: {exc}")
+                return []
+        parent = os.path.dirname(here)
+        if parent == here:
+            break
+        here = parent
+    return []
+
+
 def _build_outlier_section(result_dir, imgs_dir=None):
     """
     Read outlier_report.csv and build the HTML section + JSON data.
@@ -95,6 +127,49 @@ def _build_outlier_section(result_dir, imgs_dir=None):
         "PCA scatter plot not yet generated — run <code>--step outlier_detect</code>.</p>"
     )
 
+    # Clinical-review panel — distinguishes statistical candidates from
+    # confirmed exclusions. The exclusion list is read from config.toml so the
+    # report stays in sync with the actual analysis cohort.
+    suspect_ids = [r.get("sample_id", "") for r in records
+                   if str(r.get("suspect", "")).lower() == "true"]
+    exclude_list = _read_exclude_samples()
+    excluded_flagged = [sid for sid in suspect_ids if sid in exclude_list]
+    retained_flagged = [sid for sid in suspect_ids if sid not in exclude_list]
+    if suspect_ids:
+        excluded_html = ", ".join(f"<code>{s}</code>" for s in excluded_flagged) or "<em>none</em>"
+        retained_html = ", ".join(f"<code>{s}</code>" for s in retained_flagged) or "<em>none</em>"
+        clinical_review_html = f"""
+<div style="background:#f0f7ff;border-left:4px solid #1a6fbb;padding:10px 14px;border-radius:0 6px 6px 0;margin:10px 0;font-size:.88em">
+  <p style="margin:0 0 6px;font-weight:bold;color:#1a6fbb">
+    Clinical review of statistical outliers
+  </p>
+  <p style="margin:0 0 6px;color:#444">
+    The automated flags above are <strong>candidates, not automatic exclusions</strong>. Each
+    flagged sample was reviewed against its clinical record to distinguish statistical outliers
+    driven by clinically meaningful confounders (whose exclusion is justified) from outliers
+    driven only by sampling or technical noise (where retention preserves cohort size without bias).
+  </p>
+  <table style="font-size:.92em;margin:6px 0 4px;background:transparent">
+    <tr><td style="background:transparent;padding:2px 8px;white-space:nowrap">
+        <strong style="color:#c0392b">Excluded</strong> ({len(excluded_flagged)})</td>
+        <td style="background:transparent;padding:2px 8px">{excluded_html}</td></tr>
+    <tr><td style="background:transparent;padding:2px 8px;white-space:nowrap">
+        <strong style="color:#22863a">Retained</strong> ({len(retained_flagged)})</td>
+        <td style="background:transparent;padding:2px 8px">{retained_html}</td></tr>
+  </table>
+  <p style="margin:6px 0 0;color:#555;font-size:.92em">
+    Clinical confounders that justify exclusion include
+    <strong>double primary cancer</strong> (non-ovarian malignancy co-occurring with the indexed
+    ovarian disease — alters cfDNA tissue-of-origin composition) and
+    <strong>neoadjuvant chemotherapy prior to sample collection</strong> (treatment-induced
+    methylation perturbation independent of underlying disease biology). The current exclusion
+    list is sourced from <code>config.toml [ml] exclude_samples</code>; edit that list and re-run
+    <code>--step classify</code> to apply changes.
+  </p>
+</div>"""
+    else:
+        clinical_review_html = ""
+
     # Unique JS identifier so multiple reports on the same page don't conflict
     tbl_id  = "outlier_tbl"
     ctrl_id = "outlier_ctrl"
@@ -119,6 +194,7 @@ def _build_outlier_section(result_dir, imgs_dir=None):
       <td><strong style="color:{'#c0392b' if n_suspect else '#22863a'}">{n_suspect}</strong></td></tr>
 </table>
 {suspect_note}
+{clinical_review_html}
 {pca_img_html}
 <details style="margin-top:12px" {'open' if n_suspect > 0 else ''}>
   <summary style="cursor:pointer;color:#1a6fbb;font-size:.88em">

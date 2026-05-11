@@ -81,6 +81,7 @@ _STEP_KEYS = {s[0] for s in STEPS}
 _jobs: dict[str, dict] = {}
 
 _HTML = (Path(__file__).parent / "webui.html").read_text(encoding="utf-8")
+_CSS = (Path(__file__).parent / "webui.css").read_text(encoding="utf-8")
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -327,6 +328,10 @@ def view_report():
 @page_router.get("/", response_class=HTMLResponse)
 def index():
     return HTMLResponse(_HTML)
+
+@page_router.get("/webui.css", response_class=HTMLResponse)
+def serve_css():
+    return HTMLResponse(_CSS, media_type="text/css")
 
 
 # ── Aided Diagnosis API ───────────────────────────────────────────────────────
