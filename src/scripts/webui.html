@@ -203,8 +203,10 @@
               <div class="mb-3">
                 <label class="form-label small fw-bold mb-1">CA-125 (optional, U/mL)</label>
                 <input type="number" class="form-control form-control-sm" id="dx-ca125"
-                       step="0.1" min="0" placeholder="e.g. 28.0  — leave blank if unknown" />
+                       step="0.1" min="0" placeholder="e.g. 28.0  — leave blank if unknown"
+                       oninput="updateCa125Zone()" />
                 <small class="text-muted">Leave blank to use cfDNA-only models. Provide a value to additionally run cfDNA + CA-125 fusion models.</small>
+                <div id="dx-ca125-zone" class="mt-1" style="font-size:.8rem"></div>
               </div>
 
               <button class="btn btn-primary btn-sm w-100" id="dx-run-btn" onclick="runDiagnosis()">
@@ -404,6 +406,29 @@
     }
 
     // ── Aided Diagnosis ──────────────────────────────────────────────────────────
+    // Threshold below which CA-125 is considered "low" (cfDNA most informative).
+    // Mirrors temporal_validate.low_ca125_threshold in config.toml.
+    const LOW_CA125_THRESHOLD = 100.0;
+
+    function updateCa125Zone() {
+      const v = document.getElementById('dx-ca125').value;
+      const el = document.getElementById('dx-ca125-zone');
+      if (v === '' || v === null) { el.innerHTML = ''; return; }
+      const x = parseFloat(v);
+      if (isNaN(x) || x < 0) { el.innerHTML = ''; return; }
+      if (x < LOW_CA125_THRESHOLD) {
+        el.innerHTML =
+          `<span class="badge bg-warning text-dark">low-CA-125 zone</span> ` +
+          `<span class="text-muted">CA-125 &lt; ${LOW_CA125_THRESHOLD} U/mL — the clinically harder subset ` +
+          `where CA-125 alone is least informative and the cfDNA panel provides the strongest complementary value.</span>`;
+      } else {
+        el.innerHTML =
+          `<span class="badge bg-secondary">high-CA-125 zone</span> ` +
+          `<span class="text-muted">CA-125 ≥ ${LOW_CA125_THRESHOLD} U/mL — CA-125 alone usually already discriminates well; ` +
+          `cfDNA-only and fusion models still contribute, but the incremental value is smaller.</span>`;
+      }
+    }
+
     async function loadDiagnosisModels() {
       const sel = document.getElementById('dx-model-select');
       const info = document.getElementById('dx-model-info');
@@ -475,9 +500,21 @@
       const meta = document.getElementById('dx-summary-meta');
       meta.textContent = `model: ${d.workdir} · panel: ${d.n_panel_features} CpGs · resolved: ${d.n_features_resolved}`;
 
-      // Consensus card
+      // Consensus card — annotate with the CA-125 zone the patient falls in (if CA-125 was supplied)
       const c = d.consensus || {};
       const verdictColor = c.label === 'malignant' ? '#dc3545' : (c.label === 'benign' ? '#198754' : '#6c757d');
+      let zoneNote = '';
+      if (d.ca125_supplied != null) {
+        if (d.ca125_supplied < LOW_CA125_THRESHOLD) {
+          zoneNote = `<div class="small mt-1"><span class="badge bg-warning text-dark">low-CA-125 zone</span> ` +
+            `<span class="text-muted">CA-125 = ${d.ca125_supplied.toFixed(1)} U/mL &lt; ${LOW_CA125_THRESHOLD} — ` +
+            `cfDNA-only and linear-fusion (LR+CA-125) models are most trustworthy in this zone.</span></div>`;
+        } else {
+          zoneNote = `<div class="small mt-1"><span class="badge bg-secondary">high-CA-125 zone</span> ` +
+            `<span class="text-muted">CA-125 = ${d.ca125_supplied.toFixed(1)} U/mL ≥ ${LOW_CA125_THRESHOLD} — ` +
+            `CA-125 alone is highly discriminative; fusion models provide marginal additional value.</span></div>`;
+        }
+      }
       const consensusHtml = `
         <div style="background:#f8f9fa;border-left:4px solid ${verdictColor};padding:10px 14px;border-radius:6px;margin-bottom:14px">
           <div class="small text-muted">Consensus (majority vote across ${c.n_voters || 0} models)</div>
@@ -487,6 +524,7 @@
               ${c.malignant_votes != null ? `(${c.malignant_votes} / ${c.n_voters} voted malignant; mean prob = ${(c.mean_prob || 0).toFixed(3)})` : ''}
             </span>
           </div>
+          ${zoneNote}
         </div>
       `;
 

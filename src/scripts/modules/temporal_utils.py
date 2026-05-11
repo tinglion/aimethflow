@@ -554,6 +554,126 @@ def run_temporal_validation(workdir, result_dir, config, benign_samples, maligna
                 "fusion model improves or degrades vs cfDNA alone — a non-overlapping CI is the "
                 "minimum bar for a real difference.")
 
+    # 11b. Low-CA125 subset re-analysis — clinically valuable subgroup
+    #
+    # Re-evaluate every model on the validation subset of patients with CA-125
+    # below `low_ca125_threshold` (default 100 U/mL). High-CA-125 patients are
+    # typically clinically obvious (advanced disease, large tumour burden) where
+    # CA-125 alone already discriminates well; the cfDNA panel adds the most
+    # value in the low-CA-125 subset where CA-125 itself is least informative.
+    low_ca_thresh = float(tv_cfg.get("low_ca125_threshold", 100.0))
+    if low_ca_thresh > 0 and ca125_test is not None:
+        # Mask aligns with full validation cohort (length n_val).
+        # NaN CA-125 → excluded from the subset (no measurement to threshold).
+        low_ca_mask_full = (~np.isnan(ca125_test)) & (ca125_test < low_ca_thresh)
+        n_low_ca = int(low_ca_mask_full.sum())
+        n_low_ca_pos = int((y_test[low_ca_mask_full] == 1).sum())
+        n_low_ca_neg = int((y_test[low_ca_mask_full] == 0).sum())
+
+        if n_low_ca < 5 or n_low_ca_pos < 2 or n_low_ca_neg < 2:
+            logger.info(
+                f"[temporal/low-ca125] Skipping subset analysis: "
+                f"n={n_low_ca} (benign={n_low_ca_neg}, malignant={n_low_ca_pos}) — "
+                f"need ≥2 of each class for AUC."
+            )
+        else:
+            logger.info(
+                f"\n[temporal/low-ca125] Re-evaluating all models on the CA-125 < "
+                f"{low_ca_thresh:g} U/mL subset (n={n_low_ca}: "
+                f"{n_low_ca_neg} benign, {n_low_ca_pos} malignant)"
+            )
+
+            sub_summary_rows = []
+            sub_results = {}
+            for clf_name, res in results.items():
+                # CA-125 baseline: y_prob IS the CA-125 value, threshold directly.
+                # cfDNA-only / fusion: arrays span full val cohort, use full mask.
+                if clf_name == "CA-125":
+                    sub_mask = res["y_prob"] < low_ca_thresh
+                else:
+                    if len(res["y_true"]) != len(low_ca_mask_full):
+                        # Length mismatch (e.g. model evaluated on a different subset);
+                        # skip rather than risk misalignment.
+                        logger.debug(
+                            f"[temporal/low-ca125] Skipping {clf_name}: array length "
+                            f"{len(res['y_true'])} ≠ mask length {len(low_ca_mask_full)}"
+                        )
+                        continue
+                    sub_mask = low_ca_mask_full
+
+                yt_s = np.asarray(res["y_true"])[sub_mask]
+                yp_s = np.asarray(res["y_prob"])[sub_mask]
+                yd_s = np.asarray(res["y_pred"])[sub_mask]
+                if len(yt_s) < 5 or len(np.unique(yt_s)) < 2:
+                    continue
+
+                acc_s  = float(accuracy_score(yt_s, yd_s))
+                cm_s   = confusion_matrix(yt_s, yd_s, labels=[0, 1])
+                tn, fp, fn, tp = cm_s.ravel()
+                sens_s = tp / (tp + fn) if (tp + fn) > 0 else float("nan")
+                spec_s = tn / (tn + fp) if (tn + fp) > 0 else float("nan")
+                auc_s  = float(roc_auc_score(yt_s, yp_s))
+                ci_s   = _bootstrap_ci(yt_s, yp_s, yd_s, n_bootstrap=1000)
+                au_lo, au_hi = ci_s.get("auc",         ("", ""))
+                ac_lo, ac_hi = ci_s.get("accuracy",    ("", ""))
+                se_lo, se_hi = ci_s.get("sensitivity", ("", ""))
+                sp_lo, sp_hi = ci_s.get("specificity", ("", ""))
+
+                sub_results[clf_name] = {
+                    "y_true": yt_s, "y_prob": yp_s, "y_pred": yd_s,
+                    "auc": auc_s, "accuracy": acc_s,
+                    "sensitivity": sens_s, "specificity": spec_s,
+                    "ci": ci_s,
+                }
+                sub_summary_rows.append({
+                    "classifier":         clf_name,
+                    "subset":             f"CA-125 < {low_ca_thresh:g}",
+                    "n_train":            len(train_idx),
+                    "n_validation_total": len(test_idx),
+                    "n_validation_used":  int(sub_mask.sum()) if clf_name != "CA-125" else int(len(yt_s)),
+                    "n_benign":           int((yt_s == 0).sum()),
+                    "n_malignant":        int((yt_s == 1).sum()),
+                    "auc":                _r(auc_s),
+                    "auc_ci95_lo":        _r(au_lo),
+                    "auc_ci95_hi":        _r(au_hi),
+                    "accuracy":           _r(acc_s),
+                    "acc_ci95_lo":        _r(ac_lo),
+                    "acc_ci95_hi":        _r(ac_hi),
+                    "sensitivity":        _r(sens_s),
+                    "sens_ci95_lo":       _r(se_lo),
+                    "sens_ci95_hi":       _r(se_hi),
+                    "specificity":        _r(spec_s),
+                    "spec_ci95_lo":       _r(sp_lo),
+                    "spec_ci95_hi":       _r(sp_hi),
+                    "cutoff_date":        str(CUTOFF.date()),
+                    "low_ca125_threshold": low_ca_thresh,
+                })
+
+            sub_df = pd.DataFrame(sub_summary_rows)
+            sub_path = os.path.join(result_dir, "temporal_validation_summary_lowca125.csv")
+            sub_df.to_csv(sub_path, index=False)
+            logger.info(f"[temporal/low-ca125] Subset summary saved: {sub_path}")
+
+            # Console table for the subset (mirrors the main one)
+            logger.info("\n  ┌────────────────────────────────────────────────────────────────────────────┐")
+            logger.info(f"  │  Low-CA-125 subset (CA-125 < {low_ca_thresh:g} U/mL): "
+                        f"{n_low_ca} samples, {n_low_ca_neg} benign, {n_low_ca_pos} malignant │")
+            logger.info("  ├─────────────┬──────────────────────┬───────────┬───────────┬───────────────┤")
+            logger.info("  │ Classifier  │        AUC           │  Accuracy │  Sensitiv │  Specificity  │")
+            logger.info("  ├─────────────┼──────────────────────┼───────────┼───────────┼───────────────┤")
+            for row in sub_summary_rows:
+                def _fmt(v, lo, hi):
+                    if lo != "" and not (isinstance(v, str) and v == ""):
+                        return f"{v:.3f}[{lo:.3f}-{hi:.3f}]"
+                    return f"{v}" if isinstance(v, str) else f"{v:.3f}"
+                logger.info(
+                    f"  │ {row['classifier']:<11} │ {_fmt(row['auc'], row['auc_ci95_lo'], row['auc_ci95_hi']):<20} │"
+                    f" {_fmt(row['accuracy'], row['acc_ci95_lo'], row['acc_ci95_hi']):<9} │"
+                    f" {_fmt(row['sensitivity'], row['sens_ci95_lo'], row['sens_ci95_hi']):<9} │"
+                    f"   {_fmt(row['specificity'], row['spec_ci95_lo'], row['spec_ci95_hi']):<13} │"
+                )
+            logger.info("  └─────────────┴──────────────────────┴───────────┴───────────┴───────────────┘")
+
     # 12. Diagnostic plot — CA-125 distribution by (period × group). Tests the
     # selection-bias hypothesis: if validation-period malignant CA-125 is markedly
     # higher than training-period malignant CA-125, the val cohort is enriched for

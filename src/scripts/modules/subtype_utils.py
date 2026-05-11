@@ -5,7 +5,7 @@ subtype_utils.py - Subtype classifier module (Step 16)
 Multi-class LOO-CV on malignant + borderline samples using the "subtype" column
 from the sample Excel.  Classifiers: RF and SVM (OvR).
 
-Also runs a dedicated binary classifier: 高级别浆液性癌 (HGSOC) vs all other subtypes.
+Also runs a dedicated binary classifier: high-grade serous carcinoma (HGSC) vs all other subtypes.
 
 Outputs (saved to result_dir):
     subtype_predictions.csv          -- per-sample predicted subtype + confidence (multi-class)
@@ -31,76 +31,198 @@ from utils.logger import logger
 # Constants
 # ---------------------------------------------------------------------------
 
-# Chinese subtype labels as they appear in the Excel "亚型" column
+# Canonical English subtype labels used by the classifier.
+# These five classes correspond to the standard histological subtypes of
+# epithelial ovarian carcinoma. Other malignant labels in the input Excel
+# (e.g. "double primary cancer", "unknown type") and all benign/borderline
+# entries are dropped from subtype classification by _normalize_subtype().
 SUBTYPE_CLASSES = [
-    "高级别浆液性癌",
-    "子宫内膜样癌",
-    "透明细胞癌",
-    "低级别浆液性癌",
-    "黏液性",
+    "HGSC",
+    "Endometrioid",
+    "Clear cell",
+    "LGSC",
+    "Mucinous",
 ]
 
-# Concise English labels used in plots/CSVs (avoids CJK font dependency)
-SUBTYPE_EN = {
+# Identity map kept for backward compatibility with existing call sites that
+# previously translated Chinese → English. After normalization, labels are
+# already in canonical English form, so `SUBTYPE_EN.get(c, c)` is a safe no-op.
+SUBTYPE_EN = {k: k for k in SUBTYPE_CLASSES}
+
+# Subtypes that are recognised but explicitly non-classifiable
+# (logged once per run; samples are dropped from subtype classification).
+_SUBTYPE_SKIP_LITERALS = {
+    "unknown", "unknown type", "unknown typ",
+    "double primary cancer", "double primary",
+    "n/a", "na", "nan", "",
+}
+
+# Legacy Chinese exact-match aliases — preserved for back-compatibility with
+# older sample-info Excels that haven't been migrated to English yet.
+_SUBTYPE_LEGACY_CN = {
     "高级别浆液性癌": "HGSC",
     "子宫内膜样癌":   "Endometrioid",
     "透明细胞癌":     "Clear cell",
     "低级别浆液性癌": "LGSC",
     "黏液性":         "Mucinous",
+    "粘液性":         "Mucinous",   # alternate variant of 黏
 }
 
-# Viability thresholds
-MIN_SAMPLES_TOTAL    = 10   # absolute minimum to attempt LOO-CV
-MIN_SAMPLES_PER_CLASS = 2   # classes below this get a reliability warning
-WARN_SAMPLES_TOTAL   = 20   # overall reliability warning below this total
+
+def _normalize_subtype(raw):
+    """
+    Map a raw subtype string to one of SUBTYPE_CLASSES.
+
+    Recognised inputs (case-insensitive; hyphen/underscore-tolerant):
+
+      ``"high-grade serous carcinoma"`` / ``"high grade serous carcinoma"`` /
+      ``"hgsc"``                                                  → ``"HGSC"``
+      ``"low-grade serous carcinoma"`` /  ``"low grade serous carcinoma"`` /
+      ``"lgsc"``                                                  → ``"LGSC"``
+      ``"clear cell carcinoma"`` / ``"clear cell"``               → ``"Clear cell"``
+      ``"endometrioid carcinoma"`` / ``"endometrioid"``           → ``"Endometrioid"``
+      ``"mucinous carcinoma"`` / ``"mucinous"``                   → ``"Mucinous"``
+
+    Returns ``None`` (sample is skipped) for:
+      - any value in ``_SUBTYPE_SKIP_LITERALS`` (unknown / double-primary / NA)
+      - plain ``"serous"`` without a high/low-grade qualifier — clinically
+        ambiguous between HGSC, LGSC, and serous borderline tumour
+      - benign-condition labels that slip through the category filter
+        (e.g. ``"corpus luteum cyst"``, ``"fibroma"``, ``"...cystadenoma"``)
+      - any other unrecognised string (caller logs an aggregated warning)
+
+    Legacy Chinese labels remain supported.
+    """
+    if raw is None:
+        return None
+    s_raw = str(raw).strip()
+    if not s_raw:
+        return None
+
+    # Legacy Chinese exact match first
+    if s_raw in _SUBTYPE_LEGACY_CN:
+        return _SUBTYPE_LEGACY_CN[s_raw]
+
+    # Normalise English: case-fold, treat hyphens/underscores as spaces,
+    # collapse whitespace.
+    s = s_raw.lower().replace("-", " ").replace("_", " ")
+    s = " ".join(s.split())
+
+    if s in _SUBTYPE_SKIP_LITERALS:
+        return None
+
+    # Carcinoma matches — order matters: more-specific patterns first.
+    if "high grade serous" in s:
+        return "HGSC"
+    if "low grade serous" in s:
+        return "LGSC"
+    if s == "hgsc":
+        return "HGSC"
+    if s == "lgsc":
+        return "LGSC"
+    if "clear cell" in s:
+        return "Clear cell"
+    if "endometrioid" in s:
+        return "Endometrioid"
+    if "mucinous carcinoma" in s or s == "mucinous":
+        # Plain "mucinous" → Mucinous carcinoma (single canonical bucket).
+        # If category-aware borderline handling is needed later, branch here.
+        return "Mucinous"
+
+    # Plain "serous" without grade qualifier — clinically ambiguous, drop.
+    if s == "serous":
+        return None
+
+    # Anything else (cystadenomas, fibromas, simple cysts, hemorrhages, etc.)
+    # is silently unrecognised; caller aggregates these into one log entry.
+    return None
+
+# Default viability thresholds — overridden by config.toml [ml].
+# These mirror the keys documented in config.toml; if the user has not set them,
+# we fall back to these conservative defaults rather than failing.
+_DEFAULT_MIN_SAMPLES_TOTAL     = 10
+_DEFAULT_MIN_SAMPLES_PER_CLASS = 2
+_DEFAULT_WARN_SAMPLES_TOTAL    = 20
+
+
+def _read_subtype_thresholds(config):
+    """Read viability thresholds from config.toml [ml] with safe fallbacks."""
+    ml = (config or {}).get("ml", {}) if config else {}
+    return (
+        int(ml.get("subtype_min_samples_total",     _DEFAULT_MIN_SAMPLES_TOTAL)),
+        int(ml.get("subtype_min_samples_per_class", _DEFAULT_MIN_SAMPLES_PER_CLASS)),
+        int(ml.get("subtype_warn_samples_total",    _DEFAULT_WARN_SAMPLES_TOTAL)),
+    )
 
 
 # ---------------------------------------------------------------------------
 # Viability check
 # ---------------------------------------------------------------------------
 
-def _check_viability(labels):
+def _check_viability(labels, config=None):
     """
     Decide whether the dataset is large enough for meaningful LOO-CV.
 
+    Thresholds are read from config.toml [ml]:
+      - ``subtype_min_samples_total``     (default 10) — hard floor; below this
+        Step 16 is **skipped** and a `subtype_skip.json` marker is written.
+      - ``subtype_min_samples_per_class`` (default 2)  — classes below this trigger
+        a per-class reliability warning.
+      - ``subtype_warn_samples_total``    (default 20) — below this (but ≥ min),
+        training proceeds with an "indicative-only" warning.
+
     Returns:
-        viable   (bool)       -- False means skip training entirely
-        reason   (str)        -- plain-English explanation when not viable
-        warnings (list[str])  -- non-fatal reliability concerns
+        viable     (bool)       -- False means skip training entirely
+        reason     (str)        -- plain-English explanation when not viable
+        warnings   (list[str])  -- non-fatal reliability concerns
+        thresholds (dict)       -- the actual threshold values used (for logging
+                                   and inclusion in `subtype_skip.json`)
     """
+    min_total, min_per_class, warn_total = _read_subtype_thresholds(config)
+    thresholds = {
+        "subtype_min_samples_total":     min_total,
+        "subtype_min_samples_per_class": min_per_class,
+        "subtype_warn_samples_total":    warn_total,
+    }
+
     counts    = Counter(labels)
     n_total   = len(labels)
     n_classes = len(counts)
 
-    if n_total < MIN_SAMPLES_TOTAL:
+    if n_total < min_total:
         return False, (
-            f"Only {n_total} labelled sample(s) — minimum {MIN_SAMPLES_TOTAL} required. "
+            f"Only {n_total} labelled sample(s) — minimum {min_total} required for "
+            f"reliable multi-class LOO-CV (configurable via "
+            f"`ml.subtype_min_samples_total` in config.toml). "
             f"Class distribution: {dict(counts)}. "
-            "Collect more malignant/borderline samples before running subtype classification."
-        ), []
+            "Collect more malignant samples before running subtype classification, "
+            "or lower the threshold if you accept reduced statistical reliability."
+        ), [], thresholds
 
     if n_classes < 2:
         return False, (
             f"Only 1 subtype class present ({list(counts.keys())[0]}, n={n_total}). "
             "At least 2 distinct subtypes are required."
-        ), []
+        ), [], thresholds
 
     warnings = []
-    if n_total < WARN_SAMPLES_TOTAL:
+    if n_total < warn_total:
         warnings.append(
-            f"Small dataset ({n_total} samples total): LOO-CV results should be "
-            "treated as indicative only."
+            f"Small dataset ({n_total} < {warn_total} samples total): LOO-CV "
+            "results should be treated as indicative only "
+            "(threshold: `ml.subtype_warn_samples_total`)."
         )
 
-    singletons = [c for c, n in counts.items() if n < MIN_SAMPLES_PER_CLASS]
+    singletons = [c for c, n in counts.items() if n < min_per_class]
     if singletons:
         en = [SUBTYPE_EN.get(c, c) for c in singletons]
         warnings.append(
-            f"Class(es) with only 1 sample — will never appear in training for their "
-            f"leave-out fold: {en}. Predictions for these classes are unreliable."
+            f"Class(es) with < {min_per_class} sample(s) — will never appear in "
+            f"training for their leave-out fold: {en}. Predictions for these "
+            f"classes are unreliable (threshold: `ml.subtype_min_samples_per_class`)."
         )
 
-    rare = [c for c, n in counts.items() if MIN_SAMPLES_PER_CLASS <= n < 3]
+    rare = [c for c, n in counts.items() if min_per_class <= n < 3]
     if rare:
         en = [SUBTYPE_EN.get(c, c) for c in rare]
         warnings.append(
@@ -108,15 +230,27 @@ def _check_viability(labels):
             "AUC and per-class sensitivity will be near-random for these groups."
         )
 
-    return True, "", warnings
+    return True, "", warnings, thresholds
 
 
-def _save_skip_summary(result_dir, reason, warnings=None):
-    """Write a skip marker so the report can display the reason."""
+def _save_skip_summary(result_dir, reason, warnings=None, thresholds=None,
+                       n_total=None, class_distribution=None):
+    """Write a skip marker so the report can display the reason and the
+    threshold values that triggered the skip."""
     path = os.path.join(result_dir, "subtype_skip.json")
+    payload = {
+        "skipped": True,
+        "reason":   reason,
+        "warnings": warnings or [],
+    }
+    if thresholds is not None:
+        payload["thresholds"] = thresholds
+    if n_total is not None:
+        payload["n_total"] = n_total
+    if class_distribution is not None:
+        payload["class_distribution"] = class_distribution
     with open(path, "w", encoding="utf-8") as f:
-        json.dump({"skipped": True, "reason": reason,
-                   "warnings": warnings or []}, f, ensure_ascii=False, indent=2)
+        json.dump(payload, f, ensure_ascii=False, indent=2)
     logger.info(f"  Subtype skip reason saved: {path}")
 
 
@@ -152,20 +286,53 @@ def _build_subtype_map(config):
         df["subtype"] = df["subtype"].astype(str).str.strip()
         logger.info(f"  → subtype distribution: {df['subtype'].value_counts().to_dict()}")
 
+        # Aggregate unrecognised subtype labels into a single warning per sheet
+        # so the log isn't flooded with per-sample messages.
+        unrecognised = Counter()
+        skipped_explicit = Counter()
+
         for _, row in df.iterrows():
             category = str(row.get("category", "")).strip() if "category" in df.columns else "malignant"
             if category not in ("malignant", "borderline"):
                 continue
-            subtype = str(row.get("subtype", "")).strip()
-            if not subtype or subtype in ("nan", ""):
+            raw_subtype = str(row.get("subtype", "")).strip()
+            if not raw_subtype or raw_subtype.lower() == "nan":
                 continue
+
+            canonical = _normalize_subtype(raw_subtype)
+            if canonical is None:
+                # Distinguish "explicitly skip-listed" (known non-classifiable
+                # labels) from "truly unrecognised" (typo / new pathology).
+                s_norm = raw_subtype.lower().replace("-", " ").replace("_", " ")
+                s_norm = " ".join(s_norm.split())
+                if s_norm in _SUBTYPE_SKIP_LITERALS or s_norm == "serous":
+                    skipped_explicit[raw_subtype] += 1
+                else:
+                    unrecognised[raw_subtype] += 1
+                continue
+
             r1  = str(row.get("fq_R1", "")).strip()
-            pid = r1.split(".")[0]
+            # Canonical sample-id split: matches feature_matrix.npz keys
+            # (e.g. 'B10013_R1.fq.gz' → 'B10013'), same scheme used by
+            # classifier_utils._build_sid_to_case_map.
+            pid = r1.split(".")[0].split("_")[0]
             if pid and pid != "nan":
-                subtype_map[pid] = subtype
+                subtype_map[pid] = canonical
+
+        if skipped_explicit:
+            logger.info(
+                f"  → non-classifiable subtypes dropped (expected): "
+                f"{dict(skipped_explicit)}"
+            )
+        if unrecognised:
+            logger.warning(
+                f"  → unrecognised subtype labels (dropped): "
+                f"{dict(unrecognised)} — extend _normalize_subtype() if these "
+                f"are legitimate new categories."
+            )
 
     dist = Counter(subtype_map.values())
-    logger.info(f"Subtype labels loaded: {len(subtype_map)} samples")
+    logger.info(f"Subtype labels loaded (canonical): {len(subtype_map)} samples")
     for k, v in sorted(dist.items(), key=lambda x: -x[1]):
         logger.info(f"  {k}: {v}")
     return subtype_map
@@ -328,6 +495,16 @@ def _run_ovr_binary(X_raw, labels, sample_ids, observed_classes, result_dir, con
                          "font.sans-serif": ["DejaVu Sans"]})
 
     ml_cfg = (config or {}).get("ml", {})
+    # OvR per-class threshold — configurable via config.toml [ml].
+    # Subtypes failing this check are skipped with a clear log; if NO subtype
+    # passes, the whole OvR step writes ovr_skip.json so the report can render
+    # a clean "Skipped" panel.
+    ovr_min = int(ml_cfg.get("ovr_min_samples_per_class", 2))
+    logger.info(
+        f"  OvR per-class threshold (config.toml [ml].ovr_min_samples_per_class): "
+        f"{ovr_min} (need ≥{ovr_min} positives AND ≥{ovr_min} negatives per subtype)"
+    )
+
     clf_factories = {
         "RF":  lambda: RandomForestClassifier(
             n_estimators=ml_cfg.get("rf_n_estimators", 200),
@@ -343,22 +520,49 @@ def _run_ovr_binary(X_raw, labels, sample_ids, observed_classes, result_dir, con
     summary_all = []   # list of dicts → ovr_summary.csv
     pred_all    = []   # list of dicts → ovr_predictions.csv
 
+    # Track per-class viability outcomes so the report can show "skipped because …"
+    trained_classes = []         # list[str]  — subtypes that were trained
+    skipped_classes = []         # list[dict] — {subtype, n_positive, n_negative, reason}
+
     # Per-classifier ROC data collected across all subtypes for the combined plot
     roc_data = {cn: {} for cn in clf_names}   # {clf_name: {subtype_en: (fpr, tpr, auc)}}
 
-    for cls in observed_classes:
+    # Exclude the "Others" merge bucket from OvR entirely (no training, no
+    # confusion matrix, no ROC, no entry in any OvR output file or report
+    # warning). It is a heterogeneous catch-all of below-threshold rare
+    # subtypes — a one-vs-rest binary against it has no clean clinical meaning
+    # and would clutter the OvR plots. "Others" still appears in the
+    # multi-class confusion matrix above where its catch-all nature is
+    # appropriate; it is treated as if it were never an OvR candidate.
+    ovr_candidates = [c for c in observed_classes if c != "Others"]
+    n_others_excluded = len(observed_classes) - len(ovr_candidates)
+    if n_others_excluded:
+        logger.info(
+            f"  OvR: 'Others' merge bucket is excluded by design "
+            f"(heterogeneous catch-all of rare subtypes — not a clinically "
+            f"meaningful binary target)."
+        )
+
+    for cls in ovr_candidates:
         en = SUBTYPE_EN.get(cls, cls)
         y_bin  = np.array([1 if lbl == cls else 0 for lbl in labels])
         n_pos  = int(y_bin.sum())
         n_neg  = len(y_bin) - n_pos
 
-        if n_pos < 2 or n_neg < 2:
-            logger.warning(
-                f"  OvR [{en}]: skipped — need ≥2 positive and ≥2 negative "
-                f"(pos={n_pos}, neg={n_neg})"
-            )
+        if n_pos < ovr_min or n_neg < ovr_min:
+            reason = (f"need ≥{ovr_min} positive AND ≥{ovr_min} negative "
+                      f"(got pos={n_pos}, neg={n_neg}); "
+                      f"threshold: ml.ovr_min_samples_per_class")
+            logger.warning(f"  OvR [{en}]: skipped — {reason}")
+            skipped_classes.append({
+                "subtype":    en,
+                "n_positive": n_pos,
+                "n_negative": n_neg,
+                "reason":     reason,
+            })
             continue
 
+        trained_classes.append(en)
         logger.info(f"  OvR [{en}]: pos={n_pos}, neg={n_neg}")
 
         for clf_name, factory in clf_factories.items():
@@ -426,9 +630,63 @@ def _run_ovr_binary(X_raw, labels, sample_ids, observed_classes, result_dir, con
                     "correct":      bool(y_true[i] == y_pred[i]),
                 })
 
+    # Whole-step skip: NO subtype had enough samples → write ovr_skip.json so
+    # the report can render a clean Skipped panel parallel to subtype_skip.json.
     if not summary_all:
-        logger.warning("  OvR binary: no subtypes had enough samples — nothing saved")
+        reason = (
+            f"No subtype met the OvR per-class minimum "
+            f"(ml.ovr_min_samples_per_class = {ovr_min}). "
+            f"Per-class details: {skipped_classes}"
+        )
+        logger.error(f"  OvR binary: SKIP — {reason}")
+        skip_path = os.path.join(result_dir, "ovr_skip.json")
+        with open(skip_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "step_skipped":    True,
+                "reason":          reason,
+                "thresholds":      {"ovr_min_samples_per_class": ovr_min},
+                "skipped_classes": skipped_classes,
+                "trained_classes": [],
+                "n_observed_classes": len(observed_classes),
+            }, f, ensure_ascii=False, indent=2)
+        logger.info(f"  OvR skip marker saved: {skip_path}")
         return []
+
+    # At least one subtype trained → clear any stale whole-step skip marker
+    # left over from a previous all-failed run.
+    stale_skip = os.path.join(result_dir, "ovr_skip.json")
+    if os.path.exists(stale_skip):
+        try:
+            os.remove(stale_skip)
+            logger.info(f"  Removed stale OvR skip marker: {stale_skip}")
+        except OSError as exc:
+            logger.warning(f"  Could not remove stale {stale_skip}: {exc}")
+
+    # Partial skip: some subtypes trained, some skipped. Persist the per-class
+    # skip list so the report can show which subtypes were excluded and why.
+    partial_path = os.path.join(result_dir, "ovr_skipped_classes.json")
+    if skipped_classes:
+        with open(partial_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "step_skipped":    False,
+                "thresholds":      {"ovr_min_samples_per_class": ovr_min},
+                "skipped_classes": skipped_classes,
+                "trained_classes": trained_classes,
+                "n_observed_classes": len(observed_classes),
+            }, f, ensure_ascii=False, indent=2)
+        logger.info(
+            f"  OvR partial skip: trained={trained_classes}, "
+            f"skipped={[c['subtype'] for c in skipped_classes]} "
+            f"→ {partial_path}"
+        )
+    else:
+        # All classes passed → clear any stale partial-skip marker too.
+        if os.path.exists(partial_path):
+            try:
+                os.remove(partial_path)
+                logger.info(f"  Removed stale OvR partial-skip marker: {partial_path}")
+            except OSError as exc:
+                logger.warning(f"  Could not remove stale {partial_path}: {exc}")
 
     # Save CSVs
     pd.DataFrame(summary_all).to_csv(
@@ -524,25 +782,100 @@ def run_subtype_classifier(workdir, result_dir, config):
     logger.debug(f"  feature_matrix sample_ids[:5]: {all_sample_ids[:5]}")
     logger.debug(f"  subtype_map keys[:5]: {list(subtype_map.keys())[:5]}")
 
-    # 4. Viability check — fail fast with a clear message
-    viable, reason, warnings = _check_viability(labels)
+    # 4a. Merge rare classes into "Others" (multi-class + OvR consistency)
+    #
+    # Classes with fewer than `subtype_min_samples_per_class` samples are merged
+    # into a single "Others" bucket rather than (a) treated as their own
+    # statistically-unreliable class or (b) silently inflating warnings. Applied
+    # BEFORE the viability check so every downstream stage — multi-class LOO,
+    # confusion matrix, OvR binary, ROC, predictions CSV — operates on the
+    # merged labels consistently.
+    #
+    # If the merged "Others" bucket itself is still below the threshold (i.e.
+    # there are very few rare-class samples in total), those samples are dropped
+    # entirely rather than creating an unreliable single-sample-collection class.
+    OTHERS_LABEL    = "Others"
+    _ml_cfg         = (config or {}).get("ml", {})
+    min_per_class   = int(_ml_cfg.get("subtype_min_samples_per_class", 2))
+    pre_merge_counts = Counter(labels)
+    rare_classes    = sorted(c for c, n in pre_merge_counts.items() if n < min_per_class)
+
+    if rare_classes:
+        n_rare_total = sum(pre_merge_counts[c] for c in rare_classes)
+        rare_summary = ", ".join(
+            f"{SUBTYPE_EN.get(c, c)}={pre_merge_counts[c]}" for c in rare_classes
+        )
+        if n_rare_total < min_per_class:
+            # Even after merging, "Others" would be too small → drop entirely.
+            n_before    = len(labels)
+            keep_mask   = [c not in set(rare_classes) for c in labels]
+            indices     = [i for i, k in zip(indices,    keep_mask) if k]
+            labels      = [l for l, k in zip(labels,     keep_mask) if k]
+            sample_ids  = [s for s, k in zip(sample_ids, keep_mask) if k]
+            logger.warning(
+                f"  [subtype] Rare classes ({rare_summary}) total only {n_rare_total} "
+                f"sample(s) — below `ml.subtype_min_samples_per_class = {min_per_class}` "
+                f"even after merging into '{OTHERS_LABEL}'. Dropping "
+                f"{n_before - len(labels)} sample(s) entirely to avoid an "
+                f"unreliable class."
+            )
+        else:
+            # Relabel rare-class samples to 'Others' (in-place; counts re-derived below)
+            labels = [OTHERS_LABEL if c in set(rare_classes) else c for c in labels]
+            logger.info(
+                f"  [subtype] Merged {len(rare_classes)} rare class(es) into "
+                f"'{OTHERS_LABEL}' (per `ml.subtype_min_samples_per_class = {min_per_class}`): "
+                f"{rare_summary} → '{OTHERS_LABEL}'={n_rare_total}"
+            )
+
+    # 4. Viability check — fail fast with a clear, config-driven message
+    viable, reason, warnings, thresholds = _check_viability(labels, config)
+    logger.info(
+        f"  [subtype] Viability thresholds (config.toml [ml]): "
+        f"min_total={thresholds['subtype_min_samples_total']}, "
+        f"min_per_class={thresholds['subtype_min_samples_per_class']}, "
+        f"warn_total={thresholds['subtype_warn_samples_total']}"
+    )
     for w in warnings:
         logger.warning(f"  [subtype] {w}")
     if not viable:
         logger.error(f"  [subtype] SKIP — {reason}")
-        _save_skip_summary(result_dir, reason, warnings)
+        _save_skip_summary(
+            result_dir, reason, warnings,
+            thresholds=thresholds,
+            n_total=len(labels),
+            class_distribution=dict(Counter(labels)),
+        )
         return {}, pd.DataFrame()
+
+    # Training will proceed → clear any stale skip markers from previous runs
+    # so the report doesn't show a "Skipped" panel for a cohort that now passes.
+    for stale in ("subtype_skip.json", "ovr_skip.json", "ovr_skipped_classes.json"):
+        p = os.path.join(result_dir, stale)
+        if os.path.exists(p):
+            try:
+                os.remove(p)
+                logger.info(f"  [subtype] Removed stale skip marker: {p}")
+            except OSError as exc:
+                logger.warning(f"  [subtype] Could not remove stale {p}: {exc}")
 
     X_raw = X_all[indices]
 
     # Encode only observed classes (cleaner confusion matrix)
     observed_classes = sorted(set(labels), key=lambda c: SUBTYPE_CLASSES.index(c)
                               if c in SUBTYPE_CLASSES else 99)
-    le = LabelEncoder()
-    le.fit(observed_classes)
-    y         = le.transform(labels)
-    n_classes = len(observed_classes)
-    en_labels = [SUBTYPE_EN.get(c, c) for c in observed_classes]
+    # CRITICAL: do NOT use sklearn's LabelEncoder here — it internally calls
+    # np.unique() which re-sorts the classes alphabetically, ignoring the
+    # `observed_classes` ordering above. That produced a silent label/integer
+    # mismatch (e.g. predictions correctly biased to HGSC were reported as
+    # "Clear cell" because of alphabetical re-sort). We do the encoding by hand
+    # so the integer ↔ class-name mapping is guaranteed to follow the intended
+    # SUBTYPE_CLASSES display order throughout the module.
+    class_to_idx  = {c: i for i, c in enumerate(observed_classes)}
+    idx_to_class  = {i: c for c, i in class_to_idx.items()}
+    y             = np.array([class_to_idx[l] for l in labels], dtype=int)
+    n_classes     = len(observed_classes)
+    en_labels     = [SUBTYPE_EN.get(c, c) for c in observed_classes]
 
     counts = Counter(labels)
     logger.info(f"Subtype classification: {len(sample_ids)} samples, {n_classes} class(es)")
@@ -636,9 +969,9 @@ def run_subtype_classifier(workdir, result_dir, config):
         for i, sid in enumerate(sample_ids):
             row = {
                 "sample_id":         sid,
-                "true_subtype":      le.inverse_transform([res["y_true"][i]])[0],
+                "true_subtype":      idx_to_class[int(res["y_true"][i])],
                 "classifier":        clf_name,
-                "predicted_subtype": le.inverse_transform([res["y_pred"][i]])[0],
+                "predicted_subtype": idx_to_class[int(res["y_pred"][i])],
                 "confidence":        round(float(res["y_prob"][i].max()), 4),
                 "correct":           bool(res["y_true"][i] == res["y_pred"][i]),
             }

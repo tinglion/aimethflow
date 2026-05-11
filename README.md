@@ -134,7 +134,7 @@ bwameth c2t index files (all required, total ~17 GB):
 | File | Description |
 | --- | --- |
 | `data/OC_tissue_88_regions.hg38.txt` | Candidate methylation regions (88 tissue candidate regions, used as soft prior) |
-| `data/ovarian_fq_series_samples_v3.xlsx` | Sample grouping Excel (contains classification / subtype columns) |
+| `data/ovarian_fq_series_samples_v4.xlsx` | Sample grouping Excel (contains classification / subtype columns) |
 | `data/plasma_exp.xlsx` | Plasma sample collection dates (columns: `case_id`, `datetime` in `YYYYMMDD` format); required for temporal split validation in Step 17 (plasma mode only) |
 | `/mnt/f/meth/hg38.repeat.bed` | hg38 repeat element BED |
 | `/mnt/f/meth/hg38_upstream_2k_st.bed.gz` | Promoter region BED |
@@ -564,14 +564,14 @@ API responses are cached in `result/annotation_cache.json` — re-runs are insta
 
 ## Sample Excel Format
 
-`data/ovarian_fq_series_samples_v3.xlsx` must contain the following columns (multiple sheets supported):
+`data/ovarian_fq_series_samples_v4.xlsx` must contain the following columns (multiple sheets supported):
 
 | Column | Content |
 | --- | --- |
 | `fq_R1` | R1 filename, e.g. `B10001.R1.fq.gz` |
 | `fq_R2` | R2 filename |
 | `category` | `benign` / `malignant` / `borderline` |
-| `subtype` | Subtype, e.g. `高级别浆液性癌` (fill in for malignant / borderline samples) |
+| `subtype` | Subtype, e.g. `high-grade serous carcinoma` (fill in for malignant / borderline samples) |
 
 - Borderline samples are excluded from binary classification training but are included in subtype classification
 - Duplicate entries for the same sample across multiple sheets are automatically deduplicated
