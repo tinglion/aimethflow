@@ -333,23 +333,11 @@ def index():
 def serve_css():
     return HTMLResponse(_CSS, media_type="text/css")
 
-
-# ── Aided Diagnosis API ───────────────────────────────────────────────────────
-#
-# Endpoints support the "Aided Diagnosis" tab: pick a pre-trained workdir
-# (result/<wd>/model/), upload a bedGraph (or fq.gz, future), enter optional
-# CA-125, and get per-model probabilities + per-CpG contribution against the
-# training cohort medians.
-
-def _result_root() -> Path:
-    """Return absolute path to result/, regardless of cwd."""
-    return ROOT / "result"
-
-
 def _list_model_workdirs():
     """Walk result/*/model/ and return entries with manifest summary."""
     out = []
-    root = _result_root()
+    root = _result_dir()
+    print(f"Looking for model workdirs in {root}...")
     if not root.exists():
         return out
     for wd_dir in sorted(root.iterdir(), reverse=True):
@@ -455,7 +443,7 @@ async def predict_diagnosis(
     import numpy as np
 
     # 1. Locate model directory
-    model_dir = _result_root() / workdir / "model"
+    model_dir = _result_dir() / workdir / "model"
     if not model_dir.is_dir():
         raise HTTPException(404, f"Model directory not found: result/{workdir}/model")
     manifest_path = model_dir / "manifest.json"
@@ -470,7 +458,7 @@ async def predict_diagnosis(
 
     # Optional Step 18 annotation (panel_annotation.csv) — graceful fallback when missing
     annot_map = {}
-    annot_path = _result_root() / workdir / "panel_annotation.csv"
+    annot_path = _result_dir() / workdir / "panel_annotation.csv"
     if annot_path.exists():
         try:
             import csv

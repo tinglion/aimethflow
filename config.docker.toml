@@ -214,7 +214,7 @@ outlier_pca_z = 2.5
 # Minimum fraction of samples with >=10x coverage for a panel site (sites below this are forcibly removed from the final panel)
 min_10x_coverage_rate = 0.80
 # Confirmed excluded sample IDs (fill in after reviewing outlier_report.csv)
-exclude_samples = ['B10013', 'B10022', 'B10018', 'B10268']
+exclude_samples = ['B10018', 'B10268']
 include_ca125_baseline = true   # set false to skip CA-125 + all *+CA125 fusion models
 ca125_threshold        = 35.0   # clinical cutoff (U/mL) for CA-125 hard predictions
 # Subtype classifier (Step 16) viability thresholds:
@@ -269,10 +269,10 @@ top_n_features = 20
 # they can be distinguished from confirmed benign samples.
 borderline_as_benign = false
 # Re-evaluate the same 11 models on the validation subset of patients with CA-125 below this threshold (U/mL).
-# Clinical rationale: CA-125 ≥ 100 patients are typically clinically obvious (advanced disease, large
-# tumour burden), so the cfDNA panel adds the most value in the CA-125 < 100 subset where CA-125 alone
+# Clinical rationale: CA-125 ≥ 105 patients are typically clinically obvious (advanced disease, large
+# tumour burden), so the cfDNA panel adds the most value in the CA-125 < 105 subset where CA-125 alone
 # is least discriminative. Output: temporal_validation_summary_lowca125.csv. Set to 0 or negative to disable.
-low_ca125_threshold = 100.0
+low_ca125_threshold = 105.0
 
 # Logging configuration
 [logging]

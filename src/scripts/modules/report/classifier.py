@@ -726,7 +726,7 @@ outputs: <code>classifier_summary.csv</code>, <code>classifier_predictions.csv</
         low_ca_records = _read_csv_safe(low_ca_path)
         if low_ca_records:
             first = low_ca_records[0]
-            low_thresh   = first.get("low_ca125_threshold", "100")
+            low_thresh   = first.get("low_ca125_threshold", "105")
             n_used       = first.get("n_validation_used", "")
             n_benign_s   = first.get("n_benign", "")
             n_malign_s   = first.get("n_malignant", "")

@@ -557,11 +557,12 @@ def run_temporal_validation(workdir, result_dir, config, benign_samples, maligna
     # 11b. Low-CA125 subset re-analysis — clinically valuable subgroup
     #
     # Re-evaluate every model on the validation subset of patients with CA-125
-    # below `low_ca125_threshold` (default 100 U/mL). High-CA-125 patients are
-    # typically clinically obvious (advanced disease, large tumour burden) where
-    # CA-125 alone already discriminates well; the cfDNA panel adds the most
-    # value in the low-CA-125 subset where CA-125 itself is least informative.
-    low_ca_thresh = float(tv_cfg.get("low_ca125_threshold", 100.0))
+    # below `low_ca125_threshold` (default 105 U/mL = 3x the clinical cutoff of
+    # 35 U/mL). High-CA-125 patients are typically clinically obvious (advanced
+    # disease, large tumour burden) where CA-125 alone already discriminates
+    # well; the cfDNA panel adds the most value in the low-CA-125 subset where
+    # CA-125 itself is least informative.
+    low_ca_thresh = float(tv_cfg.get("low_ca125_threshold", 105.0))
     if low_ca_thresh > 0 and ca125_test is not None:
         # Mask aligns with full validation cohort (length n_val).
         # NaN CA-125 → excluded from the subset (no measurement to threshold).
