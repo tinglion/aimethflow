@@ -209,8 +209,8 @@ bwameth c2t index files (all required, total ~17 GB):
 | 10 | `filter` | Filter: repeat regions / depth / candidate regions | Custom + bedtools |
 | 11 | `diff` | Differential methylation (Wilcoxon, p<0.05 and \|Δβ\|>0.1) | Custom |
 | 12 | `visualize` | Density / scatter / heatmap plots | matplotlib |
-| 13 | `outlier_detect` | Sample outlier detection (coverage / PCA z-score / Isolation Forest); suspect samples excluded from feature selection | scikit-learn |
-| 14 | `feature_select` | Feature selection (LASSO + RF union); outlier samples excluded from computation; hard-filter sites with <80% samples at ≥10x depth | scikit-learn |
+| 13 | `outlier_detect` | Sample outlier detection (coverage / PCA z-score / Isolation Forest); suspect samples excluded from feature analysis | scikit-learn |
+| 14 | `feature_analysis` | Feature analysis: LASSO + RF union selection; outlier samples excluded from computation; hard-filter sites with <80% samples at ≥10x depth | scikit-learn |
 | 15a | `fs_benchmark` | **Optional.** Feature selection ablation: compare Wilcoxon-only / LASSO-only / RF-only / LASSO∪RF AUC on same CV | scikit-learn |
 | 15 | `classify` | Diagnostic classifiers, nested CV. Auto-evaluates **11 models** in the same CV loop: 5 cfDNA-only (LR/SVM/RF/XGB/LGBM), CA-125 alone (clinical baseline, ≥35 U/mL cutoff), and 5 combined cfDNA+CA-125 fusion models (`LR+CA125` … `LGBM+CA125`). Disable the CA-125 paths with `ml.include_ca125_baseline = false`. | LR / SVM / RF / XGB / LGBM |
 | 15a | `Train full cohort model` | **Optional verification.**  | scikit-learn |
@@ -319,8 +319,8 @@ run-analysis --mode plasma --step visualize      --workdir $WORKDIR
 run-analysis --mode plasma --step outlier_detect --workdir $WORKDIR
 #   Add confirmed outlier IDs to config.toml [ml] exclude_samples = [...]
 
-# Step 14: feature selection (outlier samples automatically excluded from LASSO/RF)
-run-analysis --mode plasma --step feature_select --workdir $WORKDIR
+# Step 14: feature analysis (LASSO + RF selection; outliers auto-excluded)
+run-analysis --mode plasma --step feature_analysis --workdir $WORKDIR
 
 # Steps 15–16: classification
 run-analysis --mode plasma --step classify         --workdir $WORKDIR
@@ -390,7 +390,7 @@ $PY src/scripts/run_analysis.py --mode plasma --step filter         --workdir $W
 $PY src/scripts/run_analysis.py --mode plasma --step diff           --workdir $WORKDIR
 $PY src/scripts/run_analysis.py --mode plasma --step visualize      --workdir $WORKDIR
 $PY src/scripts/run_analysis.py --mode plasma --step outlier_detect --workdir $WORKDIR
-$PY src/scripts/run_analysis.py --mode plasma --step feature_select --workdir $WORKDIR
+$PY src/scripts/run_analysis.py --mode plasma --step feature_analysis --workdir $WORKDIR
 $PY src/scripts/run_analysis.py --mode plasma --step classify         --workdir $WORKDIR
 $PY src/scripts/run_analysis.py --mode plasma --step fs_benchmark     --workdir $WORKDIR
 $PY src/scripts/run_analysis.py --mode plasma --step ca125_compare    --workdir $WORKDIR
@@ -494,7 +494,7 @@ sample_delta_beta_88   = 0.05      # |Δβ| threshold (88 candidate region sites
 max_features_clf  = 15             # max features entering classifiers (≈ n_samples/10)
 lasso_cv_folds    = 5
 
-# Coverage QC hard filter (applied at end of feature_select)
+# Coverage QC hard filter (applied at end of feature_analysis)
 min_10x_coverage_rate = 0.80       # remove panel sites with <80% of samples at ≥10x depth
 
 # Sample outlier detection (Step 13)
@@ -607,7 +607,7 @@ Reference values measured on 8-core / 32 GB machine (N = 16 M read pairs):
 | mbias | MethylDackel | ~5 min | 2–4 GB | ~2 MB (SVG) |
 | extract | MethylDackel | ~10 min | 2–4 GB | ~20–50 MB |
 | filter + diff + visualize | Python | <5 min | 1 GB | <5 MB |
-| feature_select | scikit-learn | 5–30 min | 2–4 GB | <10 MB |
+| feature_analysis | scikit-learn | 5–30 min | 2–4 GB | <10 MB |
 | classify | sklearn / XGB / LGBM | 10–60 min | 2–8 GB | <5 MB |
 | subtype_classify | scikit-learn | 5–30 min | 2–4 GB | <5 MB |
 | report | Python | <2 min | 1 GB | ~5–15 MB |
@@ -737,7 +737,7 @@ run-analysis --mode plasma --step external_validate --workdir result/20260406
 - Inter-step state is passed via `temp/<workdir>/pipeline_state.json` — no need to re-specify input files when re-running a single step
 - Both the dedup and target steps support idempotent re-runs: if output files already exist they are automatically skipped
 - **M-bias auto-detection**: `--step mbias` writes `mbias_auto_trim.json` with converted skip counts. MethylDackel outputs *inclusion positions* (`--OT a,b,c,d`); the pipeline converts them: 5' skip = position directly; 3' skip = `read_len − pos − 1` (e.g. `--OT 0,0,0,110` + `read_len=150` → `nOT "0,0,0,39"`). Set `nOT = "auto"` / `nOB = "auto"` to use in `extract`; explicit skip-count strings override auto. Changing `trim_tail2` requires re-running from `preprocess`; changing `nOT`/`nOB` only requires re-running from `extract`.
-- **Outlier exclusion**: Step 13 generates the report and saves suspect sample IDs to pipeline state. Step 14 (`feature_select`) automatically excludes these samples from LASSO/RF computation — the saved `feature_matrix.npz` still contains all samples so classifiers can apply their own exclusion via `exclude_samples`. Add confirmed outlier IDs to `exclude_samples` and re-run `classify`.
+- **Outlier exclusion**: Step 13 generates the report and saves suspect sample IDs to pipeline state. Step 14 (`feature_analysis`) automatically excludes these samples from LASSO/RF computation — the saved `feature_matrix.npz` still contains all samples so classifiers can apply their own exclusion via `exclude_samples`. Add confirmed outlier IDs to `exclude_samples` and re-run `classify`.
 - **CA-125 head-to-head (Step 15)**: with a `ca125` column (numeric, U/mL) in the sample info Excel, the `classify` step automatically evaluates 11 models in the same CV folds — 5 cfDNA-only, **CA-125 alone** (clinical baseline; raw value as score, ≥35 U/mL cutoff for accuracy/sens/spec), and **5 combined cfDNA + CA-125 fusion models** (`LR+CA125`, `SVM+CA125`, `RF+CA125`, `XGB+CA125`, `LGBM+CA125`). Combined models concatenate CA-125 (training-fold-median imputed, separately standardized) as an extra column to the cfDNA feature matrix — leakage-free. All 11 ROC curves render together in `roc_curve.png` (cfDNA solid, CA-125 dashed grey, combined dotted same colour as base). Disable via `ml.include_ca125_baseline = false`; tune the binary cutoff via `ml.ca125_threshold = 35.0`. The optional Step 15c `ca125_compare` is now a verification step that cross-checks the in-loop CA-125 AUC against an Excel-direct computation — keep it as an audit but it's no longer the primary CA-125 path.
 
 - **Standalone CA-125 AUC** (`src/scripts/compute_ca125_auc.py`): for quick CA-125-only AUC without running any pipeline step. Reads `category` + `ca125` columns directly from the Excel, applies `ml.exclude_samples` (override with `--exclude` flag), prints AUC + 95% bootstrap CI. Useful as a sanity check against Step 15's in-loop CA-125 AUC; the two should agree to 3 decimal places.
@@ -748,6 +748,6 @@ run-analysis --mode plasma --step external_validate --workdir result/20260406
 - The 88 candidate regions (`OC_tissue_88_regions.hg38.txt`) are now a **soft prior**: sites within these regions use more relaxed Wilcoxon thresholds (p<0.10, |Δβ|≥0.05) and are no longer a hard filter condition
 - **Annotation (Step 18)**: runs before `report` so the annotation table is embedded in the HTML. Requires internet access on first run; all API responses (Ensembl, EWAS Catalog, EWAS Atlas, PubMed) are cached in `annotation_cache.json` — re-runs are instant. If `annotate` is skipped, the report section is simply omitted.
 - **Annotation — NCBI API key**: set `[annotation] ncbi_api_key` to increase PubMed rate limit from 3 to 10 req/s. Without a key the search still works but is slower. Register free at [NCBI account portal](https://www.ncbi.nlm.nih.gov/account/).
-- **Coverage QC (Step 14)**: at the end of `feature_select`, sites where fewer than `min_10x_coverage_rate` (default 80%) of samples have ≥10x depth are hard-removed from `panel_cpg.csv`. Details recorded in `panel_cpg_depth.csv` (`n_10x`, `coverage_rate_10x`, `pass_coverage_qc` columns). Re-run `classify` after adjusting the threshold — no need to re-run feature selection.
+- **Coverage QC (Step 14)**: at the end of `feature_analysis`, sites where fewer than `min_10x_coverage_rate` (default 80%) of samples have ≥10x depth are hard-removed from `panel_cpg.csv`. Details recorded in `panel_cpg_depth.csv` (`n_10x`, `coverage_rate_10x`, `pass_coverage_qc` columns). Re-run `classify` after adjusting the threshold — no need to re-run feature analysis.
 - **Public dataset cross-validation (Step 19)**: run `--step external_validate` after `annotate`, then run `--step report` last to embed Section 13 (blood baseline + TCGA-OV table) in the HTML. Sites with `blood_pass = False` (mean β ≥ 0.10 in whole blood) are highlighted yellow — consider removing or down-weighting them from the panel.
 - **Relation to tissue analysis**: the 88 candidate regions derived from tissue DMR analysis serve as a soft prior — they cannot be directly applied to plasma. Plasma cfDNA has lower signal-to-noise; statistical validation in plasma data is always required before modelling

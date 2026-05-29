@@ -312,7 +312,7 @@ def plot_sample_clustered_heatmap(result_dir, output_file):
     Build a samples × CpG-sites heatmap, grouped by benign/malignant class,
     with hierarchical clustering applied within each class so similar samples
     are placed adjacent. Reads `feature_matrix.npz` from result_dir (written
-    by Step 14 feature_select); falls back to the old single-sample reshape
+    by Step 14 feature_analysis); falls back to the old single-sample reshape
     heatmap when the matrix is unavailable.
 
     Returns
@@ -518,7 +518,7 @@ def visualize_results(sample1_methylation, result_dir):
             from methylation.methylation_visualizer import visualize_methylation
             visualize_methylation(sample1_methylation, heatmap_plot, plot_type="heatmap")
             logger.info("Heatmap saved (legacy single-sample reshape — "
-                        "run --step feature_select first for sample-clustered version)")
+                        "run --step feature_analysis first for sample-clustered version)")
     except Exception as e:
         error_msg = f"error generating heatmap: {str(e)}"
         logger.error(error_msg)

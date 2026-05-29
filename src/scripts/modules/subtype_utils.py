@@ -346,7 +346,7 @@ def _load_feature_matrix(result_dir):
     fm_path = os.path.join(result_dir, "feature_matrix.npz")
     if not os.path.exists(fm_path):
         raise FileNotFoundError(
-            f"feature_matrix.npz not found — run feature_select first: {fm_path}"
+            f"feature_matrix.npz not found — run feature_analysis first: {fm_path}"
         )
     data = np.load(fm_path, allow_pickle=True)
     X            = data["X"]

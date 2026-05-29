@@ -371,7 +371,7 @@ def _load_sites(result_dir):
     panel_path = os.path.join(result_dir, "panel_cpg.csv")
     if not os.path.exists(panel_path):
         raise FileNotFoundError(
-            f"panel_cpg.csv not found — run feature_select first: {panel_path}"
+            f"panel_cpg.csv not found — run feature_analysis first: {panel_path}"
         )
     df = pd.read_csv(panel_path)
     if "feature" not in df.columns:

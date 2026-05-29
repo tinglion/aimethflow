@@ -28,7 +28,7 @@ def _build_pipeline_progress_section(temp_dir):
         ("diff",              "11",  "Differential methylation"),
         ("visualize",         "12",  "Plots"),
         ("outlier_detect",    "13",  "Outlier detection"),
-        ("feature_select",    "14",  "Feature selection"),
+        ("feature_analysis",  "14",  "Feature analysis"),
         ("classify",          "15",  "Classifiers (LOO/CV)"),
         ("fs_benchmark",      "15b", "FS ablation"),
         ("ca125_compare",     "15c", "CA-125 vs cfDNA"),

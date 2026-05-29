@@ -24,7 +24,7 @@ Step-by-step (plasma pipeline):
   python src/scripts/run_analysis.py --plasma --step diff      --workdir temp/20240101_120000
   python src/scripts/run_analysis.py --plasma --step visualize       --workdir temp/20240101_120000
   python src/scripts/run_analysis.py --plasma --step report          --workdir temp/20240101_120000
-  python src/scripts/run_analysis.py --plasma --step feature_select  --workdir temp/20240101_120000
+  python src/scripts/run_analysis.py --plasma --step feature_analysis  --workdir temp/20240101_120000
   python src/scripts/run_analysis.py --plasma --step classify        --workdir temp/20240101_120000
 
   # List step definitions and completion status
@@ -43,7 +43,7 @@ Steps:
   diff               11   Differential methylation analysis
   visualize          12   Plots: density / scatter / heatmap
   outlier_detect     13   Sample outlier detection (coverage / PCA z-score / Isolation Forest)
-  feature_select     14   Feature selection (LASSO + RF union; outliers excluded; ≥10× coverage QC)
+  feature_analysis   14   Feature analysis: LASSO + RF selection (outliers excluded; ≥10× coverage QC)
   classify           15   Diagnostic classifiers LOO-CV: LR / SVM / RF / XGBoost / LightGBM
   subtype_classify   16   Subtype multi-class LOO-CV: RF + SVM OvR
   temporal_validate  17   Temporal split validation (plasma only): train <2024-07-01, test >=2024-07-01
@@ -186,14 +186,14 @@ PIPELINE_STEPS = [
     ("diff",               "11",  "Differential methylation: merged bedGraphs, |Δβ| ≥ 0.2",      "filter"),
     ("visualize",          "12",  "Plots: density / scatter / heatmap (candidate regions)",        "diff"),
     ("outlier_detect",     "13",  "Sample QC: coverage fraction / PCA z / Isolation Forest",       "diff"),
-    ("feature_select",     "14",  "Feature selection: LASSO(L1) ∪ RF; outliers excluded; ≥10× QC", "outlier_detect"),
-    ("classify",           "15",  "Classifiers LOO-CV: LR / SVM / RF / XGBoost / LightGBM",       "feature_select"),
-    ("fs_benchmark",       "15b", "Feature selection ablation: wilcoxon/lasso/rf/union AUC table", "feature_select"),
+    ("feature_analysis",   "14",  "Feature analysis: LASSO(L1) ∪ RF selection; outliers excluded; ≥10× QC", "outlier_detect"),
+    ("classify",           "15",  "Classifiers LOO-CV: LR / SVM / RF / XGBoost / LightGBM",       "feature_analysis"),
+    ("fs_benchmark",       "15b", "Feature selection ablation: wilcoxon/lasso/rf/union AUC table", "feature_analysis"),
     ("final_model",        "15c", "Train production models on the full cohort (no CV holdout); save artefacts to result/<wd>/model/ for inference / WebUI diagnosis page", "classify"),
     ("subtype_classify",   "16",  "Subtype LOO-CV (malignant+borderline): RF + SVM OvR",          "classify"),
     ("temporal_validate",  "17",  "Temporal split validation (plasma only): train/test by date",  "classify"),
-    ("annotate",           "18",  "Site annotation: gene / CpG island / EWAS Catalog+Atlas",      "feature_select"),
-    ("external_validate",  "19",  "Cross-validation: GSE40279 blood baseline + TCGA-OV signal",   "feature_select"),
+    ("annotate",           "18",  "Site annotation: gene / CpG island / EWAS Catalog+Atlas",      "feature_analysis"),
+    ("external_validate",  "19",  "Cross-validation: GSE40279 blood baseline + TCGA-OV signal",   "feature_analysis"),
     ("report",             "20",  "HTML + JSON report (annotation + ext-validate auto-embedded)",  "diff"),
 ]
 STEP_KEYS = [s[0] for s in PIPELINE_STEPS]
@@ -789,7 +789,7 @@ def main():
         logger.info("11. Skipping visualization")
 
     # =========================================================
-    # Step 13: outlier_detect  (runs BEFORE feature_select so that
+    # Step 13: outlier_detect  (runs BEFORE feature_analysis so that
     #           outlier samples are excluded from LASSO/RF selection)
     # =========================================================
     if _should_run("outlier_detect", False):
@@ -840,7 +840,7 @@ def main():
             if suspect_ids:
                 logger.warning(f"  ⚠ Suspected outliers (benign/malignant, ≥2 flags): {suspect_ids}")
                 logger.warning(
-                    "  ⚠ These samples will be EXCLUDED from feature selection (Step 14)."
+                    "  ⚠ These samples will be EXCLUDED from feature analysis (Step 14)."
                 )
                 logger.warning(
                     "  ⚠ Review outlier_report.csv; add confirmed IDs to "
@@ -875,7 +875,7 @@ def main():
                 return
 
     # =========================================================
-    # Step 14: feature_select  (resolves the exclusion list with the
+    # Step 14: feature_analysis  (resolves the exclusion list with the
     #           following precedence:
     #             (1) config.toml [ml] exclude_samples — clinically-confirmed
     #                 IDs the user has explicitly committed to via Step 13's
@@ -886,9 +886,9 @@ def main():
     #                 flags only used when no clinical review has happened
     #                 yet (e.g. first-pass exploratory run).
     # =========================================================
-    if _should_run("feature_select", False):
+    if _should_run("feature_analysis", False):
         if benign_samples and malignant_samples:
-            logger.info("━━ Step 14: Feature selection (LASSO + RF) ━━")
+            logger.info("━━ Step 14: Feature analysis (LASSO + RF selection) ━━")
             from scripts.modules.feature_utils import select_features
             cfg_excludes = list((config or {}).get("ml", {}).get("exclude_samples", []) or [])
             suspect_ids  = list(state.get("suspect_ids") or [])
@@ -924,7 +924,7 @@ def main():
                 workdir, result_dir, config, benign_samples, malignant_samples,
                 extra_exclude_ids=exclude_ids or None,
             )
-            _save_state(workdir, {"completed_steps": state.get("completed_steps", []) + ["feature_select"]})
+            _save_state(workdir, {"completed_steps": state.get("completed_steps", []) + ["feature_analysis"]})
             logger.info(f"  → {len(panel_features)} features selected — saved to {result_dir}")
 
             try:
@@ -933,7 +933,7 @@ def main():
             except Exception as _e:
                 logger.warning(f"  Feature funnel plot skipped: {_e}")
         else:
-            logger.error("feature_select requires benign_samples and malignant_samples — "
+            logger.error("feature_analysis requires benign_samples and malignant_samples — "
                          "complete the extract step first (or ensure pipeline_state.json has grouping info)")
             if single_step:
                 return

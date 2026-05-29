@@ -43,7 +43,7 @@ from utils.logger import logger
 def _load_feature_matrix(workdir, result_dir, benign_samples, malignant_samples, config):
     """
     Load the feature matrix: prefer restoring from feature_matrix.npz (saved by
-    feature_select step); rebuild from bedGraph if not found (requires workdir).
+    feature_analysis step); rebuild from bedGraph if not found (requires workdir).
 
     Returns:
         X, y, sample_ids, feature_names, region_in_88

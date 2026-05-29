@@ -334,7 +334,7 @@ full per-site stats: <code>panel_cpg_depth.csv</code></p>"""
         )
         sec9_html = f"""
 <div class="section">
-<h2>Step 14. Feature Selection — LASSO + RF</h2>
+<h2>Step 14. Feature Analysis — LASSO + RF Selection</h2>
 <p style="color:#666;font-size:.85em">
   Pipeline: group-level DMC (merged bedGraph) →
   coverage filter (≥50% samples) →
@@ -361,9 +361,9 @@ outputs: <code>panel_cpg.csv</code>, <code>feature_importance.csv</code></p>
                      "rf_selected": rf_sel, "panel_size": n_panel,
                      "wilcoxon": wilcox_data, "depth": depth_data}
     else:
-        sec9_html = ('<div class="section"><h2>Step 14. Feature Selection — LASSO + RF</h2>'
+        sec9_html = ('<div class="section"><h2>Step 14. Feature Analysis — LASSO + RF</h2>'
                      '<p style="color:#aaa;font-size:.9em">Step 14 not yet run — '
-                     'execute <code>--step feature_select</code> to populate this section.</p></div>')
+                     'execute <code>--step feature_analysis</code> to populate this section.</p></div>')
         sec9_data = None
 
     # ── Section 10: Diagnostic Classifiers (Step 15) ──

@@ -565,7 +565,7 @@ def run_external_validation(result_dir: str, data_dir: str, external_dir: str):
     """
     panel_path = os.path.join(result_dir, "panel_cpg.csv")
     if not os.path.exists(panel_path):
-        logger.error(f"panel_cpg.csv not found: {panel_path}  (run feature_select first)")
+        logger.error(f"panel_cpg.csv not found: {panel_path}  (run feature_analysis first)")
         return
 
     panel_df       = pd.read_csv(panel_path)
@@ -729,7 +729,7 @@ def run_external_validation(result_dir: str, data_dir: str, external_dir: str):
     else:
         logger.warning(
             f"panel_cpg.csv not found at {panel_path} — blood-filtered panel not written. "
-            "Run --step feature_select first."
+            "Run --step feature_analysis first."
         )
 
     return result

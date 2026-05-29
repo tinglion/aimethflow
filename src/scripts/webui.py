@@ -65,7 +65,7 @@ STEPS = [
     ("diff",              "Step 11  Differential methylation",        "C · Methylation"),
     ("visualize",         "Step 12  Density / scatter / heatmap",     "C · Methylation"),
     ("outlier_detect",    "Step 13  Sample outlier detection",        "D · QC + Features"),
-    ("feature_select",    "Step 14  Feature selection (LASSO + RF)",  "D · QC + Features"),
+    ("feature_analysis",  "Step 14  Feature analysis (LASSO + RF)",   "D · QC + Features"),
     ("fs_benchmark",      "Step 14b Feature selection ablation",      "D · QC + Features"),
     ("classify",          "Step 15  Diagnostic classification",       "E · Classification"),
     ("final_model",       "Step 15c Train production models (full cohort)", "E · Classification"),
