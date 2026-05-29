@@ -41,6 +41,22 @@ Key differences vs. the prior (Youxun) approach:
 | **Methylation threshold** | 80% (stricter than tissue) | **60%**, same as tissue |
 | **Differential filter** | p<0.05 only | **p<0.05 AND \|Δβ\|>0.1** |
 
+### Why UMI-aware deduplication matters for cfDNA
+
+**The problem.** Plasma cfDNA is not randomly sheared — circulating fragments are protected by histone octamers and concentrate at the ~147 bp mono-nucleosome and ~167 bp mono-nucleosome + linker sizes. Many genuinely independent cfDNA molecules therefore share identical start/end coordinates because they were shaped by the same nucleosome footprint. Coordinate-only deduplication (Picard `MarkDuplicates`, `deduplicate_bismark`) cannot tell these apart from true PCR duplicates and collapses them all into a single read, silently discarding real molecular complexity. (Tissue DNA, fragmented by sonication or restriction enzymes, carries no such bias, so coordinate dedup is safe there.)
+
+**How this pipeline handles it (plasma mode):**
+
+| Step | Tool & flags | What it does |
+| --- | --- | --- |
+| 4 — preprocess ([fastq_utils.py:220-228](src/scripts/modules/fastq_utils.py#L220-L228)) | `fastp --umi --umi_loc read2 --umi_len 6 --umi_prefix UMI` | Extracts the 6 N inline UMI from the 5' end of R2 and appends it to the read name (`@HEADER_UMI:NNNNNN`). Also applies `trim_front1=12 / trim_front2=12 / trim_tail2=5 / Q20 / min_length=35`. |
+| 5 — align ([alignment_utils.py:147](src/scripts/modules/alignment_utils.py#L147)) | `bwameth` paired-end | UMI rides through alignment as part of the read name into the BAM. |
+| 6 — dedup ([alignment_utils.py:293-294](src/scripts/modules/alignment_utils.py#L293-L294)) | `umi_tools dedup --paired` | Deduplication key is the **(start, end, UMI) triple** — fragments with identical coordinates but distinct UMIs are kept as separate molecules; only entries identical on all three are collapsed as PCR duplicates. |
+
+**Tissue mode (`plasma=False`)** bypasses UMIs and uses `deduplicate_bismark` for coordinate-only dedup ([alignment_utils.py:315](src/scripts/modules/alignment_utils.py#L315)). If `umi_tools` is missing or fails in plasma mode the code falls back to `deduplicate_bismark` and emits a `not recommended for plasma data` warning ([alignment_utils.py:305-306](src/scripts/modules/alignment_utils.py#L305-L306)).
+
+**Sanity-check telemetry.** The report surfaces the mean UMI deduplication rate ([report/main.py:330](src/scripts/modules/report/main.py#L330)) and a fragment-size distribution figure that highlights the 100–220 bp cfDNA zone with the 167 bp mono-nucleosome line marked ([alignment_utils.py:754-756](src/scripts/modules/alignment_utils.py#L754-L756)) — both serve as cross-validation that the input is genuinely cfDNA and that the dedup step has not flattened the nucleosome peak.
+
 ---
 
 ## Environment Requirements
@@ -195,9 +211,9 @@ bwameth c2t index files (all required, total ~17 GB):
 | 12 | `visualize` | Density / scatter / heatmap plots | matplotlib |
 | 13 | `outlier_detect` | Sample outlier detection (coverage / PCA z-score / Isolation Forest); suspect samples excluded from feature selection | scikit-learn |
 | 14 | `feature_select` | Feature selection (LASSO + RF union); outlier samples excluded from computation; hard-filter sites with <80% samples at ≥10x depth | scikit-learn |
+| 15a | `fs_benchmark` | **Optional.** Feature selection ablation: compare Wilcoxon-only / LASSO-only / RF-only / LASSO∪RF AUC on same CV | scikit-learn |
 | 15 | `classify` | Diagnostic classifiers, nested CV. Auto-evaluates **11 models** in the same CV loop: 5 cfDNA-only (LR/SVM/RF/XGB/LGBM), CA-125 alone (clinical baseline, ≥35 U/mL cutoff), and 5 combined cfDNA+CA-125 fusion models (`LR+CA125` … `LGBM+CA125`). Disable the CA-125 paths with `ml.include_ca125_baseline = false`. | LR / SVM / RF / XGB / LGBM |
-| 15b | `fs_benchmark` | **Optional.** Feature selection ablation: compare Wilcoxon-only / LASSO-only / RF-only / LASSO∪RF AUC on same CV | scikit-learn |
-| 15c | `ca125_compare` | **Optional verification.** CA-125 AUC computed two ways (in-loop pseudo-classifier vs Excel-direct lookup) for cross-checking. Mostly redundant after Step 15 — useful as an audit. | scikit-learn |
+| 15a | `Train full cohort model` | **Optional verification.**  | scikit-learn |
 | 16 | `subtype_classify` | Subtype multi-class LOO-CV (malignant + borderline) | RF + SVM OvR |
 | 17 | `temporal_validate` | **Plasma only.** Temporal split validation: train on samples collected before 2024-07-01, evaluate on samples collected on/after that date. Same 11-model lineup as Step 15 (5 cfDNA-only + CA-125 baseline + 5 cfDNA+CA-125 fusion) so head-to-head comparison carries through to the prospective evaluation. Covers binary + subtype classification. Requires `data/plasma_exp.xlsx` (columns: `case_id`, `datetime`). | scikit-learn / XGB / LGBM |
 | 18 | `annotate` | Panel CpG annotation: gene context / CpG island / EWAS Catalog / EWAS Atlas / PubMed plasma hits | Ensembl REST + UCSC + EWAS Catalog + CNCB NGDC + NCBI |

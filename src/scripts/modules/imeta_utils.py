@@ -1,25 +1,70 @@
-"""
-imeta_utils.py — auto-generate iMeta publication figures and statistical tables.
+"""imeta_utils.py — auto-generate iMeta publication figures and statistical tables.
 
-Called during Step 20 (report). All functions are optional: missing input files
-cause a log warning and the figure is silently skipped.
+Called during Step 20 (report). All public entry points are optional: missing input
+files log a warning and the figure / table is silently skipped.
+
+Module organisation:
+    Configuration         module-level constants (model groups, colours, plot params)
+    I/O helpers           _read_csv, _read_config, _savefig, _mpl
+    Pipeline context      _PipelineContext, _load_context — cohort metadata read once
+    DeLong inference      _fastdelong_cov, _delong_formal, _delong_bootstrap
+    Figure builders       _fig3_roc, _fig4_clf_comparison, _fig5_temporal,
+                          _fig2b_panel_annotation, _fig6b_blood_dist
+    Public API            generate_imeta_figures, build_imeta_section
 """
 
 import os
+import sys
 import logging
+from dataclasses import dataclass
+from typing import Iterable, Optional
+
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# Colorblind-safe palette per classifier
-_CLF_COLORS = {"LR": "#4393c3", "SVM": "#d6604d", "RF": "#4dac26", "XGB": "#8073ac", "LGBM": "#e08214"}
-_CLF_ORDER  = ["LR", "SVM", "RF", "XGB", "LGBM"]
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Internal helpers
+# Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Classifier groups — matches Step 15 eleven-model evaluation
+CFDNA_ONLY    = ["LR", "SVM", "RF", "XGB", "LGBM"]
+CA125_ALONE   = "CA-125"
+FUSION_MODELS = [f"{m}+CA125" for m in CFDNA_ONLY]
+ALL_MODELS    = CFDNA_ONLY + [CA125_ALONE] + FUSION_MODELS
+
+# Colourblind-safe palette; fusion models share their cfDNA-only base colour
+_CFDNA_COLORS = {
+    "LR":   "#4393c3",
+    "SVM":  "#d6604d",
+    "RF":   "#4dac26",
+    "XGB":  "#8073ac",
+    "LGBM": "#e08214",
+}
+CLF_COLORS = {
+    **_CFDNA_COLORS,
+    CA125_ALONE: "#000000",
+    **{f"{m}+CA125": _CFDNA_COLORS[m] for m in CFDNA_ONLY},
+}
+
+# Plot parameters
+BOOTSTRAP_N     = 1000
+DELONG_BOOT_N   = 2000
+FIG_DPI         = 300
+FIG_FACECOLOR   = "white"
+DEFAULT_SEED    = 42
+
+# Thresholds
+BLOOD_BETA_THRESHOLD = 0.10
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# I/O helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _read_csv(path):
+    """Return a DataFrame or None if missing/unreadable."""
     try:
         import pandas as pd
         if not os.path.exists(path):
@@ -30,9 +75,23 @@ def _read_csv(path):
         return None
 
 
-def _savefig(fig, path):
+def _read_config(config_path: str = "config.toml") -> dict:
+    """Read config.toml from CWD; return {} if absent or unparseable."""
+    try:
+        if sys.version_info >= (3, 11):
+            import tomllib
+            with open(config_path, "rb") as f:
+                return tomllib.load(f)
+        else:
+            import toml
+            return toml.load(config_path)
+    except Exception:
+        return {}
+
+
+def _savefig(fig, path: str) -> None:
     import matplotlib.pyplot as plt
-    fig.savefig(path, dpi=300, bbox_inches="tight", facecolor="white")
+    fig.savefig(path, dpi=FIG_DPI, bbox_inches="tight", facecolor=FIG_FACECOLOR)
     plt.close(fig)
 
 
@@ -48,75 +107,140 @@ def _mpl():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Figure 3: Multi-classifier ROC curves
+# Pipeline context: cohort metadata derived from result CSVs
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _fig3_roc(clf_pred_path, out_path, n_boot=1000):
-    from sklearn.metrics import roc_curve, auc as sk_auc
-    plt = _mpl()
+@dataclass
+class _PipelineContext:
+    """Cohort metadata read once and shared across figure builders.
 
-    df = _read_csv(clf_pred_path)
-    if df is None:
-        return None
+    All numeric defaults are zero so that missing inputs render captions like
+    ``n=0`` rather than crashing; callers should still check ``n_total > 0``
+    before assuming results are meaningful.
+    """
+    # Binary classification cohort
+    n_total:     int = 0
+    n_benign:    int = 0
+    n_malignant: int = 0
 
-    fig, ax = plt.subplots(figsize=(7, 6))
-    rng = np.random.default_rng(42)
-    any_plotted = False
+    # CV mode
+    cv_folds:    int = 5         # 0 = LOO-CV; k > 0 = stratified k-fold
+    cv_label:    str = "5-fold CV"
 
-    for clf in _CLF_ORDER:
-        sub = df[df["classifier"] == clf]
-        if sub.empty:
-            continue
-        y_true = (sub["true_label"] == "malignant").astype(int).values
-        y_prob = sub["prob_malignant"].astype(float).values
+    # Panel composition
+    panel_size:  int = 0
+    in_88_count: int = 0
 
-        fpr, tpr, _ = roc_curve(y_true, y_prob)
-        auc_val = sk_auc(fpr, tpr)
+    # Temporal validation
+    tv_train:     int = 0
+    tv_total:     int = 0
+    tv_benign:    int = 0
+    tv_malignant: int = 0
+    tv_cutoff:    str = "2024-01-01"
 
-        boot_aucs = []
-        for _ in range(n_boot):
-            idx = rng.integers(0, len(y_true), len(y_true))
-            if len(np.unique(y_true[idx])) < 2:
-                continue
-            f, t, _ = roc_curve(y_true[idx], y_prob[idx])
-            boot_aucs.append(sk_auc(f, t))
-        ci_lo, ci_hi = (np.percentile(boot_aucs, [2.5, 97.5]) if boot_aucs
-                        else (float("nan"), float("nan")))
+    # External validation (450K matched-probe + blood baseline)
+    ext_matched:  int = 0
+    ext_pass:     int = 0
+    ext_fail:     int = 0
 
-        ax.plot(fpr, tpr, color=_CLF_COLORS[clf], lw=2,
-                label=f"{clf}  AUC={auc_val:.3f} (95%CI {ci_lo:.3f}–{ci_hi:.3f})")
-        any_plotted = True
+    def cv_caption(self) -> str:
+        return (f"{self.cv_label}, n={self.n_total}: "
+                f"{self.n_benign} benign, {self.n_malignant} malignant")
 
-    if not any_plotted:
-        plt.close(fig)
-        return None
+    def tv_caption(self) -> str:
+        return (f"train n={self.tv_train}, "
+                f"validation n={self.tv_total} "
+                f"({self.tv_benign} benign / {self.tv_malignant} malignant); "
+                f"cutoff {self.tv_cutoff}")
 
-    ax.plot([0, 1], [0, 1], "k--", lw=1, alpha=0.4, label="Random (AUC=0.500)")
-    ax.set_xlim([0, 1]); ax.set_ylim([0, 1.02])
-    ax.set_xlabel("1 − Specificity (False Positive Rate)", fontsize=12)
-    ax.set_ylabel("Sensitivity (True Positive Rate)", fontsize=12)
-    ax.set_title("Binary Classification ROC — LOO-CV", fontsize=12, fontweight="bold")
-    ax.legend(loc="lower right", fontsize=8.5, framealpha=0.9)
-    ax.grid(alpha=0.25)
-    fig.tight_layout()
-    _savefig(fig, out_path)
-    return True
+
+def _load_context(result_dir: str) -> _PipelineContext:
+    """Build a context object from result CSVs + config.toml."""
+    ctx = _PipelineContext()
+
+    # CV strategy from config (default 5-fold)
+    cfg = _read_config()
+    cv_folds = int(cfg.get("ml", {}).get("cv_folds", 5))
+    ctx.cv_folds = cv_folds
+    ctx.cv_label = "LOO-CV" if cv_folds == 0 else f"{cv_folds}-fold CV"
+
+    # Binary classifier cohort
+    clf_sum = _read_csv(os.path.join(result_dir, "classifier_summary.csv"))
+    if clf_sum is not None and not clf_sum.empty:
+        r = clf_sum.iloc[0]
+        ctx.n_benign    = int(r.get("n_benign",    0) or 0)
+        ctx.n_malignant = int(r.get("n_malignant", 0) or 0)
+        ctx.n_total     = int(r.get("n_used", ctx.n_benign + ctx.n_malignant) or
+                              ctx.n_benign + ctx.n_malignant)
+
+    # Panel size: panel_cpg.csv lists the ACTUAL selected panel; panel_annotation.csv
+    # may include additional candidate sites. Always trust panel_cpg.csv when present.
+    panel_cpg = _read_csv(os.path.join(result_dir, "panel_cpg.csv"))
+    panel_set = None
+    if panel_cpg is not None and not panel_cpg.empty:
+        ctx.panel_size = len(panel_cpg)
+        if "feature" in panel_cpg.columns:
+            panel_set = set(panel_cpg["feature"].astype(str))
+
+    annot = _read_csv(os.path.join(result_dir, "panel_annotation.csv"))
+    if annot is not None and not annot.empty:
+        # Restrict to the final panel when possible, so the in-88 count reflects
+        # the panel actually used downstream rather than the broader annotation table.
+        if panel_set is not None and "feature" in annot.columns:
+            annot = annot[annot["feature"].astype(str).isin(panel_set)]
+        if not annot.empty and "in_88_regions" in annot.columns:
+            ctx.in_88_count = int(
+                (annot["in_88_regions"].astype(str).str.lower() == "true").sum()
+            )
+        if ctx.panel_size == 0:
+            ctx.panel_size = len(annot)
+
+    # Temporal validation
+    tv_sum = _read_csv(os.path.join(result_dir, "temporal_validation_summary.csv"))
+    if tv_sum is not None and not tv_sum.empty:
+        r = tv_sum.iloc[0]
+        ctx.tv_train  = int(r.get("n_train",      0) or 0)
+        ctx.tv_total  = int(r.get("n_validation", 0) or 0)
+        ctx.tv_cutoff = str(r.get("cutoff_date",  ctx.tv_cutoff))
+
+        # benign / malignant breakdown is not stored in the summary CSV — recover
+        # by counting unique sample_ids in the predictions file
+        tv_pred = _read_csv(os.path.join(result_dir, "temporal_validation_predictions.csv"))
+        if tv_pred is not None and "sample_id" in tv_pred.columns:
+            uniq = tv_pred.drop_duplicates(subset="sample_id")
+            ctx.tv_benign    = int((uniq["true_label"] == "benign").sum())
+            ctx.tv_malignant = int((uniq["true_label"] == "malignant").sum())
+
+    # External validation: 450K matched probes + leukocyte baseline pass.
+    # Restrict to final-panel sites — the broader candidate set in
+    # external_validation.csv may include probes that did not survive selection.
+    ext = _read_csv(os.path.join(result_dir, "external_validation.csv"))
+    if ext is not None and "probe_matched" in ext.columns:
+        if panel_set is not None and "feature" in ext.columns:
+            ext = ext[ext["feature"].astype(str).isin(panel_set)]
+        matched = ext[ext["probe_matched"].astype(str).str.lower() == "true"]
+        ctx.ext_matched = len(matched)
+        if "blood_pass" in matched.columns:
+            ctx.ext_pass = int(
+                (matched["blood_pass"].astype(str).str.lower() == "true").sum()
+            )
+        ctx.ext_fail = ctx.ext_matched - ctx.ext_pass
+
+    return ctx
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DeLong-equivalent: bootstrap pairwise AUC comparison table
+# Classifier prediction extraction
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _delong_bootstrap(clf_pred_path, out_csv_path, n_boot=2000):
-    import pandas as pd
-    from sklearn.metrics import roc_auc_score
+def _extract_clf_data(df, models: Iterable[str]) -> dict:
+    """Group a long-format predictions DataFrame by classifier.
 
-    df = _read_csv(clf_pred_path)
-    if df is None:
-        return None
-
+    Returns ``{name: {"y_true": np.ndarray, "y_prob": np.ndarray}}`` for each
+    classifier in ``models`` that has rows in the DataFrame.
+    """
     data = {}
-    for clf in _CLF_ORDER:
+    for clf in models:
         sub = df[df["classifier"] == clf]
         if sub.empty:
             continue
@@ -124,44 +248,44 @@ def _delong_bootstrap(clf_pred_path, out_csv_path, n_boot=2000):
             "y_true": (sub["true_label"] == "malignant").astype(int).values,
             "y_prob": sub["prob_malignant"].astype(float).values,
         }
+    return data
 
-    clfs = list(data.keys())
-    if len(clfs) < 2:
-        return None
 
-    n = len(data[clfs[0]]["y_true"])
-    rng = np.random.default_rng(42)
-    rows = []
+def _build_aligned_score_matrix(df, models: Iterable[str]):
+    """Build a (K, n) score matrix with one row per classifier.
 
-    for i, c1 in enumerate(clfs):
-        for c2 in clfs[i + 1:]:
-            y_true = data[c1]["y_true"]
-            diffs = []
-            for _ in range(n_boot):
-                idx = rng.integers(0, n, n)
-                if len(np.unique(y_true[idx])) < 2:
-                    continue
-                a1 = roc_auc_score(y_true[idx], data[c1]["y_prob"][idx])
-                a2 = roc_auc_score(y_true[idx], data[c2]["y_prob"][idx])
-                diffs.append(a1 - a2)
-            diffs = np.array(diffs)
-            auc1 = roc_auc_score(y_true, data[c1]["y_prob"])
-            auc2 = roc_auc_score(y_true, data[c2]["y_prob"])
-            obs  = auc1 - auc2
-            p    = min(np.mean(diffs <= 0), np.mean(diffs >= 0)) * 2 if len(diffs) else 1.0
-            ci_lo, ci_hi = (np.percentile(diffs, [2.5, 97.5]) if len(diffs) else (float("nan"), float("nan")))
-            rows.append({
-                "classifier_A": c1, "classifier_B": c2,
-                "auc_A": round(auc1, 4), "auc_B": round(auc2, 4),
-                "delta_auc": round(obs, 4),
-                "ci95_lo": round(ci_lo, 4), "ci95_hi": round(ci_hi, 4),
-                "p_bootstrap": round(p, 4),
-                "significant": "Yes" if p < 0.05 else "No",
-            })
+    Requires identical sample order across all classifiers; returns
+    ``(y_true, score_matrix, model_names)`` or ``(None, None, None)`` on
+    alignment failure.
+    """
+    ref_clf = None
+    ref_ids = None
+    aligned = {}
+    for clf in models:
+        sub = df[df["classifier"] == clf].copy()
+        if sub.empty:
+            continue
+        sub = sub.sort_values("sample_id").reset_index(drop=True)
+        if ref_ids is None:
+            ref_ids = sub["sample_id"].values
+            ref_clf = clf
+        elif not np.array_equal(sub["sample_id"].values, ref_ids):
+            logger.warning(
+                "[delong] sample_id mismatch between %s and %s — skipping",
+                ref_clf, clf,
+            )
+            return None, None, None
+        aligned[clf] = sub
 
-    df_out = pd.DataFrame(rows)
-    df_out.to_csv(out_csv_path, index=False, encoding="utf-8")
-    return df_out
+    names = list(aligned.keys())
+    if not names:
+        return None, None, None
+
+    y_true = (aligned[names[0]]["true_label"] == "malignant").astype(int).values
+    score_matrix = np.vstack(
+        [aligned[c]["prob_malignant"].astype(float).values for c in names]
+    )
+    return y_true, score_matrix, names
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -169,11 +293,10 @@ def _delong_bootstrap(clf_pred_path, out_csv_path, n_boot=2000):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _fastdelong_cov(y_true, score_matrix):
-    """
-    fastDeLong covariance matrix for K classifiers.
+    """fastDeLong covariance matrix for K classifiers.
 
-    y_true      : 1-D array of 0/1 labels, length n
-    score_matrix: (K, n) array — row k is classifier k's probability scores
+    y_true       : 1-D array of 0/1 labels, length n
+    score_matrix : (K, n) array — row k is classifier k's probability scores
 
     Returns
     -------
@@ -191,22 +314,20 @@ def _fastdelong_cov(y_true, score_matrix):
     for k in range(K):
         ps = score_matrix[k, pos_idx]   # (n_pos,)
         ns = score_matrix[k, neg_idx]   # (n_neg,)
-        # V10[k, i]: fraction of negatives strictly below ps[i] + 0.5 × ties
-        cmp10 = ns[np.newaxis, :] < ps[:, np.newaxis]    # (n_pos, n_neg)
+        cmp10 = ns[np.newaxis, :] <  ps[:, np.newaxis]
         tie10 = ns[np.newaxis, :] == ps[:, np.newaxis]
         V10[k] = cmp10.mean(axis=1) + 0.5 * tie10.mean(axis=1)
-        # V01[k, j]: fraction of positives strictly above ns[j] + 0.5 × ties
-        cmp01 = ps[np.newaxis, :] > ns[:, np.newaxis]    # (n_neg, n_pos)
+        cmp01 = ps[np.newaxis, :] >  ns[:, np.newaxis]
         tie01 = ps[np.newaxis, :] == ns[:, np.newaxis]
         V01[k] = cmp01.mean(axis=1) + 0.5 * tie01.mean(axis=1)
 
-    aucs = V10.mean(axis=1)   # AUC_k = mean placement value
+    aucs = V10.mean(axis=1)
 
-    # Structural-component covariance (DeLong 1988, eq. 7)
-    # Cov(AUC_a, AUC_b) = Cov_sample(V10_a, V10_b)/n_pos + Cov_sample(V01_a, V01_b)/n_neg
-    S10 = np.cov(V10, ddof=1) if n_pos > 1 else np.zeros((K, K))  # (K, K)
-    S01 = np.cov(V01, ddof=1) if n_neg > 1 else np.zeros((K, K))  # (K, K)
-    # np.cov returns scalar when K==1; force (1,1) shape
+    # Structural-component covariance (DeLong 1988, eq. 7):
+    #   Cov(AUC_a, AUC_b) = Cov_sample(V10_a, V10_b)/n_pos
+    #                     + Cov_sample(V01_a, V01_b)/n_neg
+    S10 = np.cov(V10, ddof=1) if n_pos > 1 else np.zeros((K, K))
+    S01 = np.cov(V01, ddof=1) if n_neg > 1 else np.zeros((K, K))
     if K == 1:
         S10 = np.atleast_2d(S10)
         S01 = np.atleast_2d(S01)
@@ -215,11 +336,11 @@ def _fastdelong_cov(y_true, score_matrix):
     return aucs, cov
 
 
-def _delong_formal(clf_pred_path, out_csv_path):
-    """
-    Formal pairwise AUC comparison using the fastDeLong variance estimator.
-    Produces a normal Z-test (two-sided) for each classifier pair.
-    Saves result/imeta_delong_formal.csv.
+def _delong_formal(clf_pred_path: str, out_csv_path: str,
+                   models: Optional[Iterable[str]] = None):
+    """Formal pairwise AUC comparison using the fastDeLong variance estimator.
+
+    Writes a normal Z-test (two-sided) per classifier pair.
     """
     import pandas as pd
     from scipy import stats
@@ -228,130 +349,266 @@ def _delong_formal(clf_pred_path, out_csv_path):
     if df is None:
         return None
 
-    # Build (K, n) score matrix — requires identical sample order per classifier
-    ref_clf = None
-    ref_ids = None
-    data = {}
-    for clf in _CLF_ORDER:
-        sub = df[df["classifier"] == clf].copy()
-        if sub.empty:
-            continue
-        sub = sub.sort_values("sample_id").reset_index(drop=True)
-        if ref_ids is None:
-            ref_ids = sub["sample_id"].values
-            ref_clf = clf
-        elif not np.array_equal(sub["sample_id"].values, ref_ids):
-            logger.warning(
-                "[delong] sample_id mismatch between %s and %s — skipping DeLong", ref_clf, clf
-            )
-            return None
-        data[clf] = {
-            "y_true": (sub["true_label"] == "malignant").astype(int).values,
-            "y_prob": sub["prob_malignant"].astype(float).values,
-        }
-
-    clfs = list(data.keys())
-    if len(clfs) < 2:
+    y_true, score_matrix, clfs = _build_aligned_score_matrix(
+        df, models or ALL_MODELS
+    )
+    if y_true is None or len(clfs) < 2:
         return None
-
-    y_true = data[clfs[0]]["y_true"]
-    score_matrix = np.vstack([data[c]["y_prob"] for c in clfs])   # (K, n)
 
     aucs, cov = _fastdelong_cov(y_true, score_matrix)
 
     rows = []
     for i, ca in enumerate(clfs):
         for j in range(i + 1, len(clfs)):
-            cb  = clfs[j]
-            d   = aucs[i] - aucs[j]
+            cb = clfs[j]
+            d = aucs[i] - aucs[j]
             var = cov[i, i] + cov[j, j] - 2 * cov[i, j]
-            se  = np.sqrt(max(var, 0.0))
-            z   = d / se if se > 0 else float("nan")
-            p   = float(2 * stats.norm.sf(abs(z))) if np.isfinite(z) else float("nan")
+            se = float(np.sqrt(max(var, 0.0)))
+            z = d / se if se > 0 else float("nan")
+            p = float(2 * stats.norm.sf(abs(z))) if np.isfinite(z) else float("nan")
             rows.append({
                 "classifier_A": ca,
                 "classifier_B": cb,
                 "auc_A":        round(float(aucs[i]), 4),
                 "auc_B":        round(float(aucs[j]), 4),
-                "delta_auc":    round(float(d),  4),
-                "se_delta":     round(float(se), 6),
-                "z_stat":       round(float(z),  4) if np.isfinite(z) else "NA",
-                "p_delong":     round(float(p),  4) if np.isfinite(p) else "NA",
+                "delta_auc":    round(float(d), 4),
+                "se_delta":     round(se, 6),
+                "z_stat":       round(float(z), 4) if np.isfinite(z) else "NA",
+                "p_delong":     round(float(p), 4) if np.isfinite(p) else "NA",
                 "significant":  "Yes" if (np.isfinite(p) and p < 0.05) else "No",
             })
 
     df_out = pd.DataFrame(rows)
     df_out.to_csv(out_csv_path, index=False, encoding="utf-8")
     logger.info(
-        "[delong] %d pairs tested; formal DeLong saved → %s",
-        len(rows), os.path.basename(out_csv_path),
+        "[delong] %d pairs tested across %d models → %s",
+        len(rows), len(clfs), os.path.basename(out_csv_path),
     )
     return df_out
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Figure 4B: Classifier metric comparison bar chart
-# ─────────────────────────────────────────────────────────────────────────────
+def _delong_bootstrap(clf_pred_path: str, out_csv_path: str,
+                      n_boot: int = DELONG_BOOT_N,
+                      models: Optional[Iterable[str]] = None):
+    """Bootstrap pairwise AUC test (paired resampling)."""
+    import pandas as pd
+    from sklearn.metrics import roc_auc_score
 
-def _fig4_clf_comparison(clf_sum_path, out_path):
-    plt = _mpl()
-
-    df = _read_csv(clf_sum_path)
+    df = _read_csv(clf_pred_path)
     if df is None:
         return None
 
-    metrics = [
-        ("auc",         "auc_ci95_lo",   "auc_ci95_hi",   "AUC"),
-        ("accuracy",    "acc_ci95_lo",    "acc_ci95_hi",   "Accuracy"),
-        ("sensitivity", "sens_ci95_lo",   "sens_ci95_hi",  "Sensitivity"),
-        ("specificity", "spec_ci95_lo",   "spec_ci95_hi",  "Specificity"),
-    ]
-    clfs = [c for c in _CLF_ORDER if c in df["classifier"].values]
-    if not clfs:
+    data = _extract_clf_data(df, models or ALL_MODELS)
+    clfs = list(data.keys())
+    if len(clfs) < 2:
         return None
 
-    x      = np.arange(len(metrics))
-    width  = 0.14
-    n      = len(clfs)
-    offsets = np.linspace(-(n - 1) / 2, (n - 1) / 2, n) * width
+    n = len(data[clfs[0]]["y_true"])
+    rng = np.random.default_rng(DEFAULT_SEED)
+    rows = []
 
-    fig, ax = plt.subplots(figsize=(10, 5))
+    for i, c1 in enumerate(clfs):
+        for c2 in clfs[i + 1:]:
+            y_true = data[c1]["y_true"]
+            diffs = []
+            for _ in range(n_boot):
+                idx = rng.integers(0, n, n)
+                if len(np.unique(y_true[idx])) < 2:
+                    continue
+                a1 = roc_auc_score(y_true[idx], data[c1]["y_prob"][idx])
+                a2 = roc_auc_score(y_true[idx], data[c2]["y_prob"][idx])
+                diffs.append(a1 - a2)
+            diffs = np.array(diffs)
+            auc1 = roc_auc_score(y_true, data[c1]["y_prob"])
+            auc2 = roc_auc_score(y_true, data[c2]["y_prob"])
+            obs  = auc1 - auc2
+            if len(diffs):
+                p_two_sided = min(np.mean(diffs <= 0), np.mean(diffs >= 0)) * 2
+                ci_lo, ci_hi = np.percentile(diffs, [2.5, 97.5])
+            else:
+                p_two_sided, ci_lo, ci_hi = 1.0, float("nan"), float("nan")
+            rows.append({
+                "classifier_A": c1, "classifier_B": c2,
+                "auc_A": round(auc1, 4), "auc_B": round(auc2, 4),
+                "delta_auc": round(obs, 4),
+                "ci95_lo": round(float(ci_lo), 4),
+                "ci95_hi": round(float(ci_hi), 4),
+                "p_bootstrap": round(float(p_two_sided), 4),
+                "significant": "Yes" if p_two_sided < 0.05 else "No",
+            })
 
-    for i, clf in enumerate(clfs):
-        row = df[df["classifier"] == clf].iloc[0]
-        vals    = [float(row.get(m, 0))  for m, *_ in metrics]
-        cis_lo  = [float(row.get(lo, v)) for (m, lo, hi, _), v in zip(metrics, vals)]
-        cis_hi  = [float(row.get(hi, v)) for (m, lo, hi, _), v in zip(metrics, vals)]
-        yerr = [[v - lo for v, lo in zip(vals, cis_lo)],
-                [hi - v for v, hi in zip(vals, cis_hi)]]
-        bars = ax.bar(x + offsets[i], vals, width, yerr=yerr,
-                      color=_CLF_COLORS[clf], alpha=0.85, capsize=3.5, label=clf,
-                      error_kw={"elinewidth": 1.2, "ecolor": "#555"})
-        for bar in bars:
-            ax.text(bar.get_x() + bar.get_width() / 2,
-                    bar.get_height() + max(yerr[1]) + 0.01,
-                    f"{bar.get_height():.2f}",
-                    ha="center", va="bottom", fontsize=6.5, rotation=90)
+    df_out = pd.DataFrame(rows)
+    df_out.to_csv(out_csv_path, index=False, encoding="utf-8")
+    return df_out
 
-    ax.set_xticks(x)
-    ax.set_xticklabels([m[-1] for m in metrics], fontsize=12)
-    ax.set_ylim([0, 1.15])
-    ax.axhline(0.5, color="#bbb", lw=1, ls="--", alpha=0.7)
-    ax.set_ylabel("Score", fontsize=12)
-    ax.set_title("Classifier Performance — LOO-CV (n=116, 95% CI bootstrap)",
-                 fontsize=12, fontweight="bold")
-    ax.legend(loc="upper right", fontsize=9, ncol=n)
-    ax.grid(axis="y", alpha=0.2)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Figure 3 — Multi-classifier ROC (two panels: cfDNA-only vs fusion)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _plot_roc_panel(ax, df, models: Iterable[str], baseline: Optional[str] = None,
+                    n_boot: int = BOOTSTRAP_N) -> int:
+    """Plot ROC curves for the requested models on the given axis.
+
+    ``baseline`` is plotted with a dashed style to distinguish it from the model
+    group (used for CA-125 alone). Returns the number of curves drawn.
+    """
+    from sklearn.metrics import roc_curve, auc as sk_auc
+
+    plotted = 0
+    rng = np.random.default_rng(DEFAULT_SEED)
+
+    def _curve_with_ci(clf, sub, dashed: bool):
+        nonlocal plotted
+        y_true = (sub["true_label"] == "malignant").astype(int).values
+        y_prob = sub["prob_malignant"].astype(float).values
+        fpr, tpr, _ = roc_curve(y_true, y_prob)
+        auc_val = sk_auc(fpr, tpr)
+
+        boot = []
+        for _ in range(n_boot):
+            idx = rng.integers(0, len(y_true), len(y_true))
+            if len(np.unique(y_true[idx])) < 2:
+                continue
+            f, t, _ = roc_curve(y_true[idx], y_prob[idx])
+            boot.append(sk_auc(f, t))
+        ci_lo, ci_hi = (np.percentile(boot, [2.5, 97.5]) if boot
+                        else (float("nan"), float("nan")))
+
+        style = "--" if dashed else "-"
+        ax.plot(fpr, tpr,
+                color=CLF_COLORS.get(clf, "#444"),
+                lw=2, linestyle=style,
+                label=f"{clf}  AUC={auc_val:.3f} ({ci_lo:.3f}–{ci_hi:.3f})")
+        plotted += 1
+
+    for clf in models:
+        sub = df[df["classifier"] == clf]
+        if not sub.empty:
+            _curve_with_ci(clf, sub, dashed=False)
+
+    if baseline is not None:
+        sub = df[df["classifier"] == baseline]
+        if not sub.empty:
+            _curve_with_ci(baseline, sub, dashed=True)
+
+    return plotted
+
+
+def _fig3_roc(clf_pred_path: str, out_path: str, ctx: _PipelineContext) -> Optional[bool]:
+    plt = _mpl()
+    df = _read_csv(clf_pred_path)
+    if df is None:
+        return None
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6), sharey=True)
+
+    n_left  = _plot_roc_panel(axes[0], df, CFDNA_ONLY,    baseline=CA125_ALONE)
+    n_right = _plot_roc_panel(axes[1], df, FUSION_MODELS, baseline=CA125_ALONE)
+
+    if n_left == 0 and n_right == 0:
+        plt.close(fig)
+        return None
+
+    for ax, title in zip(axes,
+                         [f"A. cfDNA-only models + CA-125 baseline",
+                          f"B. cfDNA + CA-125 fusion models + CA-125 baseline"]):
+        ax.plot([0, 1], [0, 1], "k:", lw=1, alpha=0.4)
+        ax.set_xlim([0, 1]); ax.set_ylim([0, 1.02])
+        ax.set_xlabel("1 − Specificity (False Positive Rate)", fontsize=11)
+        ax.set_title(title, fontsize=11, fontweight="bold")
+        ax.legend(loc="lower right", fontsize=8.5, framealpha=0.9)
+        ax.grid(alpha=0.25)
+    axes[0].set_ylabel("Sensitivity (True Positive Rate)", fontsize=11)
+
+    fig.suptitle(
+        f"Figure 3 — Binary Classification ROC ({ctx.cv_caption()}; "
+        f"95% CI from {BOOTSTRAP_N}-resample bootstrap)",
+        fontsize=12, fontweight="bold", y=1.02,
+    )
     fig.tight_layout()
     _savefig(fig, out_path)
     return True
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Figure 5: Temporal validation — AUC comparison + prediction scatter
+# Figure 4 — Eleven-model metric comparison (cfDNA-only vs CA-125+fusion)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _fig5_temporal(tv_sum_path, tv_pred_path, clf_sum_path, out_path):
+_METRIC_SPEC = [
+    ("auc",         "auc_ci95_lo",  "auc_ci95_hi",  "AUC"),
+    ("accuracy",    "acc_ci95_lo",  "acc_ci95_hi",  "Accuracy"),
+    ("sensitivity", "sens_ci95_lo", "sens_ci95_hi", "Sensitivity"),
+    ("specificity", "spec_ci95_lo", "spec_ci95_hi", "Specificity"),
+]
+
+
+def _plot_metric_panel(ax, df, models: Iterable[str], title: str) -> int:
+    """Grouped bar chart of (AUC, Accuracy, Sensitivity, Specificity) per model."""
+    clfs = [c for c in models if c in df["classifier"].values]
+    if not clfs:
+        return 0
+
+    x = np.arange(len(_METRIC_SPEC))
+    n = len(clfs)
+    width = 0.9 / n
+    offsets = np.linspace(-(n - 1) / 2, (n - 1) / 2, n) * width
+
+    for i, clf in enumerate(clfs):
+        row = df[df["classifier"] == clf].iloc[0]
+        vals = [float(row.get(m, 0))  for m, *_ in _METRIC_SPEC]
+        lo   = [float(row.get(l, v))  for (m, l, h, _), v in zip(_METRIC_SPEC, vals)]
+        hi   = [float(row.get(h, v))  for (m, l, h, _), v in zip(_METRIC_SPEC, vals)]
+        yerr = [[v - lo_i for v, lo_i in zip(vals, lo)],
+                [hi_i - v for v, hi_i in zip(vals, hi)]]
+        ax.bar(x + offsets[i], vals, width, yerr=yerr,
+               color=CLF_COLORS.get(clf, "#777"), alpha=0.85, capsize=2.5,
+               label=clf, error_kw={"elinewidth": 1.0, "ecolor": "#555"})
+
+    ax.set_xticks(x)
+    ax.set_xticklabels([m[-1] for m in _METRIC_SPEC], fontsize=11)
+    ax.set_ylim([0, 1.15])
+    ax.axhline(0.5, color="#bbb", lw=1, ls="--", alpha=0.6)
+    ax.set_title(title, fontsize=11, fontweight="bold")
+    ax.legend(loc="upper right", fontsize=8, ncol=min(n, 3))
+    ax.grid(axis="y", alpha=0.2)
+    return len(clfs)
+
+
+def _fig4_clf_comparison(clf_sum_path: str, out_path: str,
+                         ctx: _PipelineContext) -> Optional[bool]:
+    plt = _mpl()
+    df = _read_csv(clf_sum_path)
+    if df is None:
+        return None
+
+    fig, axes = plt.subplots(1, 2, figsize=(15, 5), sharey=True)
+    n_left  = _plot_metric_panel(axes[0], df, CFDNA_ONLY,
+                                 title="A. cfDNA-only models")
+    n_right = _plot_metric_panel(axes[1], df, [CA125_ALONE] + FUSION_MODELS,
+                                 title="B. CA-125 baseline + cfDNA + CA-125 fusion")
+
+    if n_left == 0 and n_right == 0:
+        plt.close(fig)
+        return None
+
+    axes[0].set_ylabel("Score", fontsize=11)
+    fig.suptitle(
+        f"Figure 4 — Classifier Performance ({ctx.cv_caption()}; "
+        f"95% bootstrap CI)",
+        fontsize=12, fontweight="bold", y=1.02,
+    )
+    fig.tight_layout()
+    _savefig(fig, out_path)
+    return True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Figure 5 — Temporal validation: CV-vs-prospective AUCs + best-model scatter
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _fig5_temporal(tv_sum_path: str, tv_pred_path: str, clf_sum_path: str,
+                   out_path: str, ctx: _PipelineContext) -> Optional[bool]:
     import pandas as pd
     plt = _mpl()
 
@@ -361,133 +618,628 @@ def _fig5_temporal(tv_sum_path, tv_pred_path, clf_sum_path, out_path):
     if tv_sum is None or tv_pred is None:
         return None
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
 
-    # ── Panel A: LOO-CV vs prospective AUC bar chart ──────────────────────
-    clfs = [c for c in _CLF_ORDER if c in tv_sum["classifier"].values]
+    # ── Panel A: side-by-side CV vs prospective AUC bars (all 11 models) ──
+    clfs = [c for c in ALL_MODELS if c in tv_sum["classifier"].values]
     x = np.arange(len(clfs))
-    w = 0.32
+    w = 0.36
 
-    loo_aucs = []
+    cv_aucs = []
     if clf_sum is not None:
         for c in clfs:
             row = clf_sum[clf_sum["classifier"] == c]
-            loo_aucs.append(float(row["auc"].iloc[0]) if not row.empty else 0.0)
+            cv_aucs.append(float(row["auc"].iloc[0]) if not row.empty else 0.0)
+    else:
+        cv_aucs = [0.0] * len(clfs)
     tv_aucs = [float(tv_sum[tv_sum["classifier"] == c]["auc"].iloc[0]) for c in clfs]
 
-    b1 = ax1.bar(x - w / 2, loo_aucs, w, label="LOO-CV (n=116)", color="#4393c3", alpha=0.85)
-    b2 = ax1.bar(x + w / 2, tv_aucs,  w, label="Prospective (n=20)", color="#d6604d", alpha=0.85)
-    ax1.axhline(0.5, color="#bbb", lw=1, ls="--", alpha=0.7)
-    ax1.set_xticks(x); ax1.set_xticklabels(clfs, fontsize=10)
-    ax1.set_ylim([0, 1.08]); ax1.set_ylabel("AUC", fontsize=11)
-    ax1.set_title("LOO-CV vs Prospective Validation AUC", fontsize=11, fontweight="bold")
-    ax1.legend(fontsize=9); ax1.grid(axis="y", alpha=0.2)
+    b1 = ax1.bar(x - w / 2, cv_aucs, w,
+                 label=f"{ctx.cv_label} (n={ctx.n_total})",
+                 color="#4393c3", alpha=0.85)
+    b2 = ax1.bar(x + w / 2, tv_aucs, w,
+                 label=f"Prospective (n={ctx.tv_total})",
+                 color="#d6604d", alpha=0.85)
+    ax1.axhline(0.5, color="#bbb", lw=1, ls="--", alpha=0.6)
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(clfs, fontsize=8.5, rotation=30, ha="right")
+    ax1.set_ylim([0, 1.08])
+    ax1.set_ylabel("AUC", fontsize=11)
+    ax1.set_title(f"A. {ctx.cv_label} vs Prospective AUC",
+                  fontsize=11, fontweight="bold")
+    ax1.legend(fontsize=9, loc="upper left")
+    ax1.grid(axis="y", alpha=0.2)
     for bar in list(b1) + list(b2):
         ax1.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.012,
-                 f"{bar.get_height():.3f}", ha="center", va="bottom", fontsize=7.5)
+                 f"{bar.get_height():.3f}",
+                 ha="center", va="bottom", fontsize=6.5, rotation=90)
 
-    # ── Panel B: prediction scatter (LGBM, best prospective performer) ────
+    # ── Panel B: prediction scatter for the prospective best model ────────
     best_clf = tv_sum.loc[tv_sum["auc"].astype(float).idxmax(), "classifier"]
     sub = tv_pred[tv_pred["classifier"] == best_clf].copy()
     if sub.empty:
-        sub = tv_pred[tv_pred["classifier"] == tv_pred["classifier"].iloc[0]].copy()
+        first_clf = tv_pred["classifier"].iloc[0]
+        sub = tv_pred[tv_pred["classifier"] == first_clf].copy()
+        best_clf = first_clf
 
-    sub["date"] = pd.to_datetime(sub["collection_date"].astype(str), format="%Y%m%d", errors="coerce")
+    sub["date"] = pd.to_datetime(sub["collection_date"].astype(str),
+                                 format="%Y%m%d", errors="coerce")
     sub["prob"] = sub["prob_malignant"].astype(float)
     sub["correct"] = sub["correct"].astype(str).str.lower().isin(["true", "1"])
 
-    for label, color, marker in [("malignant", "#d6604d", "o"), ("benign", "#4393c3", "s")]:
+    for label, color, marker in [("malignant", "#d6604d", "o"),
+                                 ("benign",    "#4393c3", "s")]:
         grp = sub[sub["true_label"] == label]
-        ax2.scatter(grp["date"], grp["prob"],
-                    c=color, marker=marker, s=80, alpha=0.85, zorder=3,
-                    label=f"{label.capitalize()} (n={len(grp)})")
+        if not grp.empty:
+            ax2.scatter(grp["date"], grp["prob"],
+                        c=color, marker=marker, s=70, alpha=0.85, zorder=3,
+                        label=f"{label.capitalize()} (n={len(grp)})")
 
     wrong = sub[~sub["correct"]]
     if not wrong.empty:
         ax2.scatter(wrong["date"], wrong["prob"],
-                    marker="x", s=130, c="black", linewidths=2, zorder=5,
-                    label="Misclassified")
+                    marker="x", s=110, c="black", linewidths=2, zorder=5,
+                    label=f"Misclassified (n={len(wrong)})")
 
-    ax2.axhline(0.5, color="#888", lw=1.2, ls="--", alpha=0.7, label="Decision boundary (0.5)")
+    ax2.axhline(0.5, color="#888", lw=1.2, ls="--", alpha=0.7,
+                label="Decision boundary (0.5)")
     ax2.set_ylim([-0.07, 1.07])
     ax2.set_xlabel("Sample collection date", fontsize=11)
     ax2.set_ylabel(f"P(Malignant) — {best_clf}", fontsize=11)
-    ax2.set_title(f"Prospective Validation Predictions ({best_clf}, n=20)\n"
-                  f"Note: 4 benign / 16 malignant — specificity estimate provisional",
-                  fontsize=10, fontweight="bold")
+    ax2.set_title(
+        f"B. Prospective Predictions — best model: {best_clf} "
+        f"(validation n={ctx.tv_total}: {ctx.tv_benign} benign, "
+        f"{ctx.tv_malignant} malignant)",
+        fontsize=10.5, fontweight="bold",
+    )
     fig.autofmt_xdate(rotation=30)
-    ax2.legend(fontsize=8.5, loc="center left"); ax2.grid(alpha=0.2)
+    ax2.legend(fontsize=8, loc="center left")
+    ax2.grid(alpha=0.2)
 
-    fig.suptitle("Figure 5 — Temporal Prospective Validation", fontsize=13, fontweight="bold", y=1.01)
+    fig.suptitle(
+        f"Figure 5 — Temporal Prospective Validation ({ctx.tv_caption()})",
+        fontsize=12, fontweight="bold", y=1.02,
+    )
     fig.tight_layout()
     _savefig(fig, out_path)
     return True
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Figure 2B: Panel CpG annotation pie charts
+# Figure 4B / 4C / 5B — Multimodal-fusion marginal-value figures
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _fig2b_panel_annotation(annot_path, out_path):
-    plt = _mpl()
+# Metric columns shared by classifier_summary.csv and temporal_validation_summary.csv
+_FUSION_METRICS = [
+    ("auc",         "auc_ci95_lo",  "auc_ci95_hi",  "AUC"),
+    ("accuracy",    "acc_ci95_lo",  "acc_ci95_hi",  "Accuracy"),
+    ("sensitivity", "sens_ci95_lo", "sens_ci95_hi", "Sensitivity"),
+    ("specificity", "spec_ci95_lo", "spec_ci95_hi", "Specificity"),
+]
 
+
+def _row_for(df, clf: str):
+    """Return the single row matching ``clf`` or None if absent."""
+    sub = df[df["classifier"] == clf]
+    return sub.iloc[0] if not sub.empty else None
+
+
+def _fig4b_fusion_delta(clf_sum_path: str, out_path: str,
+                        ctx: _PipelineContext) -> Optional[bool]:
+    """Paired fusion-vs-cfDNA-only Δ for each base classifier (4 metrics)."""
+    plt = _mpl()
+    df = _read_csv(clf_sum_path)
+    if df is None:
+        return None
+
+    pairs = [(m, f"{m}+CA125") for m in CFDNA_ONLY]
+    rows = []
+    for base, fused in pairs:
+        rb, rf = _row_for(df, base), _row_for(df, fused)
+        if rb is None or rf is None:
+            continue
+        rec = {"base": base}
+        for m, _, _, _ in _FUSION_METRICS:
+            rec[f"{m}_base"]  = float(rb.get(m, np.nan))
+            rec[f"{m}_fused"] = float(rf.get(m, np.nan))
+            rec[f"{m}_delta"] = rec[f"{m}_fused"] - rec[f"{m}_base"]
+        rows.append(rec)
+
+    if not rows:
+        return None
+
+    fig, axes = plt.subplots(1, 4, figsize=(16, 4.4), sharey=True)
+    bases = [r["base"] for r in rows]
+    y = np.arange(len(bases))
+
+    for ax, (m, _, _, label) in zip(axes, _FUSION_METRICS):
+        deltas = np.array([r[f"{m}_delta"] for r in rows])
+        colors = ["#2a9d8f" if d >= 0 else "#e63946" for d in deltas]
+        ax.barh(y, deltas, color=colors, alpha=0.85,
+                edgecolor="#333", linewidth=0.4)
+        ax.axvline(0, color="#444", lw=0.8)
+        for i, (d, b_val, f_val) in enumerate(zip(
+                deltas,
+                [r[f"{m}_base"]  for r in rows],
+                [r[f"{m}_fused"] for r in rows])):
+            sign = "+" if d >= 0 else ""
+            ax.text(d + (0.003 if d >= 0 else -0.003), i,
+                    f"{sign}{d:.3f}\n({b_val:.3f}→{f_val:.3f})",
+                    va="center",
+                    ha="left" if d >= 0 else "right",
+                    fontsize=7.5, color="#222")
+        ax.set_yticks(y)
+        ax.set_yticklabels(bases, fontsize=9)
+        ax.set_title(f"Δ {label}", fontsize=11, fontweight="bold")
+        ax.set_xlabel(f"fused − base ({label})", fontsize=9)
+        ax.grid(axis="x", alpha=0.25)
+        x_pad = max(0.02, np.max(np.abs(deltas)) * 0.45)
+        ax.set_xlim(-x_pad, x_pad + max(0, np.max(deltas)) * 0.6)
+
+    axes[0].set_ylabel("Base classifier", fontsize=10)
+    fig.suptitle(
+        f"Figure 4B — Marginal value of CA-125 fusion ({ctx.cv_caption()}): "
+        f"five paired (cfDNA-only, +CA125) comparisons",
+        fontsize=12, fontweight="bold", y=1.04,
+    )
+    fig.tight_layout()
+    _savefig(fig, out_path)
+    return True
+
+
+def _fig4c_spec_gain(clf_sum_path: str, out_path: str,
+                     ctx: _PipelineContext) -> Optional[bool]:
+    """Δ specificity and Δ AUC for each cfDNA-only/fusion model vs CA-125 alone."""
+    plt = _mpl()
+    df = _read_csv(clf_sum_path)
+    if df is None:
+        return None
+
+    ca = _row_for(df, CA125_ALONE)
+    if ca is None:
+        return None
+    ca_spec = float(ca.get("specificity", np.nan))
+    ca_auc  = float(ca.get("auc",         np.nan))
+    if not (np.isfinite(ca_spec) and np.isfinite(ca_auc)):
+        return None
+
+    models = CFDNA_ONLY + FUSION_MODELS
+    rows = []
+    for clf in models:
+        r = _row_for(df, clf)
+        if r is None:
+            continue
+        rows.append({
+            "clf":      clf,
+            "is_fused": clf in FUSION_MODELS,
+            "d_spec":   float(r.get("specificity", np.nan)) - ca_spec,
+            "d_auc":    float(r.get("auc",         np.nan)) - ca_auc,
+            "spec":     float(r.get("specificity", np.nan)),
+            "auc":      float(r.get("auc",         np.nan)),
+        })
+    if not rows:
+        return None
+
+    # Order: cfDNA-only first (sorted by Δ spec ascending), then fusion (same order)
+    rows.sort(key=lambda r: (r["is_fused"], r["d_spec"]))
+    labels = [r["clf"] for r in rows]
+    y      = np.arange(len(labels))
+
+    fig, (ax_spec, ax_auc) = plt.subplots(1, 2, figsize=(13, 5.2), sharey=True)
+
+    def _draw(ax, key_d: str, key_abs: str, ca_ref: float, x_label: str, title: str):
+        deltas = np.array([r[key_d] for r in rows])
+        for i, r in enumerate(rows):
+            edge   = "#1d3557" if r["is_fused"] else "#bbbbbb"
+            color  = CLF_COLORS.get(r["clf"], "#777")
+            alpha  = 0.95 if r["is_fused"] else 0.65
+            ax.barh(i, r[key_d], color=color, alpha=alpha,
+                    edgecolor=edge, linewidth=1.2 if r["is_fused"] else 0.5)
+            sign = "+" if r[key_d] >= 0 else ""
+            ax.text(r[key_d] + (0.004 if r[key_d] >= 0 else -0.004), i,
+                    f"{sign}{r[key_d]:.3f}\n({r[key_abs]:.3f})",
+                    va="center",
+                    ha="left" if r[key_d] >= 0 else "right",
+                    fontsize=7.5, color="#222")
+        ax.axvline(0, color="#444", lw=0.8)
+        ax.set_yticks(y); ax.set_yticklabels(labels, fontsize=9)
+        ax.set_xlabel(x_label, fontsize=10)
+        ax.set_title(title, fontsize=11, fontweight="bold")
+        ax.grid(axis="x", alpha=0.25)
+        x_pad = max(0.05, np.max(np.abs(deltas)) * 0.45)
+        ax.set_xlim(-x_pad, x_pad + max(0, np.max(deltas)) * 0.5)
+        # Reference baseline annotation
+        ax.text(0.99, -0.16,
+                f"CA-125 baseline = {ca_ref:.3f}",
+                transform=ax.transAxes, ha="right", va="top",
+                fontsize=8.5, color="#555", style="italic")
+
+    _draw(ax_spec, "d_spec", "spec", ca_spec,
+          "Δ Specificity vs CA-125 alone",
+          "A. Specificity gain over CA-125")
+    _draw(ax_auc, "d_auc", "auc", ca_auc,
+          "Δ AUC vs CA-125 alone",
+          "B. AUC gain over CA-125")
+
+    # Separator between cfDNA-only and fusion groups
+    n_cfdna = sum(1 for r in rows if not r["is_fused"])
+    if 0 < n_cfdna < len(rows):
+        for ax in (ax_spec, ax_auc):
+            ax.axhline(n_cfdna - 0.5, color="#1d3557", lw=0.6, ls="--", alpha=0.6)
+    ax_spec.set_ylabel("Classifier  (fusion = dark border)", fontsize=10)
+
+    fig.suptitle(
+        f"Figure 4C — Per-model gain over CA-125 alone ({ctx.cv_caption()}); "
+        f"fusion models bear a dark border",
+        fontsize=12, fontweight="bold", y=1.02,
+    )
+    fig.tight_layout()
+    _savefig(fig, out_path)
+    return True
+
+
+def _fig5b_two_regime(clf_sum_path: str, tv_sum_path: str, out_path: str,
+                      ctx: _PipelineContext) -> Optional[bool]:
+    """Side-by-side AUC and Specificity across CV and Temporal regimes (all 11 models).
+
+    Highlights whether the fusion advantage is preserved when models are evaluated
+    on a chronologically held-out cohort — the central claim of the manuscript.
+    """
+    plt = _mpl()
+    cv = _read_csv(clf_sum_path)
+    tv = _read_csv(tv_sum_path)
+    if cv is None or tv is None:
+        return None
+
+    models = [m for m in ALL_MODELS
+              if m in cv["classifier"].values and m in tv["classifier"].values]
+    if not models:
+        return None
+
+    x = np.arange(len(models))
+    width = 0.36
+
+    fig, (ax_auc, ax_spec) = plt.subplots(1, 2, figsize=(16, 5.4), sharex=True)
+
+    def _draw(ax, metric: str, lo_col: str, hi_col: str, ylabel: str, title: str):
+        cv_v  = np.array([float(_row_for(cv, m).get(metric, np.nan)) for m in models])
+        tv_v  = np.array([float(_row_for(tv, m).get(metric, np.nan)) for m in models])
+        cv_lo = np.array([float(_row_for(cv, m).get(lo_col, v)) for m, v in zip(models, cv_v)])
+        cv_hi = np.array([float(_row_for(cv, m).get(hi_col, v)) for m, v in zip(models, cv_v)])
+        tv_lo = np.array([float(_row_for(tv, m).get(lo_col, v)) for m, v in zip(models, tv_v)])
+        tv_hi = np.array([float(_row_for(tv, m).get(hi_col, v)) for m, v in zip(models, tv_v)])
+        cv_err = [cv_v - cv_lo, cv_hi - cv_v]
+        tv_err = [tv_v - tv_lo, tv_hi - tv_v]
+
+        # Distinguish CV from Temporal by fill style; preserve per-model colour
+        for i, m in enumerate(models):
+            col = CLF_COLORS.get(m, "#777")
+            ax.bar(i - width/2, cv_v[i], width,
+                   yerr=[[cv_err[0][i]], [cv_err[1][i]]],
+                   color=col, alpha=0.85, edgecolor="#222", linewidth=0.4,
+                   error_kw={"elinewidth": 0.9, "ecolor": "#555"},
+                   label=ctx.cv_label if i == 0 else None)
+            ax.bar(i + width/2, tv_v[i], width,
+                   yerr=[[tv_err[0][i]], [tv_err[1][i]]],
+                   color=col, alpha=0.85, edgecolor="#222", linewidth=0.4,
+                   hatch="///",
+                   error_kw={"elinewidth": 0.9, "ecolor": "#555"},
+                   label="Temporal validation" if i == 0 else None)
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(models, rotation=35, ha="right", fontsize=9)
+        ax.set_ylim(0, 1.08)
+        ax.axhline(0.5, color="#bbb", lw=1, ls="--", alpha=0.5)
+        ax.set_ylabel(ylabel, fontsize=10)
+        ax.set_title(title, fontsize=11, fontweight="bold")
+        ax.grid(axis="y", alpha=0.2)
+        ax.legend(loc="upper left", fontsize=8.5, framealpha=0.9)
+
+    _draw(ax_auc,  "auc",         "auc_ci95_lo",  "auc_ci95_hi",
+          "AUC",         "A. AUC: CV vs Temporal")
+    _draw(ax_spec, "specificity", "spec_ci95_lo", "spec_ci95_hi",
+          "Specificity", "B. Specificity: CV vs Temporal")
+
+    fig.suptitle(
+        f"Figure 5B — Cross-regime consistency: {ctx.cv_label} (solid) vs "
+        f"Temporal prospective validation (hatched), 95% CI",
+        fontsize=12, fontweight="bold", y=1.02,
+    )
+    fig.tight_layout()
+    _savefig(fig, out_path)
+    return True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Figure 4D — DeLong forest plot (15 focused pairwise AUC comparisons)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _lookup_delong_pair(df, ca: str, cb: str):
+    """Return (delta_oriented_as_A_minus_B, ci_lo, ci_hi, p_value_or_None, row).
+
+    Handles both orientations: if the table stored (cb, ca) instead of (ca, cb),
+    the sign of delta_auc / CI is flipped so the result is always A - B oriented.
+    Bootstrap-mode tables include ``ci95_lo`` / ``ci95_hi`` and ``p_bootstrap``.
+    Formal-mode tables omit CI columns and expose ``p_delong``.
+    """
+    if df is None or df.empty:
+        return None
+    same = df[(df["classifier_A"] == ca) & (df["classifier_B"] == cb)]
+    flip = df[(df["classifier_A"] == cb) & (df["classifier_B"] == ca)]
+    if not same.empty:
+        r = same.iloc[0]
+        sign = 1.0
+    elif not flip.empty:
+        r = flip.iloc[0]
+        sign = -1.0
+    else:
+        return None
+
+    delta = sign * float(r.get("delta_auc", np.nan))
+    ci_lo_raw = r.get("ci95_lo", np.nan)
+    ci_hi_raw = r.get("ci95_hi", np.nan)
+    try:
+        ci_lo = float(ci_lo_raw); ci_hi = float(ci_hi_raw)
+        if sign < 0:
+            ci_lo, ci_hi = -ci_hi, -ci_lo
+    except (TypeError, ValueError):
+        ci_lo, ci_hi = float("nan"), float("nan")
+
+    p_val = None
+    for col in ("p_bootstrap", "p_delong"):
+        if col in df.columns:
+            try:
+                p_val = float(r.get(col))
+            except (TypeError, ValueError):
+                p_val = None
+            break
+    return delta, ci_lo, ci_hi, p_val
+
+
+def _fig_delong_forest(delong_boot_path: str, delong_formal_path: str,
+                       out_path: str, ctx: _PipelineContext) -> Optional[bool]:
+    """Forest plot of 15 focused pairwise AUC comparisons (3 semantic groups).
+
+    Groups:
+      1. Each cfDNA-only vs CA-125 alone (5 rows)
+      2. Each fusion vs CA-125 alone (5 rows)
+      3. Each fusion vs its cfDNA-only counterpart (5 rows)
+
+    Shows Δ AUC with 95% CI whiskers (from the bootstrap table) and annotates
+    each row with bootstrap p and formal DeLong p side by side.
+    """
+    plt = _mpl()
+    df_boot = _read_csv(delong_boot_path)
+    df_form = _read_csv(delong_formal_path)
+    if df_boot is None and df_form is None:
+        return None
+
+    # Build (group_label, label, ca, cb) for each of the 15 rows
+    groups = [
+        ("cfDNA vs CA-125",
+         [(m, m, CA125_ALONE) for m in CFDNA_ONLY]),
+        ("Fusion vs CA-125",
+         [(f"{m}+CA125", f"{m}+CA125", CA125_ALONE) for m in CFDNA_ONLY]),
+        ("Fusion vs base cfDNA",
+         [(f"{m}+CA125 vs {m}", f"{m}+CA125", m) for m in CFDNA_ONLY]),
+    ]
+
+    rows = []
+    for group_idx, (group_label, items) in enumerate(groups):
+        for label, ca, cb in items:
+            b = _lookup_delong_pair(df_boot, ca, cb) if df_boot is not None else None
+            f = _lookup_delong_pair(df_form, ca, cb) if df_form is not None else None
+            if b is None and f is None:
+                continue
+            delta, ci_lo, ci_hi, p_boot = b if b is not None else (
+                f[0], float("nan"), float("nan"), None
+            )
+            p_form = f[3] if f is not None else None
+            rows.append({
+                "group_idx": group_idx,
+                "group_label": group_label,
+                "label": label,
+                "delta": delta,
+                "ci_lo": ci_lo,
+                "ci_hi": ci_hi,
+                "p_boot": p_boot,
+                "p_form": p_form,
+            })
+
+    if not rows:
+        return None
+
+    # Layout: rows top-to-bottom in declared order; insert blank slots between groups
+    y_positions = []
+    y = 0.0
+    last_group = None
+    for r in rows:
+        if last_group is not None and r["group_idx"] != last_group:
+            y -= 1.0  # blank row between groups
+        y -= 1.0
+        y_positions.append(y)
+        last_group = r["group_idx"]
+
+    fig_height = max(5.0, 0.45 * (abs(y_positions[-1]) + 2))
+    fig, ax = plt.subplots(figsize=(11.5, fig_height))
+
+    # Colour by group
+    group_colors = {0: "#4393c3", 1: "#8073ac", 2: "#4dac26"}
+
+    # Draw zero reference and CI whiskers + point estimates
+    ax.axvline(0.0, color="#444", lw=1.0, ls="--", alpha=0.7, zorder=1)
+    for r, y in zip(rows, y_positions):
+        col = group_colors[r["group_idx"]]
+        d, lo, hi = r["delta"], r["ci_lo"], r["ci_hi"]
+        if np.isfinite(lo) and np.isfinite(hi):
+            ax.plot([lo, hi], [y, y], color=col, lw=2.0, alpha=0.85, zorder=2)
+            ax.plot([lo, lo], [y - 0.18, y + 0.18], color=col, lw=2.0, alpha=0.85)
+            ax.plot([hi, hi], [y - 0.18, y + 0.18], color=col, lw=2.0, alpha=0.85)
+        ax.plot([d], [y], marker="o", markersize=8, color=col,
+                markeredgecolor="black", markeredgewidth=0.6, zorder=3)
+
+    # Compute x-axis range with padding for annotations on the right
+    all_vals = []
+    for r in rows:
+        for v in (r["delta"], r["ci_lo"], r["ci_hi"]):
+            if np.isfinite(v):
+                all_vals.append(v)
+    x_min = min(all_vals + [0.0]) - 0.03
+    x_max = max(all_vals + [0.0]) + 0.03
+    x_span = x_max - x_min
+    x_anno = x_max + 0.04 * x_span
+    ax.set_xlim(x_min, x_anno + 0.55 * x_span)
+
+    # Row labels on left axis
+    ax.set_yticks(y_positions)
+    ax.set_yticklabels([r["label"] for r in rows], fontsize=9.5)
+
+    # Right-side annotations: Δ AUC [CI]   p_boot / p_DeLong   significance star
+    def _fmt_p(p):
+        if p is None or not np.isfinite(p):
+            return "NA"
+        return "<.001" if p < 0.001 else f"{p:.3f}"
+
+    for r, y in zip(rows, y_positions):
+        d, lo, hi = r["delta"], r["ci_lo"], r["ci_hi"]
+        if np.isfinite(lo) and np.isfinite(hi):
+            ci_str = f"Δ={d:+.3f}  [{lo:+.3f}, {hi:+.3f}]"
+        else:
+            ci_str = f"Δ={d:+.3f}"
+        p_str = f"p_boot={_fmt_p(r['p_boot'])} | p_DL={_fmt_p(r['p_form'])}"
+
+        sig = ""
+        for p in (r["p_boot"], r["p_form"]):
+            if p is not None and np.isfinite(p) and p < 0.05:
+                sig = "  ✱"
+                break
+
+        ax.text(x_anno, y, f"{ci_str}    {p_str}{sig}",
+                va="center", ha="left", fontsize=8.5, family="monospace",
+                color="#c0392b" if sig else "#333")
+
+    # Group separators + group labels in left margin
+    seen = set()
+    for r, y in zip(rows, y_positions):
+        if r["group_idx"] not in seen:
+            ax.text(x_min, y + 0.7,
+                    f"Group {r['group_idx'] + 1} — {r['group_label']}",
+                    fontsize=10, fontweight="bold",
+                    color=group_colors[r["group_idx"]],
+                    ha="left", va="bottom")
+            seen.add(r["group_idx"])
+
+    ax.set_ylim(min(y_positions) - 1.0, max(y_positions) + 1.5)
+    ax.set_xlabel("Δ AUC (A − B)  with 95% bootstrap CI", fontsize=10.5)
+    ax.set_title(
+        f"Figure 4D — Focused Pairwise AUC Comparisons under {ctx.cv_caption()}\n"
+        f"15 contrasts of interest; {DELONG_BOOT_N:,}-resample bootstrap CI + formal DeLong p",
+        fontsize=11, fontweight="bold", pad=12,
+    )
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.grid(axis="x", alpha=0.18)
+    ax.invert_yaxis()  # group 1 on top, group 3 on bottom
+    fig.tight_layout()
+    _savefig(fig, out_path)
+    return True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Figure 2B — Panel CpG annotation (3-panel pie chart)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _pie(ax, counts: dict, title: str, colors: list) -> None:
+    """Helper: draw a single annotated pie chart on the given axis."""
+    labels = [f"{k}\n(n={v})" for k, v in counts.items() if v > 0]
+    vals   = [v for v in counts.values() if v > 0]
+    if not vals:
+        ax.text(0.5, 0.5, "No data", ha="center", va="center",
+                transform=ax.transAxes)
+        ax.set_title(title, fontsize=11, fontweight="bold")
+        return
+    _, _, autotexts = ax.pie(
+        vals, labels=labels, autopct="%1.1f%%", colors=colors,
+        startangle=90, pctdistance=0.78,
+        textprops={"fontsize": 9},
+        wedgeprops={"linewidth": 0.8, "edgecolor": "white"},
+    )
+    for at in autotexts:
+        at.set_fontsize(8)
+    ax.set_title(title, fontsize=11, fontweight="bold", pad=10)
+
+
+def _fig2b_panel_annotation(annot_path: str, out_path: str,
+                            ctx: _PipelineContext) -> Optional[bool]:
+    plt = _mpl()
     df = _read_csv(annot_path)
     if df is None:
         return None
 
+    # Restrict to the final selected panel (panel_cpg.csv) when present, so the
+    # figure represents the panel actually used downstream rather than every
+    # annotated candidate site.
+    panel_cpg = _read_csv(os.path.join(os.path.dirname(annot_path), "panel_cpg.csv"))
+    if (panel_cpg is not None and not panel_cpg.empty
+            and "feature" in panel_cpg.columns and "feature" in df.columns):
+        panel_set = set(panel_cpg["feature"].astype(str))
+        df = df[df["feature"].astype(str).isin(panel_set)]
+        if df.empty:
+            return None
+
     fig, axes = plt.subplots(1, 3, figsize=(14, 4.5))
 
-    def _pie(ax, counts, title, colors):
-        labels = [f"{k}\n(n={v})" for k, v in counts.items() if v > 0]
-        vals   = [v for v in counts.values() if v > 0]
-        if not vals:
-            ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
-            ax.set_title(title, fontsize=11, fontweight="bold")
-            return
-        wedges, texts, autotexts = ax.pie(
-            vals, labels=labels, autopct="%1.1f%%", colors=colors,
-            startangle=90, pctdistance=0.78,
-            textprops={"fontsize": 9}, wedgeprops={"linewidth": 0.8, "edgecolor": "white"},
-        )
-        for at in autotexts:
-            at.set_fontsize(8)
-        ax.set_title(title, fontsize=11, fontweight="bold", pad=10)
-
-    cpg = df["cpg_context"].value_counts().reindex(["Island", "Shore", "Shelf", "Open sea"], fill_value=0).to_dict()
+    # CpG-island context
+    cpg = (df["cpg_context"].value_counts()
+           .reindex(["Island", "Shore", "Shelf", "Open sea"], fill_value=0)
+           .to_dict())
     _pie(axes[0], cpg, "CpG Island Context",
          ["#2166ac", "#74add1", "#abd9e9", "#ffffbf"])
 
-    gene = df["region_type"].value_counts().reindex(["promoter", "gene_body", "intergenic"], fill_value=0)
+    # Genomic region type
+    gene = df["region_type"].value_counts().reindex(
+        ["promoter", "gene_body", "intergenic"], fill_value=0
+    )
     _pie(axes[1],
-         {"Promoter": int(gene.get("promoter", 0)),
-          "Gene body": int(gene.get("gene_body", 0)),
+         {"Promoter":   int(gene.get("promoter",   0)),
+          "Gene body":  int(gene.get("gene_body",  0)),
           "Intergenic": int(gene.get("intergenic", 0))},
          "Genomic Region Type",
          ["#d73027", "#fee090", "#91cf60"])
 
-    in88 = int((df["in_88_regions"].astype(str).str.lower() == "true").sum())
+    # Overlap with 88 tissue candidate regions
+    in88 = ctx.in_88_count or int(
+        (df["in_88_regions"].astype(str).str.lower() == "true").sum()
+    )
     _pie(axes[2],
          {"In 88 OC regions": in88, "Genome-wide": len(df) - in88},
          "Tissue Candidate Overlap",
          ["#d7191c", "#bdbdbd"])
 
     fig.suptitle(f"Figure 2B — Panel CpG Annotation (n={len(df)} sites)",
-                 fontsize=13, fontweight="bold", y=1.01)
+                 fontsize=13, fontweight="bold", y=1.02)
     fig.tight_layout()
     _savefig(fig, out_path)
     return True
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Figure 6B: Whole-blood methylation baseline (cfDNA specificity)
+# Figure 6B — Whole-blood methylation baseline for matched 450K probes
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _fig6b_blood_dist(ext_val_path, out_path):
+def _fig6b_blood_dist(ext_val_path: str, out_path: str,
+                      ctx: _PipelineContext) -> Optional[bool]:
     plt = _mpl()
-
     df = _read_csv(ext_val_path)
     if df is None:
         return None
+
+    # Restrict to the final selected panel (consistent with manuscript reporting).
+    panel_cpg = _read_csv(os.path.join(os.path.dirname(ext_val_path), "panel_cpg.csv"))
+    if (panel_cpg is not None and not panel_cpg.empty
+            and "feature" in panel_cpg.columns and "feature" in df.columns):
+        panel_set = set(panel_cpg["feature"].astype(str))
+        df = df[df["feature"].astype(str).isin(panel_set)]
 
     matched = df[df["probe_matched"].astype(str).str.lower() == "true"].copy()
     if matched.empty:
@@ -495,28 +1247,28 @@ def _fig6b_blood_dist(ext_val_path, out_path):
 
     matched["beta"] = matched["blood_mean_beta"].astype(float)
     matched["pass"] = matched["blood_pass"].astype(str).str.lower() == "true"
-    threshold = 0.10
     n_pass = int(matched["pass"].sum())
     n_fail = int((~matched["pass"]).sum())
 
     fig, ax = plt.subplots(figsize=(8, 4.5))
 
-    # Dot strip chart with jitter
-    rng = np.random.default_rng(42)
+    rng = np.random.default_rng(DEFAULT_SEED)
     jitter = rng.uniform(-0.35, 0.35, len(matched))
     colors = matched["pass"].map({True: "#4dac26", False: "#d7191c"})
     ax.scatter(matched["beta"], jitter, c=colors, s=70, alpha=0.9,
                edgecolors="white", linewidths=0.5, zorder=3)
+    ax.axvline(BLOOD_BETA_THRESHOLD, color="black", lw=1.8, ls="--", zorder=4)
 
-    ax.axvline(threshold, color="black", lw=1.8, ls="--", zorder=4,
-               label=f"Threshold β = {threshold}")
     ax.set_ylim([-1, 1])
     ax.set_xlim([-0.02, 1.02])
     ax.set_yticks([])
-    ax.set_xlabel("Whole-blood mean β (GSE40279, n=729 samples)", fontsize=12)
+    ax.set_xlabel("Whole-blood mean β (GSE40279, n = 729 samples)", fontsize=12)
+    panel_n = ctx.panel_size if ctx.panel_size > 0 else "?"
     ax.set_title(
-        f"Figure 6B — Blood Methylation Baseline: {len(matched)}/328 panel sites with matched 450K probe\n"
-        f"Blood-pass (β < {threshold}): {n_pass} sites   |   Blood-fail (β ≥ {threshold}): {n_fail} sites "
+        f"Figure 6B — Blood Methylation Baseline: "
+        f"{len(matched)}/{panel_n} panel sites with matched 450K probe\n"
+        f"Blood-pass (β < {BLOOD_BETA_THRESHOLD}): {n_pass} sites   |   "
+        f"Blood-fail (β ≥ {BLOOD_BETA_THRESHOLD}): {n_fail} sites "
         f"(potential leukocyte cfDNA confounders)",
         fontsize=10, fontweight="bold",
     )
@@ -526,7 +1278,8 @@ def _fig6b_blood_dist(ext_val_path, out_path):
     ax.legend(handles=[
         Patch(color="#4dac26", label=f"Blood-pass (n={n_pass})"),
         Patch(color="#d7191c", label=f"Blood-fail (n={n_fail})"),
-        mlines.Line2D([], [], color="black", lw=1.8, ls="--", label=f"Threshold β={threshold}"),
+        mlines.Line2D([], [], color="black", lw=1.8, ls="--",
+                      label=f"Threshold β={BLOOD_BETA_THRESHOLD}"),
     ], fontsize=9, loc="upper right")
     ax.grid(axis="x", alpha=0.2)
     fig.tight_layout()
@@ -538,13 +1291,15 @@ def _fig6b_blood_dist(ext_val_path, out_path):
 # Main orchestrator
 # ─────────────────────────────────────────────────────────────────────────────
 
-def generate_imeta_figures(result_dir, report_dir):
-    """
-    Generate all auto-computable iMeta figures + DeLong table.
-    Returns dict {key: abs_path} for successfully produced outputs.
+def generate_imeta_figures(result_dir: str, report_dir: str) -> dict:
+    """Generate all auto-computable iMeta figures + DeLong tables.
+
+    Returns ``{key: abs_path}`` for successfully produced outputs.
     """
     imgs_dir = os.path.join(report_dir, "imgs")
     os.makedirs(imgs_dir, exist_ok=True)
+
+    ctx = _load_context(result_dir)
 
     clf_pred = os.path.join(result_dir, "classifier_predictions.csv")
     clf_sum  = os.path.join(result_dir, "classifier_summary.csv")
@@ -553,61 +1308,78 @@ def generate_imeta_figures(result_dir, report_dir):
     annot    = os.path.join(result_dir, "panel_annotation.csv")
     ext_val  = os.path.join(result_dir, "external_validation.csv")
 
-    tasks = [
-        ("fig3_roc",    _fig3_roc,              clf_pred,                                     os.path.join(imgs_dir, "imeta_fig3_roc.png")),
-        ("fig4_clf",    _fig4_clf_comparison,   clf_sum,                                      os.path.join(imgs_dir, "imeta_fig4_clf.png")),
-        ("fig5_tv",     _fig5_temporal,         tv_sum, tv_pred, clf_sum,                     os.path.join(imgs_dir, "imeta_fig5_temporal.png")),
-        ("fig2b_panel", _fig2b_panel_annotation,annot,                                        os.path.join(imgs_dir, "imeta_fig2b_panel.png")),
-        ("fig6b_blood", _fig6b_blood_dist,       ext_val,                                     os.path.join(imgs_dir, "imeta_fig6b_blood.png")),
+    figs = [
+        ("fig3_roc",    _fig3_roc,
+         (clf_pred,                       os.path.join(imgs_dir, "imeta_fig3_roc.png"),       ctx)),
+        ("fig4_clf",    _fig4_clf_comparison,
+         (clf_sum,                        os.path.join(imgs_dir, "imeta_fig4_clf.png"),       ctx)),
+        ("fig4b_delta", _fig4b_fusion_delta,
+         (clf_sum,                        os.path.join(imgs_dir, "imeta_fig4b_delta.png"),    ctx)),
+        ("fig4c_gain",  _fig4c_spec_gain,
+         (clf_sum,                        os.path.join(imgs_dir, "imeta_fig4c_gain.png"),     ctx)),
+        ("fig5_tv",     _fig5_temporal,
+         (tv_sum, tv_pred, clf_sum,       os.path.join(imgs_dir, "imeta_fig5_temporal.png"),  ctx)),
+        ("fig5b_regime", _fig5b_two_regime,
+         (clf_sum, tv_sum,                os.path.join(imgs_dir, "imeta_fig5b_regime.png"),   ctx)),
+        ("fig2b_panel", _fig2b_panel_annotation,
+         (annot,                          os.path.join(imgs_dir, "imeta_fig2b_panel.png"),    ctx)),
+        ("fig6b_blood", _fig6b_blood_dist,
+         (ext_val,                        os.path.join(imgs_dir, "imeta_fig6b_blood.png"),    ctx)),
     ]
 
-    out = {}
-    for key, fn, *args in tasks:
-        out_path = args[-1]
-        in_args  = args[:-1]
+    out = {"_ctx": ctx}
+    for key, fn, args in figs:
+        out_path = args[-2]
         try:
-            result = fn(*in_args, out_path)
-            if result is not None:
+            if fn(*args):
                 out[key] = out_path
                 logger.info("[imeta] %s → %s", key, os.path.basename(out_path))
         except Exception as exc:
+            logger.warning("[imeta] %s failed: %s", key, exc, exc_info=False)
+
+    # DeLong tables (all 11 models — covers cfDNA vs CA-125 vs fusion comparisons)
+    for key, fn, fname in [
+        ("delong_csv",        _delong_bootstrap, "imeta_delong_test.csv"),
+        ("delong_formal_csv", _delong_formal,    "imeta_delong_formal.csv"),
+    ]:
+        path = os.path.join(result_dir, fname)
+        try:
+            if fn(clf_pred, path) is not None:
+                out[key] = path
+                logger.info("[imeta] %s → %s", key, fname)
+        except Exception as exc:
             logger.warning("[imeta] %s failed: %s", key, exc)
 
-    # Bootstrap pairwise AUC table
-    delong_path = os.path.join(result_dir, "imeta_delong_test.csv")
+    # Forest plot of 15 focused pairwise AUC comparisons (reads the CSVs just written)
+    forest_path = os.path.join(imgs_dir, "imeta_fig_delong_forest.png")
     try:
-        df_dl = _delong_bootstrap(clf_pred, delong_path)
-        if df_dl is not None:
-            out["delong_csv"] = delong_path
-            logger.info("[imeta] bootstrap AUC table → %s", os.path.basename(delong_path))
+        if _fig_delong_forest(out.get("delong_csv", ""),
+                              out.get("delong_formal_csv", ""),
+                              forest_path, ctx):
+            out["fig_delong_forest"] = forest_path
+            logger.info("[imeta] fig_delong_forest → %s",
+                        os.path.basename(forest_path))
     except Exception as exc:
-        logger.warning("[imeta] bootstrap AUC table failed: %s", exc)
-
-    # Formal DeLong test (fastDeLong variance estimator)
-    delong_formal_path = os.path.join(result_dir, "imeta_delong_formal.csv")
-    try:
-        df_dl_formal = _delong_formal(clf_pred, delong_formal_path)
-        if df_dl_formal is not None:
-            out["delong_formal_csv"] = delong_formal_path
-    except Exception as exc:
-        logger.warning("[imeta] formal DeLong test failed: %s", exc)
+        logger.warning("[imeta] fig_delong_forest failed: %s", exc, exc_info=False)
 
     return out
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# HTML section builder — called by report_utils.generate_report()
+# HTML section builder — called by report.main.generate_report()
 # ─────────────────────────────────────────────────────────────────────────────
 
-def build_imeta_section(result_dir, imgs_dir):
-    """
-    Generate iMeta figures and return an HTML fragment for the Step 20 report.
-    imgs_dir must be the report's imgs/ subdirectory (for correct relative paths).
+def build_imeta_section(result_dir: str, imgs_dir: str) -> str:
+    """Generate iMeta figures + DeLong tables and return an HTML fragment.
+
+    ``imgs_dir`` must be the report's ``imgs/`` subdirectory so that the
+    rendered ``<img>`` tags use correct relative paths.
     """
     report_dir = os.path.dirname(imgs_dir)
     fig_paths  = generate_imeta_figures(result_dir, report_dir)
+    ctx        = fig_paths.get("_ctx") or _load_context(result_dir)
 
-    def _img_block(key, alt, fig_label, caption):
+    def _img_block(key: str, alt: str, fig_label: str, caption: str) -> str:
         path = fig_paths.get(key)
         if not path or not os.path.exists(path):
             return (f'<p style="color:#aaa;font-size:.85em">'
@@ -618,125 +1390,116 @@ def build_imeta_section(result_dir, imgs_dir):
             f'<img src="{rel}" alt="{alt}" '
             f'style="max-width:100%;border:1px solid #e0e0e0;border-radius:4px">'
             f'<figcaption style="font-size:.83em;color:#555;margin-top:6px">'
-            f'<strong>{fig_label}.</strong> {caption}'
-            f'</figcaption></figure>'
+            f'<strong>{fig_label}.</strong> {caption}</figcaption></figure>'
         )
 
-    import pandas as pd
-
-    def _auc_table_html(df_tbl, mode):
-        """Build HTML for either bootstrap or formal DeLong table."""
-        rows = ""
-        for _, r in df_tbl.iterrows():
-            sig = ("<strong style='color:#c0392b'>Yes ✱</strong>"
-                   if str(r.get("significant", "No")) == "Yes" else
-                   "<span style='color:#aaa'>No</span>")
-            if mode == "bootstrap":
-                p_val = f"{float(r['p_bootstrap']):.4f}"
-                ci    = f"{float(r['ci95_lo']):+.4f} to {float(r['ci95_hi']):+.4f}"
-                rows += (
-                    f"<tr><td>{r['classifier_A']} vs {r['classifier_B']}</td>"
-                    f"<td>{float(r['auc_A']):.4f}</td><td>{float(r['auc_B']):.4f}</td>"
-                    f"<td>{float(r['delta_auc']):+.4f}</td>"
-                    f"<td>{ci}</td>"
-                    f"<td>{p_val}</td><td>{sig}</td></tr>\n"
-                )
-            else:
-                z_s  = r['z_stat']
-                p_s  = r['p_delong']
-                z_fmt = f"{float(z_s):.3f}" if z_s != "NA" else "NA"
-                p_fmt = f"{float(p_s):.4f}" if p_s != "NA" else "NA"
-                rows += (
-                    f"<tr><td>{r['classifier_A']} vs {r['classifier_B']}</td>"
-                    f"<td>{float(r['auc_A']):.4f}</td><td>{float(r['auc_B']):.4f}</td>"
-                    f"<td>{float(r['delta_auc']):+.4f}</td>"
-                    f"<td>{float(r['se_delta']):.5f}</td>"
-                    f"<td>{z_fmt}</td><td>{p_fmt}</td><td>{sig}</td></tr>\n"
-                )
-        return rows
-
-    # Bootstrap table
-    delong_html = ""
-    dp = fig_paths.get("delong_csv")
-    if dp and os.path.exists(dp):
-        try:
-            dl = pd.read_csv(dp, encoding="utf-8")
-            rows = _auc_table_html(dl, "bootstrap")
-            delong_html = f"""
-<h3 style="margin-top:18px">Bootstrap Pairwise AUC Comparison (2,000 resamples)</h3>
-<table style="font-size:.88em">
-  <tr><th>Comparison</th><th>AUC A</th><th>AUC B</th><th>Δ AUC</th>
-      <th>95% CI of Δ AUC</th><th><em>p</em> (bootstrap)</th><th>Significant</th></tr>
-  {rows}
-</table>
-<p style="color:#666;font-size:.82em;margin-top:4px">
-  Two-sided bootstrap permutation test; 2,000 resamples with replacement.
-  ✱ <em>p</em> &lt; 0.05. Full table: <code>imeta_delong_test.csv</code>
-</p>"""
-        except Exception as exc:
-            logger.warning("[imeta] bootstrap HTML: %s", exc)
-
-    # Formal DeLong table
+    # ── DeLong forest plot — replaces the two oversized 55-row pairwise tables ─
+    forest_cap = (
+        f"Focused subset of {len(CFDNA_ONLY) * 3} pairwise AUC contrasts grouped "
+        f"by comparison semantics. Group 1 (blue): each cfDNA-only model vs CA-125 alone. "
+        f"Group 2 (purple): each fusion model vs CA-125 alone. "
+        f"Group 3 (green): each fusion model vs its cfDNA-only counterpart. "
+        f"Whiskers = 95% bootstrap CI ({DELONG_BOOT_N:,} resamples); each row is annotated "
+        f"with both the bootstrap p-value (p_boot) and the formal DeLong Z-test p-value "
+        f"(p_DL). ✱ marks rows where either test is significant at α=0.05. "
+        f"Full 55-row pairwise tables remain available as "
+        f"<code>imeta_delong_test.csv</code> and <code>imeta_delong_formal.csv</code>."
+    )
+    delong_html = (
+        f'<h3 style="margin-top:18px">Figure 4D — Focused Pairwise AUC Comparisons '
+        f'(Forest Plot)</h3>'
+        + _img_block("fig_delong_forest",
+                     "DeLong forest plot",
+                     "Figure 4D",
+                     forest_cap)
+    )
     delong_formal_html = ""
-    dfp = fig_paths.get("delong_formal_csv")
-    if dfp and os.path.exists(dfp):
-        try:
-            dl_f = pd.read_csv(dfp, encoding="utf-8")
-            rows_f = _auc_table_html(dl_f, "formal")
-            delong_formal_html = f"""
-<h3 style="margin-top:18px">Formal DeLong Test — fastDeLong Variance Estimator</h3>
-<table style="font-size:.88em">
-  <tr><th>Comparison</th><th>AUC A</th><th>AUC B</th><th>Δ AUC</th>
-      <th>SE(Δ AUC)</th><th><em>Z</em></th>
-      <th><em>p</em> (DeLong)</th><th>Significant</th></tr>
-  {rows_f}
-</table>
-<p style="color:#666;font-size:.82em;margin-top:4px">
-  Two-sided Z-test using the structural-component variance estimator of DeLong <em>et al.</em> (1988).
-  SE estimated from placement-value covariance; correlated AUCs handled jointly.
-  ✱ <em>p</em> &lt; 0.05. Full table: <code>imeta_delong_formal.csv</code>
-</p>"""
-        except Exception as exc:
-            logger.warning("[imeta] formal DeLong HTML: %s", exc)
+
+    # ── Caption text (built once from context) ─────────────────────────────
+    cv_n      = ctx.cv_caption()
+    tv_n      = ctx.tv_caption()
+    panel_n   = ctx.panel_size or "?"
+    ext_n     = ctx.ext_matched or "?"
+    fig3_cap = (
+        f"ROC curves for the eleven evaluated models under {cv_n}. "
+        f"Panel A: five cfDNA-only classifiers (LR, SVM, RF, XGB, LGBM) with CA-125 alone as dashed baseline. "
+        f"Panel B: five cfDNA + CA-125 fusion models with the same CA-125 dashed baseline. "
+        f"AUC and 95% CIs from {BOOTSTRAP_N:,}-resample bootstrap."
+    )
+    fig4_cap = (
+        f"AUC, accuracy, sensitivity, and specificity for each classifier ({cv_n}). "
+        f"Panel A: cfDNA-only models; Panel B: CA-125 baseline + cfDNA + CA-125 fusion models. "
+        f"Error bars = 95% bootstrap CI ({BOOTSTRAP_N:,} resamples)."
+    )
+    fig4b_cap = (
+        f"Paired marginal value of CA-125 fusion for each base classifier ({cv_n}). "
+        f"Each row contrasts a cfDNA-only model with its corresponding CA-125 fusion "
+        f"counterpart (LR vs LR+CA125, …); bars show the fused − base delta with the "
+        f"underlying absolute scores annotated. Teal = positive lift, red = regression."
+    )
+    fig4c_cap = (
+        f"Per-model gain relative to the CA-125 alone baseline ({cv_n}). "
+        f"Panel A: Δ Specificity (the headline benign-rejection metric); "
+        f"Panel B: Δ AUC. Fusion models are drawn with a dark border to separate them "
+        f"from cfDNA-only models. Bars are sorted by Δ Specificity within each group."
+    )
+    fig5b_cap = (
+        f"Cross-regime consistency of AUC (left) and Specificity (right) across the "
+        f"eleven evaluated models. Solid bars = {ctx.cv_label} ({cv_n}); hatched bars = "
+        f"temporal prospective validation ({tv_n}). 95% bootstrap CI. Bars sharing the "
+        f"same colour represent the same classifier in the two regimes."
+    )
+    fig5_cap = (
+        f"Left: side-by-side AUC for {ctx.cv_label} vs prospective validation "
+        f"({tv_n}). Right: per-sample predicted malignancy probability for the "
+        f"prospective best model, plotted against sample collection date. "
+        f"✕ = misclassified sample."
+    )
+    fig2b_cap = (
+        f"Genomic distribution of the {panel_n}-CpG panel: CpG-island context (left), "
+        f"gene region type (centre), and overlap with the 88 ovarian-cancer tissue "
+        f"candidate regions (right)."
+    )
+    fig6b_cap = (
+        f"Whole-blood mean β-value (GSE40279) for the {ext_n} panel CpG sites with "
+        f"matched Illumina 450K probes. Sites with blood mean β ≥ {BLOOD_BETA_THRESHOLD} "
+        f"({ctx.ext_fail} sites, red) are potential leukocyte-DNA confounders in plasma "
+        f"cfDNA liquid biopsy and are candidates for panel refinement."
+    )
 
     return f"""
 <!-- iMeta Publication Figures — auto-generated by Step 20 -->
 <div class="section">
 <h2>Statistical &amp; Publication Figures (iMeta prep)</h2>
 <p style="color:#666;font-size:.85em">
-  Auto-generated from result CSV files during Step 20 (report). 300 DPI PNG files:
+  Auto-generated from result CSV files during Step 20 (report). {FIG_DPI} DPI PNG files:
   <code>report/imgs/imeta_*.png</code>.
   See <code>docs/iMeta_todo.md</code> for the full submission checklist.
 </p>
 
-<h3>Figure 3 — Binary Classification ROC Curves</h3>
-{_img_block("fig3_roc", "ROC Curves", "Figure 3",
-    "ROC curves for LR, SVM, RF, XGB, and LGBM evaluated via leave-one-out cross-validation "
-    "(n=116: 56 benign, 60 malignant). AUC and 95% CIs from 1,000-resample bootstrap.")}
+<h3>Figure 3 — Binary Classification ROC Curves (eleven-model comparison)</h3>
+{_img_block("fig3_roc", "ROC Curves", "Figure 3", fig3_cap)}
 {delong_html}
 {delong_formal_html}
 
-<h3 style="margin-top:22px">Figure 4B — Classifier Performance Comparison</h3>
-{_img_block("fig4_clf", "Classifier Comparison", "Figure 4B",
-    "AUC, accuracy, sensitivity, and specificity for each classifier (LOO-CV, n=116). "
-    "Error bars = 95% bootstrap CI (1,000 resamples).")}
+<h3 style="margin-top:22px">Figure 4 — Classifier Performance Comparison</h3>
+{_img_block("fig4_clf", "Classifier Comparison", "Figure 4", fig4_cap)}
+
+<h3 style="margin-top:22px">Figure 4B — Marginal Value of CA-125 Fusion (paired Δ per base classifier)</h3>
+{_img_block("fig4b_delta", "Fusion vs cfDNA-only paired delta", "Figure 4B", fig4b_cap)}
+
+<h3 style="margin-top:22px">Figure 4C — Per-model Gain over CA-125 Alone</h3>
+{_img_block("fig4c_gain", "Gain over CA-125 alone", "Figure 4C", fig4c_cap)}
 
 <h3 style="margin-top:22px">Figure 5 — Temporal Prospective Validation</h3>
-{_img_block("fig5_tv", "Temporal Validation", "Figure 5",
-    "Left: side-by-side AUC for LOO-CV (n=116) vs prospective validation (n=20; cutoff 2024-07-01). "
-    "Right: per-sample predicted malignancy probability for the best prospective classifier, "
-    "plotted against sample collection date. ✕ = misclassified sample. "
-    "<strong>Note:</strong> validation set contains only 4 benign samples — specificity is provisional.")}
+{_img_block("fig5_tv", "Temporal Validation", "Figure 5", fig5_cap)}
+
+<h3 style="margin-top:22px">Figure 5B — Cross-regime Consistency (CV vs Temporal)</h3>
+{_img_block("fig5b_regime", "CV vs Temporal cross-regime", "Figure 5B", fig5b_cap)}
 
 <h3 style="margin-top:22px">Figure 2B — Panel CpG Site Annotation</h3>
-{_img_block("fig2b_panel", "Panel Annotation", "Figure 2B",
-    "Genomic distribution of the 328-CpG panel: "
-    "CpG island context (left), gene region type (centre), "
-    "and overlap with the 88 ovarian cancer tissue candidate regions (right).")}
+{_img_block("fig2b_panel", "Panel Annotation", "Figure 2B", fig2b_cap)}
 
 <h3 style="margin-top:22px">Figure 6B — Whole-blood Methylation Baseline</h3>
-{_img_block("fig6b_blood", "Blood Methylation Baseline", "Figure 6B",
-    "Whole-blood mean β-value (GSE40279) for the 25 panel CpG sites with matched Illumina 450K probes. "
-    "Sites with blood mean β ≥ 0.10 (n=17, red) are potential leukocyte-DNA confounders "
-    "in plasma cfDNA liquid biopsy and are candidates for panel refinement.")}
+{_img_block("fig6b_blood", "Blood Methylation Baseline", "Figure 6B", fig6b_cap)}
 </div>"""

@@ -432,12 +432,15 @@ def _parse_bedgraph_to_feature_vector(file_bytes: bytes, feature_names, filename
 async def predict_diagnosis(
     workdir: str = Form(...),
     file: UploadFile = File(...),
+    file_r2: Optional[UploadFile] = File(None),
     ca125: Optional[str] = Form(None),
 ):
     """
     Run a diagnosis using pre-trained models in result/<workdir>/model/.
-    Currently supports bedGraph input. fq.gz support is stubbed (returns 400
-    pending Step 9 background-run integration).
+    Currently supports bedGraph input (single file).  Paired-end FASTQ
+    upload (file = R1, file_r2 = R2) is accepted but returns HTTP 400
+    until Step 9 background-run integration is wired into the diagnosis
+    path.
     """
     import joblib
     import numpy as np
@@ -484,11 +487,28 @@ async def predict_diagnosis(
        (fname.endswith(".gz") and "bedgraph" in fname):
         feat_dict, n_resolved = _parse_bedgraph_to_feature_vector(file_bytes, feature_names, fname)
     elif fname.endswith((".fq", ".fq.gz", ".fastq", ".fastq.gz")):
+        if file_r2 is None or not (file_r2.filename or ""):
+            raise HTTPException(
+                400,
+                "Paired-end FASTQ input requires both R1 and R2 files "
+                "(e.g. P10002.R1.fq.gz + P10002.R2.fq.gz). Only R1 was received."
+            )
+        r2_name = (file_r2.filename or "").lower()
+        if not r2_name.endswith((".fq", ".fq.gz", ".fastq", ".fastq.gz")):
+            raise HTTPException(
+                400,
+                f"Second file is not FASTQ: {file_r2.filename!r}. "
+                "Expected an R2 FASTQ file paired with the R1 upload."
+            )
+        # Read R2 so the upload stream is consumed cleanly (forward-compatible
+        # with the upcoming Step 9 background-run integration).
+        _ = await file_r2.read()
         raise HTTPException(
             400,
-            "FASTQ input is not yet wired into the diagnosis path. Workaround: "
-            "run --step preprocess/align/dedup/target/extract on the FASTQ to "
-            "produce a *.bedGraph, then upload that file."
+            f"FASTQ input is not yet wired into the diagnosis path "
+            f"(received R1={file.filename!r}, R2={file_r2.filename!r}). "
+            "Workaround: run --step preprocess/align/dedup/target/extract on the "
+            "FASTQ pair to produce a *.bedGraph, then upload that file."
         )
     else:
         raise HTTPException(400, f"Unsupported file type: {file.filename!r}. "

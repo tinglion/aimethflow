@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh">
+<html lang="en">
 
 <head>
   <meta charset="utf-8">
@@ -26,7 +26,7 @@
       <li class="nav-item"><a class="nav-link" data-tab="diagnosis" href="#">Aided Diagnosis</a></li>
     </ul>
 
-    <!-- 流程 -->
+    <!-- Pipeline -->
     <div id="tab-pipeline" class="tab-content">
       <div class="d-flex align-items-center gap-2 mb-2">
         <label class="form-label mb-0 text-nowrap small fw-bold">Working Directory</label>
@@ -65,7 +65,7 @@
       </div>
     </div>
 
-    <!-- 配置 -->
+    <!-- Config -->
     <div id="tab-config" class="tab-content d-none">
       <div class="d-flex gap-2 mb-2">
         <button class="btn btn-primary btn-sm" onclick="saveConfig()">Save</button>
@@ -75,13 +75,13 @@
       <textarea class="form-control toml" id="cfg-editor" spellcheck="false"></textarea>
     </div>
 
-    <!-- 结果 -->
+    <!-- Results -->
     <div id="tab-results" class="tab-content d-none">
       <button class="btn btn-sm btn-outline-secondary mb-2" onclick="loadResults()">Refresh</button>
       <div id="results-list"></div>
     </div>
 
-    <!-- 报告 -->
+    <!-- Report -->
     <div id="tab-report" class="tab-content d-none">
       <div class="row" style="height:calc(100vh - 120px)">
         <div class="col-lg-3 d-flex flex-column">
@@ -115,12 +115,20 @@
               </div>
 
               <div class="mb-3">
-                <label class="form-label small fw-bold mb-1">Input file</label>
-                <input type="file" class="form-control form-control-sm" id="dx-file"
-                       accept=".bedGraph,.bedgraph,.gz,.fq,.fq.gz,.fastq,.fastq.gz" />
-                <small class="text-muted">
-                  Accepts: <code>*.bedGraph</code> (recommended, fast — output of Step 9 extract)
-                  &nbsp;or&nbsp; <code>*.fq.gz / *.fastq.gz</code> (slower; will run pipeline Steps 4–9 first)
+                <label class="form-label small fw-bold mb-1">Input file(s)</label>
+                <input type="file" id="dx-file" class="d-none" multiple
+                       accept=".bedGraph,.bedgraph,.gz,.fq,.fq.gz,.fastq,.fastq.gz"
+                       onchange="updateDxFileLabel()" />
+                <div class="d-flex align-items-center gap-2">
+                  <button type="button" class="btn btn-sm btn-outline-secondary"
+                          onclick="document.getElementById('dx-file').click()">Choose File(s)</button>
+                  <span class="text-muted small text-truncate" id="dx-file-label" style="max-width:260px">No file chosen</span>
+                </div>
+                <small class="text-muted d-block mt-1">
+                  Accepts <strong>one</strong> <code>*.bedGraph</code> (recommended, fast — output of Step 9 extract)
+                  <strong>or</strong> a <strong>pair</strong> of <code>*.R1.fq.gz</code> + <code>*.R2.fq.gz</code>
+                  (slower; will run pipeline Steps 4–9 first). Paired-end FASTQ files must share the same prefix
+                  (e.g. <code>P10002.R1.fq.gz</code> / <code>P10002.R2.fq.gz</code>).
                 </small>
               </div>
 
@@ -334,6 +342,45 @@
     // Mirrors temporal_validate.low_ca125_threshold in config.toml.
     const LOW_CA125_THRESHOLD = 105.0;
 
+    function updateDxFileLabel() {
+      const files = document.getElementById('dx-file').files;
+      const el = document.getElementById('dx-file-label');
+      if (!files || files.length === 0) {
+        el.textContent = 'No file chosen';
+        el.classList.remove('text-danger');
+      } else if (files.length === 1) {
+        el.textContent = files[0].name;
+        el.classList.remove('text-danger');
+      } else {
+        el.textContent = `${files[0].name} + ${files[1].name}` + (files.length > 2 ? ` (+${files.length - 2} more — ignored)` : '');
+        el.classList.remove('text-danger');
+      }
+    }
+
+    // Classify the selected upload: returns { kind: 'bedgraph'|'fastq_pair'|'invalid', r1, r2, message }
+    function classifyDxUpload(files) {
+      if (!files || files.length === 0) return { kind: 'invalid', message: 'Please choose a file.' };
+      const isFastq = (n) => /\.(fq|fastq)(\.gz)?$/i.test(n);
+      const isBg    = (n) => /\.bed[Gg]raph(\.gz)?$|\.bg(\.gz)?$/i.test(n);
+
+      if (files.length === 1) {
+        const n = files[0].name;
+        if (isBg(n))    return { kind: 'bedgraph',   r1: files[0] };
+        if (isFastq(n)) return { kind: 'invalid',    message: 'FASTQ input requires both R1 and R2 files. Please select the pair.' };
+        return { kind: 'invalid', message: `Unsupported file type: ${n}` };
+      }
+
+      // 2+ files: must be one R1/R2 fastq pair
+      const fqs = Array.from(files).filter(f => isFastq(f.name));
+      if (fqs.length < 2) return { kind: 'invalid', message: 'For paired-end FASTQ upload, select both R1 and R2 files.' };
+      const findR = (tag) => fqs.find(f => new RegExp(`[._]${tag}\\.(fq|fastq)(\\.gz)?$`, 'i').test(f.name));
+      const r1 = findR('R1'), r2 = findR('R2');
+      if (!r1 || !r2) return { kind: 'invalid', message: 'Could not identify R1 and R2 in the selected files. Filenames should look like *.R1.fq.gz / *.R2.fq.gz.' };
+      const prefix = (f) => f.name.replace(/[._]R[12]\.(fq|fastq)(\.gz)?$/i, '');
+      if (prefix(r1) !== prefix(r2)) return { kind: 'invalid', message: `R1/R2 filenames do not share the same prefix: "${prefix(r1)}" vs "${prefix(r2)}".` };
+      return { kind: 'fastq_pair', r1, r2 };
+    }
+
     function updateCa125Zone() {
       const v = document.getElementById('dx-ca125').value;
       const el = document.getElementById('dx-ca125-zone');
@@ -382,15 +429,16 @@
     }
 
     async function runDiagnosis() {
-      const wd = document.getElementById('dx-model-select').value;
-      const f  = document.getElementById('dx-file').files[0];
-      const ca = document.getElementById('dx-ca125').value;
+      const wd     = document.getElementById('dx-model-select').value;
+      const files  = document.getElementById('dx-file').files;
+      const ca     = document.getElementById('dx-ca125').value;
       const status = document.getElementById('dx-status');
       const btn    = document.getElementById('dx-run-btn');
       const lbl    = document.getElementById('dx-run-label');
 
-      if (!wd)  { status.textContent = '✗ Please select a trained model.'; return; }
-      if (!f)   { status.textContent = '✗ Please upload a file.'; return; }
+      if (!wd)              { status.textContent = '✗ Please select a trained model.'; return; }
+      const cls = classifyDxUpload(files);
+      if (cls.kind === 'invalid') { status.textContent = '✗ ' + cls.message; return; }
 
       btn.disabled = true;
       lbl.textContent = 'Running…';
@@ -399,9 +447,14 @@
       document.getElementById('dx-features-pane').innerHTML = '<p class="text-muted small p-3 mb-0">Running…</p>';
 
       const fd = new FormData();
-      fd.append('file', f);
       fd.append('workdir', wd);
       if (ca !== '') fd.append('ca125', ca);
+      if (cls.kind === 'bedgraph') {
+        fd.append('file', cls.r1);
+      } else {  // fastq_pair
+        fd.append('file', cls.r1);
+        fd.append('file_r2', cls.r2);
+      }
 
       try {
         const r = await fetch(`${BASE}/api/diagnosis/predict`, { method: 'POST', body: fd });
