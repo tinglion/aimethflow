@@ -357,13 +357,24 @@ def _load_feature_matrix(result_dir):
 
 
 def _apply_panel_filter(X, feature_names, result_dir):
+    """
+    Restrict to the deployment panel; prefer the blood-filtered variant from
+    Step 19 external_validate when available so leukocyte-cfDNA confounded
+    sites are excluded from subtype classification too.
+    """
+    blood_path = os.path.join(result_dir, "panel_cpg_blood_filtered.csv")
     panel_path = os.path.join(result_dir, "panel_cpg.csv")
-    if os.path.exists(panel_path):
-        panel_set = set(pd.read_csv(panel_path)["feature"])
-        indices = [i for i, fn in enumerate(feature_names) if fn in panel_set]
-        logger.info(f"Panel filter applied: {len(indices)} features retained")
-        return X[:, indices], [feature_names[i] for i in indices]
-    return X, feature_names
+    if os.path.exists(blood_path):
+        chosen_path, panel_label = blood_path, "blood-filtered panel"
+    elif os.path.exists(panel_path):
+        chosen_path, panel_label = panel_path, "Step 14 panel"
+    else:
+        return X, feature_names
+
+    panel_set = set(pd.read_csv(chosen_path)["feature"].astype(str))
+    indices = [i for i, fn in enumerate(feature_names) if fn in panel_set]
+    logger.info(f"Panel filter applied ({panel_label}): {len(indices)} features retained")
+    return X[:, indices], [feature_names[i] for i in indices]
 
 
 # Fold-wise imputation helpers (mirrors classifier_utils to avoid data leakage)

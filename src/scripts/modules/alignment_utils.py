@@ -740,12 +740,18 @@ def plot_fragment_size(bam_files, result_dir, config=None):
     centres  = (bins[:-1] + bins[1:]) / 2
     agg_all: list = []
 
-    for sname, sizes_i in zip(sample_names, all_sizes):
+    n_valid = sum(1 for s in all_sizes if s)
+    first_done = False
+    for sizes_i in all_sizes:
         if not sizes_i:
             continue
         agg_all.extend(sizes_i)
         hist, _ = np.histogram(np.array(sizes_i), bins=bins, density=True)
-        ax.plot(centres, hist, color="#3a86ff", alpha=0.3, linewidth=0.8, label=sname)
+        # Single combined legend entry for all per-sample curves; subsequent
+        # lines suppressed from the legend so the box stays compact.
+        lbl = f"Per-sample (n={n_valid})" if not first_done else None
+        ax.plot(centres, hist, color="#3a86ff", alpha=0.3, linewidth=0.8, label=lbl)
+        first_done = True
 
     if agg_all:
         hist_agg, _ = np.histogram(np.array(agg_all), bins=bins, density=True)
@@ -757,7 +763,7 @@ def plot_fragment_size(bam_files, result_dir, config=None):
 
     ax.set_xlabel("Fragment size (bp)", fontsize=12)
     ax.set_ylabel("Density", fontsize=12)
-    ax.set_title("cfDNA Fragment Size Distribution", fontsize=13)
+    # ax.set_title("cfDNA Fragment Size Distribution", fontsize=13)
     ax.set_xlim(SIZE_MIN, SIZE_MAX)
 
     # Deduplicate legend: keep only the first occurrence of each label

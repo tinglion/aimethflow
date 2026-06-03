@@ -1369,6 +1369,127 @@ def generate_imeta_figures(result_dir: str, report_dir: str) -> dict:
 # HTML section builder — called by report.main.generate_report()
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _baseline_vs_ca125_table_html(boot_df, form_df) -> str:
+    """Render a focused 10-row table: each non-CA-125 model vs the CA-125 baseline.
+
+    Shows AUC_model, AUC_CA-125, Δ AUC (model − CA-125) with 95% CI, paired
+    bootstrap p-value, and formal DeLong p-value. Significant p-values
+    (α = 0.05) are bolded in red.
+    """
+    if boot_df is None and form_df is None:
+        return ""
+
+    def _fmt_p(p):
+        if p is None or (isinstance(p, float) and not np.isfinite(p)):
+            return "<span style='color:#aaa'>NA</span>"
+        if p < 0.001:
+            return "<strong style='color:#c0392b'>&lt;0.001 ✱</strong>"
+        if p < 0.05:
+            return f"<strong style='color:#c0392b'>{p:.4f} ✱</strong>"
+        return f"<span style='color:#555'>{p:.4f}</span>"
+
+    rows_html = ""
+    for model in CFDNA_ONLY + FUSION_MODELS:
+        b = _lookup_delong_pair(boot_df, model, CA125_ALONE) if boot_df is not None else None
+        f = _lookup_delong_pair(form_df, model, CA125_ALONE) if form_df is not None else None
+        if b is None and f is None:
+            continue
+
+        # Pull AUCs in (model, CA-125) orientation from the same row
+        ref_df = boot_df if boot_df is not None else form_df
+        same = ref_df[(ref_df["classifier_A"] == model) & (ref_df["classifier_B"] == CA125_ALONE)]
+        flip = ref_df[(ref_df["classifier_A"] == CA125_ALONE) & (ref_df["classifier_B"] == model)]
+        if not same.empty:
+            auc_model, auc_ca125 = float(same.iloc[0]["auc_A"]), float(same.iloc[0]["auc_B"])
+        elif not flip.empty:
+            auc_model, auc_ca125 = float(flip.iloc[0]["auc_B"]), float(flip.iloc[0]["auc_A"])
+        else:
+            continue
+
+        delta, ci_lo, ci_hi, p_boot = b if b is not None else (
+            f[0], float("nan"), float("nan"), None
+        )
+        p_form = f[3] if f is not None else None
+
+        if np.isfinite(ci_lo) and np.isfinite(ci_hi):
+            ci_txt = f"[{ci_lo:+.4f}, {ci_hi:+.4f}]"
+        else:
+            ci_txt = "<span style='color:#aaa'>—</span>"
+
+        group_color = "#4dac26" if "+CA125" in model else "#4393c3"
+        model_label = (f"<span style='color:{group_color};font-weight:600'>{model}</span>")
+
+        rows_html += (
+            f"<tr>"
+            f"<td>{model_label}</td>"
+            f"<td>{auc_model:.4f}</td>"
+            f"<td>{auc_ca125:.4f}</td>"
+            f"<td style='font-weight:600'>{delta:+.4f}</td>"
+            f"<td style='font-family:monospace;font-size:.9em'>{ci_txt}</td>"
+            f"<td>{_fmt_p(p_boot)}</td>"
+            f"<td>{_fmt_p(p_form)}</td>"
+            f"</tr>\n"
+        )
+
+    if not rows_html:
+        return ""
+
+    return f"""
+<h4 style="margin-top:14px">Each model vs CA-125 baseline (focused contrasts)</h4>
+<table style="font-size:.88em">
+  <tr>
+    <th>Model</th>
+    <th>AUC (model)</th>
+    <th>AUC (CA-125)</th>
+    <th>Δ AUC<br><span style='font-weight:400;color:#888;font-size:.85em'>model − CA-125</span></th>
+    <th>95% bootstrap CI of Δ AUC</th>
+    <th><em>p</em> (bootstrap, {DELONG_BOOT_N:,})</th>
+    <th><em>p</em> (DeLong)</th>
+  </tr>
+  {rows_html}
+</table>
+<p style="color:#666;font-size:.82em;margin-top:4px">
+  Headline contrasts isolated from the full pairwise matrix: every cfDNA-only and fusion
+  model compared head-to-head against CA-125 alone (clinical baseline). Positive Δ AUC
+  means the model outperforms CA-125. Bolded red <em>p</em>-values are significant at
+  α = 0.05. Bootstrap test: paired-resample two-sided; DeLong test: fastDeLong variance
+  estimator (DeLong <em>et al.</em>, 1988). Full 55-pair matrix in the collapsible block below.
+</p>"""
+
+
+def _delong_table_html(df_tbl, mode: str) -> str:
+    """Render a DeLong (bootstrap or formal) result table as HTML rows."""
+    rows = ""
+    for _, r in df_tbl.iterrows():
+        sig = ("<strong style='color:#c0392b'>Yes ✱</strong>"
+               if str(r.get("significant", "No")) == "Yes" else
+               "<span style='color:#aaa'>No</span>")
+        if mode == "bootstrap":
+            ci = f"{float(r['ci95_lo']):+.4f} to {float(r['ci95_hi']):+.4f}"
+            rows += (
+                f"<tr><td>{r['classifier_A']} vs {r['classifier_B']}</td>"
+                f"<td>{float(r['auc_A']):.4f}</td>"
+                f"<td>{float(r['auc_B']):.4f}</td>"
+                f"<td>{float(r['delta_auc']):+.4f}</td>"
+                f"<td>{ci}</td>"
+                f"<td>{float(r['p_bootstrap']):.4f}</td>"
+                f"<td>{sig}</td></tr>\n"
+            )
+        else:  # formal
+            z, p = r["z_stat"], r["p_delong"]
+            z_fmt = f"{float(z):.3f}" if z != "NA" else "NA"
+            p_fmt = f"{float(p):.4f}" if p != "NA" else "NA"
+            rows += (
+                f"<tr><td>{r['classifier_A']} vs {r['classifier_B']}</td>"
+                f"<td>{float(r['auc_A']):.4f}</td>"
+                f"<td>{float(r['auc_B']):.4f}</td>"
+                f"<td>{float(r['delta_auc']):+.4f}</td>"
+                f"<td>{float(r['se_delta']):.5f}</td>"
+                f"<td>{z_fmt}</td><td>{p_fmt}</td><td>{sig}</td></tr>\n"
+            )
+    return rows
+
+
 def build_imeta_section(result_dir: str, imgs_dir: str) -> str:
     """Generate iMeta figures + DeLong tables and return an HTML fragment.
 
@@ -1405,6 +1526,12 @@ def build_imeta_section(result_dir: str, imgs_dir: str) -> str:
         f"Full 55-row pairwise tables remain available as "
         f"<code>imeta_delong_test.csv</code> and <code>imeta_delong_formal.csv</code>."
     )
+    # ── Focused table: each model vs the CA-125 baseline ─────────────────
+    boot_df_for_focus = _read_csv(fig_paths.get("delong_csv", ""))
+    form_df_for_focus = _read_csv(fig_paths.get("delong_formal_csv", ""))
+    baseline_tbl_html = _baseline_vs_ca125_table_html(boot_df_for_focus,
+                                                      form_df_for_focus)
+
     delong_html = (
         f'<h3 style="margin-top:18px">Figure 4D — Focused Pairwise AUC Comparisons '
         f'(Forest Plot)</h3>'
@@ -1412,60 +1539,168 @@ def build_imeta_section(result_dir: str, imgs_dir: str) -> str:
                      "DeLong forest plot",
                      "Figure 4D",
                      forest_cap)
+        + baseline_tbl_html
     )
-    delong_formal_html = ""
+
+    # ── Full pairwise DeLong tables (collapsible; complements the forest plot) ─
+    # The forest plot above summarises the 15 contrasts of interest; the two
+    # tables below give every pairwise comparison across all 11 models. Wrapped
+    # in <details> so the long tables stay collapsed by default.
+    boot_tbl_html = ""
+    dp = fig_paths.get("delong_csv")
+    if dp and os.path.exists(dp):
+        try:
+            rows = _delong_table_html(_read_csv(dp), "bootstrap")
+            boot_tbl_html = f"""
+<h4 style="margin-top:14px">Bootstrap Pairwise AUC Comparison ({DELONG_BOOT_N:,} resamples)</h4>
+<table style="font-size:.86em">
+  <tr><th>Comparison</th><th>AUC A</th><th>AUC B</th><th>Δ AUC</th>
+      <th>95% CI of Δ AUC</th><th><em>p</em> (bootstrap)</th><th>Significant</th></tr>
+  {rows}
+</table>
+<p style="color:#666;font-size:.82em;margin-top:4px">
+  Two-sided bootstrap permutation test with paired resampling ({DELONG_BOOT_N:,} resamples).
+  All 11 model comparisons reported (cfDNA-only, CA-125, fusion). ✱ <em>p</em> &lt; 0.05.
+  Full table: <code>imeta_delong_test.csv</code>
+</p>"""
+        except Exception as exc:
+            logger.warning("[imeta] bootstrap HTML: %s", exc)
+
+    formal_tbl_html = ""
+    dfp = fig_paths.get("delong_formal_csv")
+    if dfp and os.path.exists(dfp):
+        try:
+            rows = _delong_table_html(_read_csv(dfp), "formal")
+            formal_tbl_html = f"""
+<h4 style="margin-top:18px">Formal DeLong Test — fastDeLong Variance Estimator</h4>
+<table style="font-size:.86em">
+  <tr><th>Comparison</th><th>AUC A</th><th>AUC B</th><th>Δ AUC</th>
+      <th>SE(Δ AUC)</th><th><em>Z</em></th>
+      <th><em>p</em> (DeLong)</th><th>Significant</th></tr>
+  {rows}
+</table>
+<p style="color:#666;font-size:.82em;margin-top:4px">
+  Two-sided Z-test using the structural-component variance estimator of
+  DeLong <em>et al.</em> (1988); placement-value covariance handles correlated
+  AUCs jointly. ✱ <em>p</em> &lt; 0.05. Full table: <code>imeta_delong_formal.csv</code>
+</p>"""
+        except Exception as exc:
+            logger.warning("[imeta] formal DeLong HTML: %s", exc)
+
+    if boot_tbl_html or formal_tbl_html:
+        delong_formal_html = f"""
+<details style="margin-top:10px">
+  <summary style="cursor:pointer;font-weight:600;color:#34495e">
+    Full pairwise DeLong tables (all 55 comparisons) — click to expand
+  </summary>
+  {boot_tbl_html}
+  {formal_tbl_html}
+</details>"""
+    else:
+        delong_formal_html = ""
 
     # ── Caption text (built once from context) ─────────────────────────────
     cv_n      = ctx.cv_caption()
     tv_n      = ctx.tv_caption()
     panel_n   = ctx.panel_size or "?"
     ext_n     = ctx.ext_matched or "?"
+
+    def _src(csv_names: str, step_label: str) -> str:
+        """Render a small evidence-source annotation appended to a figcaption."""
+        return (f'<br><span style="color:#888;font-size:.85em">'
+                f'<em>Source:</em> <code>{csv_names}</code> · '
+                f'<em>Step:</em> {step_label}</span>')
+
+    fig2b_cap = (
+        f"Genomic distribution of the {panel_n}-CpG panel: CpG-island context (left), "
+        f"gene region type (centre), and overlap with the 88 ovarian-cancer tissue "
+        f"candidate regions (right)."
+        + _src("panel_annotation.csv", "Step 18 — annotate")
+    )
     fig3_cap = (
         f"ROC curves for the eleven evaluated models under {cv_n}. "
         f"Panel A: five cfDNA-only classifiers (LR, SVM, RF, XGB, LGBM) with CA-125 alone as dashed baseline. "
         f"Panel B: five cfDNA + CA-125 fusion models with the same CA-125 dashed baseline. "
         f"AUC and 95% CIs from {BOOTSTRAP_N:,}-resample bootstrap."
+        + _src("classifier_predictions.csv", "Step 15 — classify")
     )
     fig4_cap = (
         f"AUC, accuracy, sensitivity, and specificity for each classifier ({cv_n}). "
         f"Panel A: cfDNA-only models; Panel B: CA-125 baseline + cfDNA + CA-125 fusion models. "
         f"Error bars = 95% bootstrap CI ({BOOTSTRAP_N:,} resamples)."
+        + _src("classifier_summary.csv", "Step 15 — classify")
     )
     fig4b_cap = (
         f"Paired marginal value of CA-125 fusion for each base classifier ({cv_n}). "
         f"Each row contrasts a cfDNA-only model with its corresponding CA-125 fusion "
         f"counterpart (LR vs LR+CA125, …); bars show the fused − base delta with the "
         f"underlying absolute scores annotated. Teal = positive lift, red = regression."
+        + _src("classifier_summary.csv", "Step 15 — classify")
     )
     fig4c_cap = (
         f"Per-model gain relative to the CA-125 alone baseline ({cv_n}). "
         f"Panel A: Δ Specificity (the headline benign-rejection metric); "
         f"Panel B: Δ AUC. Fusion models are drawn with a dark border to separate them "
         f"from cfDNA-only models. Bars are sorted by Δ Specificity within each group."
+        + _src("classifier_summary.csv", "Step 15 — classify")
     )
-    fig5b_cap = (
-        f"Cross-regime consistency of AUC (left) and Specificity (right) across the "
-        f"eleven evaluated models. Solid bars = {ctx.cv_label} ({cv_n}); hatched bars = "
-        f"temporal prospective validation ({tv_n}). 95% bootstrap CI. Bars sharing the "
-        f"same colour represent the same classifier in the two regimes."
+    # Append source annotation to the existing DeLong forest-plot caption.
+    forest_cap = forest_cap + _src(
+        "imeta_delong_test.csv, imeta_delong_formal.csv",
+        "Step 20 — derived from classifier_predictions.csv (Step 15)",
     )
     fig5_cap = (
         f"Left: side-by-side AUC for {ctx.cv_label} vs prospective validation "
         f"({tv_n}). Right: per-sample predicted malignancy probability for the "
         f"prospective best model, plotted against sample collection date. "
         f"✕ = misclassified sample."
+        + _src("temporal_validation_summary.csv, temporal_validation_predictions.csv",
+               "Step 17 — temporal_validate")
     )
-    fig2b_cap = (
-        f"Genomic distribution of the {panel_n}-CpG panel: CpG-island context (left), "
-        f"gene region type (centre), and overlap with the 88 ovarian-cancer tissue "
-        f"candidate regions (right)."
+    fig5b_cap = (
+        f"Cross-regime consistency of AUC (left) and Specificity (right) across the "
+        f"eleven evaluated models. Solid bars = {ctx.cv_label} ({cv_n}); hatched bars = "
+        f"temporal prospective validation ({tv_n}). 95% bootstrap CI. Bars sharing the "
+        f"same colour represent the same classifier in the two regimes."
+        + _src("classifier_summary.csv + temporal_validation_summary.csv",
+               "Steps 15 — classify  +  17 — temporal_validate")
     )
     fig6b_cap = (
         f"Whole-blood mean β-value (GSE40279) for the {ext_n} panel CpG sites with "
         f"matched Illumina 450K probes. Sites with blood mean β ≥ {BLOOD_BETA_THRESHOLD} "
         f"({ctx.ext_fail} sites, red) are potential leukocyte-DNA confounders in plasma "
         f"cfDNA liquid biopsy and are candidates for panel refinement."
+        + _src("external_validation.csv", "Step 19 — external_validate")
     )
+
+    # Rebuild the DeLong forest-plot block with the updated, source-annotated caption.
+    delong_html = (
+        f'<h3 style="margin-top:18px">Figure 4D — Focused Pairwise AUC Comparisons '
+        f'(Forest Plot)</h3>'
+        + _img_block("fig_delong_forest",
+                     "DeLong forest plot",
+                     "Figure 4D",
+                     forest_cap)
+        + baseline_tbl_html
+    )
+
+    # ── Section index: figure → source CSV → producing pipeline step ──────
+    section_index_html = """
+<div style="background:#f8f9fa;border-left:3px solid #6c757d;padding:10px 14px;margin:10px 0 18px 0;font-size:.86em">
+  <strong>Section index</strong> — figures appear below in pipeline-step order:
+  <table style="width:100%;margin-top:6px;font-size:.95em">
+    <tr><th style="text-align:left">Figure</th><th style="text-align:left">Source CSV</th><th style="text-align:left">Pipeline step</th></tr>
+    <tr><td>Figure 2B</td><td><code>panel_annotation.csv</code></td><td>Step 18 — annotate</td></tr>
+    <tr><td>Figure 3</td><td><code>classifier_predictions.csv</code></td><td>Step 15 — classify</td></tr>
+    <tr><td>Figure 4</td><td><code>classifier_summary.csv</code></td><td>Step 15 — classify</td></tr>
+    <tr><td>Figure 4B</td><td><code>classifier_summary.csv</code></td><td>Step 15 — classify</td></tr>
+    <tr><td>Figure 4C</td><td><code>classifier_summary.csv</code></td><td>Step 15 — classify</td></tr>
+    <tr><td>Figure 4D + full DeLong tables</td><td><code>imeta_delong_test.csv</code>, <code>imeta_delong_formal.csv</code></td><td>Step 20 — derived from classifier_predictions.csv (Step 15)</td></tr>
+    <tr><td>Figure 5</td><td><code>temporal_validation_summary.csv</code>, <code>temporal_validation_predictions.csv</code></td><td>Step 17 — temporal_validate</td></tr>
+    <tr><td>Figure 5B</td><td><code>classifier_summary.csv</code> + <code>temporal_validation_summary.csv</code></td><td>Steps 15 + 17</td></tr>
+    <tr><td>Figure 6B</td><td><code>external_validation.csv</code></td><td>Step 19 — external_validate</td></tr>
+  </table>
+</div>"""
 
     return f"""
 <!-- iMeta Publication Figures — auto-generated by Step 20 -->
@@ -1476,11 +1711,13 @@ def build_imeta_section(result_dir: str, imgs_dir: str) -> str:
   <code>report/imgs/imeta_*.png</code>.
   See <code>docs/iMeta_todo.md</code> for the full submission checklist.
 </p>
+{section_index_html}
 
-<h3>Figure 3 — Binary Classification ROC Curves (eleven-model comparison)</h3>
+<h3>Figure 2B — Panel CpG Site Annotation</h3>
+{_img_block("fig2b_panel", "Panel Annotation", "Figure 2B", fig2b_cap)}
+
+<h3 style="margin-top:22px">Figure 3 — Binary Classification ROC Curves (eleven-model comparison)</h3>
 {_img_block("fig3_roc", "ROC Curves", "Figure 3", fig3_cap)}
-{delong_html}
-{delong_formal_html}
 
 <h3 style="margin-top:22px">Figure 4 — Classifier Performance Comparison</h3>
 {_img_block("fig4_clf", "Classifier Comparison", "Figure 4", fig4_cap)}
@@ -1491,14 +1728,14 @@ def build_imeta_section(result_dir: str, imgs_dir: str) -> str:
 <h3 style="margin-top:22px">Figure 4C — Per-model Gain over CA-125 Alone</h3>
 {_img_block("fig4c_gain", "Gain over CA-125 alone", "Figure 4C", fig4c_cap)}
 
+{delong_html}
+{delong_formal_html}
+
 <h3 style="margin-top:22px">Figure 5 — Temporal Prospective Validation</h3>
 {_img_block("fig5_tv", "Temporal Validation", "Figure 5", fig5_cap)}
 
 <h3 style="margin-top:22px">Figure 5B — Cross-regime Consistency (CV vs Temporal)</h3>
 {_img_block("fig5b_regime", "CV vs Temporal cross-regime", "Figure 5B", fig5b_cap)}
-
-<h3 style="margin-top:22px">Figure 2B — Panel CpG Site Annotation</h3>
-{_img_block("fig2b_panel", "Panel Annotation", "Figure 2B", fig2b_cap)}
 
 <h3 style="margin-top:22px">Figure 6B — Whole-blood Methylation Baseline</h3>
 {_img_block("fig6b_blood", "Blood Methylation Baseline", "Figure 6B", fig6b_cap)}

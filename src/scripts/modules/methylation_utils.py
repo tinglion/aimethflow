@@ -394,66 +394,93 @@ def plot_sample_clustered_heatmap(result_dir, output_file):
     malig_idx  = np.where(y == 1)[0]
     order_b = benign_idx[_cluster_rows(X[benign_idx])] if len(benign_idx) else np.array([], dtype=int)
     order_m = malig_idx [_cluster_rows(X[malig_idx ])] if len(malig_idx ) else np.array([], dtype=int)
-    row_order = np.concatenate([order_b, order_m])
 
-    # Cluster columns too (similar CpG sites adjacent) — purely cosmetic but
-    # makes block-structured methylation patterns visible to reviewers.
+    # Boundary alignment: reorient each class's within-class order so the
+    # samples meeting at the benign/malignant boundary are the most similar
+    # pair across the 4 possible orientation combinations. Avoids the visual
+    # "hard cut" when the leaves_list orientation places dissimilar endpoints
+    # next to each other.
+    if len(order_b) >= 2 and len(order_m) >= 2:
+        def _corr_dist(a, b):
+            a, b = a.astype(float), b.astype(float)
+            a = a - a.mean(); b = b - b.mean()
+            denom = np.sqrt((a * a).sum() * (b * b).sum())
+            if denom == 0:
+                return 1.0
+            return 1.0 - float((a * b).sum() / denom)
+        candidates = [
+            (order_b,        order_m       ),  # b→m: b[-1] meets m[0]
+            (order_b[::-1],  order_m       ),  # b[0]  meets m[0]
+            (order_b,        order_m[::-1] ),  # b[-1] meets m[-1]
+            (order_b[::-1],  order_m[::-1] ),  # b[0]  meets m[-1]
+        ]
+        best = min(candidates,
+                   key=lambda pair: _corr_dist(X[pair[0][-1]], X[pair[1][0]]))
+        order_b, order_m = best
+    col_order_samples = np.concatenate([order_b, order_m])
+
+    # Cluster CpG sites (similar sites adjacent on the y-axis) — purely
+    # cosmetic but makes block-structured methylation patterns visible.
     if X.shape[1] >= 2:
         try:
             D_c = pdist(X.T, metric="correlation")
             if np.any(np.isnan(D_c)):
                 D_c = np.nan_to_num(D_c, nan=np.nanmax(D_c[~np.isnan(D_c)]) if np.any(~np.isnan(D_c)) else 1.0)
             Z_c = linkage(D_c, method="average")
-            col_order = np.array(leaves_list(Z_c))
+            row_order_cpg = np.array(leaves_list(Z_c))
         except Exception:
-            col_order = np.arange(X.shape[1])
+            row_order_cpg = np.arange(X.shape[1])
     else:
-        col_order = np.arange(X.shape[1])
+        row_order_cpg = np.arange(X.shape[1])
 
-    X_plot = X[row_order][:, col_order]
-    n_samp, n_feat = X_plot.shape
+    # Axes swap: rows = CpG sites, columns = samples
+    X_plot = X[col_order_samples][:, row_order_cpg].T
+    n_feat, n_samp = X_plot.shape
 
-    # Figure geometry — wide enough that adjacent CpGs are distinguishable,
-    # tall enough that ~120 sample rows are individually readable.
-    fig_w = max(9.0, min(20.0, n_feat / 35.0))
-    fig_h = max(4.5, min(14.0, n_samp / 9.0 + 1.5))
+    # Figure geometry — wide enough that ~120 sample columns are readable,
+    # tall enough that adjacent CpG rows are distinguishable.
+    fig_w = max(9.0, min(20.0, n_samp / 9.0 + 1.5))
+    fig_h = max(4.5, min(14.0, n_feat / 35.0 + 2.0))
 
-    fig, (ax_anno, ax_heat) = plt.subplots(
-        1, 2, figsize=(fig_w, fig_h),
-        gridspec_kw={"width_ratios": [1, 60], "wspace": 0.015},
+    fig, (ax_heat, ax_anno) = plt.subplots(
+        2, 1, figsize=(fig_w, fig_h),
+        gridspec_kw={"height_ratios": [60, 1], "hspace": 0.02},
     )
 
-    # ── Class annotation strip (left of the main heatmap) ──
-    cls_strip = np.array([[0]] * len(order_b) + [[1]] * len(order_m), dtype=float)
-    anno_cmap = LinearSegmentedColormap.from_list("anno", ["#4878CF", "#D65F5F"])
-    ax_anno.imshow(cls_strip, aspect="auto", cmap=anno_cmap, vmin=0, vmax=1, interpolation="nearest")
-    ax_anno.set_xticks([])
-    ax_anno.set_yticks([])
-    ax_anno.set_title("Class", fontsize=9, pad=4)
-    # Boundary line between classes
-    if len(order_b) and len(order_m):
-        ax_anno.axhline(len(order_b) - 0.5, color="black", lw=0.9)
-
-    # ── Main heatmap ──
+    # ── Main heatmap (CpG rows × sample columns) ──
     im = ax_heat.imshow(
         X_plot, aspect="auto", cmap="RdYlBu_r",
         vmin=0, vmax=1, interpolation="nearest",
     )
     ax_heat.set_yticks([])
     ax_heat.set_xticks([])
+    # Vertical boundary line between benign and malignant blocks
     if len(order_b) and len(order_m):
-        ax_heat.axhline(len(order_b) - 0.5, color="black", lw=1.2)
+        ax_heat.axvline(len(order_b) - 0.5, color="black", lw=1.2)
 
-    ax_heat.set_xlabel(
+    ax_heat.set_ylabel(
         f"{n_feat} CpG sites (correlation-clustered; similar adjacent)",
         fontsize=10,
     )
     ax_heat.set_title(
         f"Methylation Heatmap — {len(order_b)} benign (blue strip) / "
         f"{len(order_m)} malignant (red strip); "
-        f"rows hierarchically clustered within each class",
+        f"columns hierarchically clustered within each class, "
+        f"boundary samples aligned for similarity",
         fontsize=11, pad=8,
     )
+
+    # ── Class annotation strip (horizontal, below the main heatmap) ──
+    cls_strip = np.array([[0] * len(order_b) + [1] * len(order_m)], dtype=float)
+    anno_cmap = LinearSegmentedColormap.from_list("anno", ["#4878CF", "#D65F5F"])
+    ax_anno.imshow(cls_strip, aspect="auto", cmap=anno_cmap, vmin=0, vmax=1,
+                   interpolation="nearest")
+    ax_anno.set_xticks([])
+    ax_anno.set_yticks([])
+    ax_anno.set_ylabel("Class", fontsize=9, rotation=0, ha="right", va="center",
+                       labelpad=12)
+    if len(order_b) and len(order_m):
+        ax_anno.axvline(len(order_b) - 0.5, color="black", lw=0.9)
 
     # Colorbar
     cbar = fig.colorbar(im, ax=ax_heat, shrink=0.55, pad=0.015, fraction=0.025)
@@ -466,15 +493,15 @@ def plot_sample_clustered_heatmap(result_dir, output_file):
         Patch(facecolor="#4878CF", label=f"Benign (n={len(order_b)})"),
         Patch(facecolor="#D65F5F", label=f"Malignant (n={len(order_m)})"),
     ]
-    ax_heat.legend(
+    ax_anno.legend(
         handles=legend_handles, loc="upper right",
-        bbox_to_anchor=(1.0, -0.04), ncol=2, frameon=False, fontsize=9,
+        bbox_to_anchor=(1.0, -0.6), ncol=2, frameon=False, fontsize=9,
     )
 
     plt.savefig(output_file, dpi=150, bbox_inches="tight")
     plt.close(fig)
     logger.info(f"  Sample-clustered heatmap saved: {output_file} "
-                f"({n_samp} samples × {n_feat} CpG sites)")
+                f"({n_feat} CpG sites × {n_samp} samples)")
     return True
 
 

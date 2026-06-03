@@ -75,6 +75,49 @@ def _load_feature_matrix(workdir, result_dir, benign_samples, malignant_samples,
 
 
 
+def _apply_panel_filter(X, feature_names, region_in_88, result_dir):
+    """
+    Restrict the feature matrix to the deployment panel; prefer the
+    blood-filtered variant when available.
+
+    Lookup order:
+      1. panel_cpg_blood_filtered.csv  (Step 19 external_validate output)
+      2. panel_cpg.csv                  (Step 14 feature_analysis output)
+      3. no panel → return X unchanged
+
+    Returns
+    -------
+    (X_filt, feature_names_filt, region_in_88_filt, mode_label)
+    """
+    import pandas as pd
+    blood_path = os.path.join(result_dir, "panel_cpg_blood_filtered.csv")
+    panel_path = os.path.join(result_dir, "panel_cpg.csv")
+
+    if os.path.exists(blood_path):
+        chosen_path, mode_label = blood_path, "blood-filtered panel"
+    elif os.path.exists(panel_path):
+        chosen_path, mode_label = panel_path, "Step 14 panel (no blood filter)"
+    else:
+        return X, feature_names, region_in_88, "no panel restriction (full matrix)"
+
+    try:
+        panel_set = set(pd.read_csv(chosen_path)["feature"].astype(str))
+    except Exception as exc:
+        logger.warning(f"  Failed to read {os.path.basename(chosen_path)}: {exc} "
+                       "— falling back to full matrix")
+        return X, feature_names, region_in_88, "no panel restriction (read failed)"
+
+    keep = np.array([fn in panel_set for fn in feature_names])
+    if keep.sum() == 0:
+        logger.warning(f"  Panel filter dropped all features — falling back to full matrix")
+        return X, feature_names, region_in_88, "no panel restriction (empty intersection)"
+
+    return (X[:, keep],
+            [fn for fn, k in zip(feature_names, keep) if k],
+            region_in_88[keep],
+            mode_label)
+
+
 def _impute(X):
     """Impute NaN values using column medians."""
     X_imp = X.copy()
@@ -473,8 +516,18 @@ def run_classifiers(workdir, result_dir, config, benign_samples, malignant_sampl
         sample_ids = [sid for sid, k in zip(sample_ids, keep_mask) if k]
         region_in_88 = region_in_88   # feature dimension unchanged, no filtering needed
 
+    # ── Panel filter: prefer blood-filtered panel (Step 19) when available ──
+    # Restrict the candidate feature pool to the Step 14 panel; if Step 19
+    # external_validate has run and written panel_cpg_blood_filtered.csv, that
+    # variant is preferred so leukocyte-cfDNA confounded sites are excluded
+    # from per-fold selection. Falls back to panel_cpg.csv if the blood-filter
+    # is absent, or to the full feature matrix if no panel file exists.
+    X, feature_names, region_in_88, panel_mode = _apply_panel_filter(
+        X, feature_names, region_in_88, result_dir
+    )
+
     n_in_88 = int(region_in_88.sum())
-    logger.info(f"  Full feature matrix: {X.shape[0]} samples × {X.shape[1]} features  "
+    logger.info(f"  Feature pool ({panel_mode}): {X.shape[0]} samples × {X.shape[1]} features  "
                 f"(in 88-regions: {n_in_88}  outside: {X.shape[1]-n_in_88};  "
                 f"feature selection runs independently per fold)")
 
