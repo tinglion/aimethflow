@@ -2,6 +2,15 @@
 
 End-to-end targeted bisulfite sequencing pipeline for ovarian-cancer early-diagnosis research, covering raw FASTQ → on-target methylation extraction → leakage-free machine-learning classification → temporal prospective validation → multi-source biological annotation, with a Docker-containerized deployment and a built-in Web UI.
 
+## Status — pre-publication
+
+The 3 modules `feature_utils` (5-stage feature selection), `classifier_utils` (11-model nested CV with cfDNA + CA-125 fusion), and `external_validate` (GSE40279 blood-baseline filter) are protected pending publication of the AIMethFlow paper in *iMeta* (2026) and the corresponding Chinese patent application. They are distributed as a private companion package `aimethflow-core`.
+
+- **Reviewers** receive access to `aimethflow-core` via the corresponding author during peer review (see `LICENSE`).
+- **All other pipeline steps (1-13, 16-18, 20)** run with the public code only.
+- **Steps 14, 15, and 19** require `pip install aimethflow-core` (private). Without it, importing those modules raises an `ImportError` with the access instructions.
+- On paper acceptance, `aimethflow-core` will be merged back into this repository under MIT.
+
 ## Analysis goals
 
 - Detect differential methylation at CpG sites associated with ovarian cancer in plasma cell-free DNA (cfDNA)

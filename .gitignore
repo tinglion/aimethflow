@@ -52,3 +52,4 @@ result/
 docs
 .claude
 config.toml
+MIGRATION_NOTES.md

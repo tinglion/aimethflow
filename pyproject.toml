@@ -39,10 +39,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# ML 分类器（Steps 14–16）
+# ML classifiers (Steps 14-16)
 ml = [
   "xgboost>=2.0.0",
   "lightgbm>=4.0.0",
+]
+# Protected core algorithms (Steps 14, 15, 19) — private during pre-publication
+# Reviewers receive access to `aimethflow-core` via the corresponding author.
+core = [
+  "aimethflow-core>=0.1.0",
 ]
 # Jupyter 查看结果
 jupyter = [
