@@ -389,6 +389,136 @@ def _load_sites(result_dir):
 
 
 # ---------------------------------------------------------------------------
+# Supplementary Table S2 export — mirror the annotation table into the
+# manuscript docs/ tree as a formatted xlsx
+# ---------------------------------------------------------------------------
+
+def _resolve_project_path(rel_path: str) -> str:
+    """Resolve ``rel_path`` against the project root.
+
+    annotation_utils.py lives at src/scripts/modules/annotation_utils.py, so
+    the project root is four ``dirname`` calls up. Returns the full path even
+    when the parent directory does not yet exist; the caller is responsible
+    for ``os.makedirs`` if appropriate.
+    """
+    here = os.path.abspath(__file__)
+    project_root = here
+    for _ in range(4):
+        project_root = os.path.dirname(project_root)
+    return os.path.join(project_root, rel_path)
+
+
+def _save_annotation_as_xlsx(df, xlsx_path: str) -> bool:
+    """Write the annotation DataFrame as a formatted xlsx.
+
+    Rows are sorted by ``selection_rate`` descending so the most
+    diagnostically informative CpGs appear first. The header row is bold +
+    dark fill; numeric columns are right-aligned, boolean columns
+    center-aligned, text columns left-aligned with wrap; ``selection_rate``
+    is rendered as a percentage and ``ewas_min_p`` in scientific notation;
+    alternating rows receive a subtle zebra fill; the UCSC URL becomes a
+    clickable hyperlink; the header row is frozen and an auto-filter is
+    enabled. Returns True on success, False if openpyxl is unavailable.
+    """
+    try:
+        import openpyxl
+        from openpyxl.styles import Font, Alignment, PatternFill
+        from openpyxl.utils import get_column_letter
+    except ImportError:
+        logger.warning("  openpyxl not installed — Supplementary Table S2 "
+                       "xlsx not written")
+        return False
+
+    # ── Sort: most diagnostically informative CpGs first ────────────────
+    df = df.copy()
+    if "selection_rate" in df.columns:
+        df = df.sort_values("selection_rate", ascending=False,
+                            na_position="last").reset_index(drop=True)
+
+    # ── Column-type classification (drives alignment + number formats) ──
+    numeric_cols = {"pos_0based", "selection_rate", "selection_count",
+                    "distance_bp", "ewas_n_hits", "ewas_n_studies",
+                    "ewas_min_p", "atlas_n_hits", "atlas_n_studies",
+                    "pubmed_n_hits"}
+    bool_cols    = {"in_88_regions", "has_plasma_evidence"}
+    url_cols     = {"ucsc_url"}
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Panel CpG Annotation"
+
+    headers = list(df.columns)
+    ws.append(headers)
+
+    # ── Header row styling ──────────────────────────────────────────────
+    header_font  = Font(bold=True, color="FFFFFF", size=11)
+    header_fill  = PatternFill(start_color="34495E", end_color="34495E",
+                               fill_type="solid")
+    header_align = Alignment(horizontal="center", vertical="center",
+                             wrap_text=True)
+    for c in range(1, len(headers) + 1):
+        cell = ws.cell(row=1, column=c)
+        cell.font      = header_font
+        cell.fill      = header_fill
+        cell.alignment = header_align
+
+    # ── Data row styling ────────────────────────────────────────────────
+    left_align   = Alignment(horizontal="left",   vertical="top", wrap_text=True)
+    right_align  = Alignment(horizontal="right",  vertical="top")
+    center_align = Alignment(horizontal="center", vertical="top")
+    zebra_fill   = PatternFill(start_color="F4F6F8", end_color="F4F6F8",
+                               fill_type="solid")
+    link_font    = Font(color="0563C1", underline="single")
+
+    for r_idx, row in enumerate(df.itertuples(index=False), start=2):
+        for c_idx, (header, value) in enumerate(zip(headers, row), start=1):
+            cell = ws.cell(row=r_idx, column=c_idx, value=value)
+
+            if header in numeric_cols:
+                cell.alignment = right_align
+            elif header in bool_cols:
+                cell.alignment = center_align
+            else:
+                cell.alignment = left_align
+
+            if header == "selection_rate":
+                cell.number_format = "0.00%"
+            elif header == "ewas_min_p" and isinstance(value, (int, float)):
+                cell.number_format = "0.00E+00"
+
+            if header in url_cols and isinstance(value, str) and value.startswith("http"):
+                cell.hyperlink = value
+                cell.font      = link_font
+
+            if r_idx % 2 == 0:
+                cell.fill = zebra_fill
+
+    # ── Column widths — measured from actual content (sampled rows) ─────
+    sample_upper = min(ws.max_row + 1, 60)
+    for c_idx, header in enumerate(headers, start=1):
+        max_len = len(str(header))
+        for r in range(2, sample_upper):
+            v = ws.cell(r, c_idx).value
+            if v is None:
+                continue
+            text = str(v)
+            if header in url_cols:
+                text = "ucsc.edu link"   # shorten URL footprint
+            max_len = max(max_len, len(text))
+        ws.column_dimensions[get_column_letter(c_idx)].width = min(45,
+                                                                   max(10,
+                                                                       max_len + 2))
+
+    ws.auto_filter.ref       = ws.dimensions
+    ws.freeze_panes          = "A2"
+    ws.row_dimensions[1].height = 32
+
+    os.makedirs(os.path.dirname(xlsx_path), exist_ok=True)
+    wb.save(xlsx_path)
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Main entry: Step 18
 # ---------------------------------------------------------------------------
 
@@ -563,6 +693,16 @@ def run_annotation(result_dir, config):
     out_path = os.path.join(result_dir, "panel_annotation.csv")
     ann_df.to_csv(out_path, index=False)
     logger.info(f"  Annotation saved: {out_path}")
+
+    # Mirror the table into the manuscript docs tree as Supplementary Table S2
+    # (formatted xlsx). Failures are non-fatal — the pipeline still produces
+    # the canonical CSV above.
+    try:
+        s2_xlsx = _resolve_project_path("docs/iMeta_0.2/Table_S2_annotation.xlsx")
+        if _save_annotation_as_xlsx(ann_df, s2_xlsx):
+            logger.info(f"  Supplementary Table S2 saved: {s2_xlsx}")
+    except Exception as exc:
+        logger.warning(f"  Failed to write Supplementary Table S2 xlsx: {exc}")
 
     # ── Summary ──────────────────────────────────────────────────────────────
     def _cnt(col, val):

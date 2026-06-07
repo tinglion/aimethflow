@@ -66,6 +66,7 @@ STEPS = [
     ("visualize",         "Step 12  Density / scatter / heatmap",     "C · Methylation"),
     ("outlier_detect",    "Step 13  Sample outlier detection",        "D · QC + Features"),
     ("feature_analysis",  "Step 14  Feature analysis (LASSO + RF)",   "D · QC + Features"),
+    ("blood_filter",      "Step 14a Blood-baseline filter (GSE40279)", "D · QC + Features"),
     ("fs_benchmark",      "Step 14b Feature selection ablation",      "D · QC + Features"),
     ("classify",          "Step 15  Diagnostic classification",       "E · Classification"),
     ("final_model",       "Step 15c Train production models (full cohort)", "E · Classification"),

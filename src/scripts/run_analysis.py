@@ -44,6 +44,8 @@ Steps:
   visualize          12   Plots: density / scatter / heatmap
   outlier_detect     13   Sample outlier detection (coverage / PCA z-score / Isolation Forest)
   feature_analysis   14   Feature analysis: LASSO + RF selection (outliers excluded; ≥10× coverage QC)
+  blood_filter       14a  Drop panel sites with GSE40279 whole-blood mean β ≥ 0.10
+  fs_benchmark       14b  Feature selection ablation: wilcoxon/lasso/rf/union AUC table
   classify           15   Diagnostic classifiers LOO-CV: LR / SVM / RF / XGBoost / LightGBM
   subtype_classify   16   Subtype multi-class LOO-CV: RF + SVM OvR
   temporal_validate  17   Temporal split validation (plasma only): train <2024-07-01, test >=2024-07-01
@@ -187,8 +189,9 @@ PIPELINE_STEPS = [
     ("visualize",          "12",  "Plots: density / scatter / heatmap (candidate regions)",        "diff"),
     ("outlier_detect",     "13",  "Sample QC: coverage fraction / PCA z / Isolation Forest",       "diff"),
     ("feature_analysis",   "14",  "Feature analysis: LASSO(L1) ∪ RF selection; outliers excluded; ≥10× QC", "outlier_detect"),
+    ("blood_filter",       "14a", "Blood-baseline filter: drop panel sites with GSE40279 mean β ≥ 0.10", "feature_analysis"),
+    ("fs_benchmark",       "14b", "Feature selection ablation: wilcoxon/lasso/rf/union AUC table", "feature_analysis"),
     ("classify",           "15",  "Classifiers LOO-CV: LR / SVM / RF / XGBoost / LightGBM",       "feature_analysis"),
-    ("fs_benchmark",       "15b", "Feature selection ablation: wilcoxon/lasso/rf/union AUC table", "feature_analysis"),
     ("final_model",        "15c", "Train production models on the full cohort (no CV holdout); save artefacts to result/<wd>/model/ for inference / WebUI diagnosis page", "classify"),
     ("subtype_classify",   "16",  "Subtype LOO-CV (malignant+borderline): RF + SVM OvR",          "classify"),
     ("temporal_validate",  "17",  "Temporal split validation (plasma only): train/test by date",  "classify"),
@@ -939,6 +942,28 @@ def main():
                 return
 
     # =========================================================
+    # Step 14a: blood_filter — drop panel sites with GSE40279
+    #           whole-blood mean β ≥ 0.10 (leukocyte-cfDNA confounders).
+    #           Writes panel_cpg_blood_filtered.csv, which Steps 15 / 16 /
+    #           17 auto-prefer. Skips gracefully if external data missing.
+    # =========================================================
+    if _should_run("blood_filter", False):
+        logger.info("━━ Step 14a: Blood-baseline filter (GSE40279) ━━")
+        from scripts.external_validate import compute_blood_filtered_panel
+        data_dir_ext = config.get("directories", {}).get("data_dir", "")
+        external_dir = os.path.join(data_dir_ext, "external")
+        if not os.path.isdir(external_dir):
+            logger.warning(f"  external_dir not found: {external_dir} — "
+                           "blood_filter skipped; downstream steps will use the unfiltered panel")
+        else:
+            summary = compute_blood_filtered_panel(result_dir, external_dir)
+            if summary:
+                _save_state(workdir, {"completed_steps":
+                                      state.get("completed_steps", []) + ["blood_filter"]})
+                logger.info(f"  → panel_cpg_blood_filtered.csv: "
+                            f"{summary.get('n_retained', '?')}/{summary.get('n_total', '?')} sites retained")
+
+    # =========================================================
     # Step 15: classify
     # =========================================================
     if _should_run("classify", False):
@@ -957,11 +982,11 @@ def main():
                 return
 
     # =========================================================
-    # Step 15b: fs_benchmark — feature selection ablation
+    # Step 14b: fs_benchmark — feature selection ablation
     # =========================================================
     if _should_run("fs_benchmark", False):
         if benign_samples and malignant_samples:
-            logger.info("━━ Step 15b: Feature selection ablation (wilcoxon/lasso/rf/union) ━━")
+            logger.info("━━ Step 14b: Feature selection ablation (wilcoxon/lasso/rf/union) ━━")
             from scripts.modules.fs_benchmark import run_feature_selection_benchmark
             run_feature_selection_benchmark(
                 workdir, result_dir, config, benign_samples, malignant_samples

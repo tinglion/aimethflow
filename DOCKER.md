@@ -1,126 +1,147 @@
-# Docker 部署说明
+# Docker Deployment
 
-## 设计决策
+This is the recommended deployment path for production / shared servers. For local development with Conda see [docs/installation.md](docs/installation.md).
 
-| 项目 | 决策 |
-|------|------|
-| 基础镜像 | `continuumio/miniconda3` |
-| 生信工具 | conda（bioconda + conda-forge），与服务器环境一致 |
-| Python 依赖 | conda env `meth` (3.10.14) + pip |
-| GPU | 不启用 |
-| 参考基因组 | 外部挂载，不打包 |
-| data / temp / result | 外部挂载，不打包 |
-| Jupyter | docker-compose 中独立 service，与分析容器共享卷 |
+## Usage
 
----
+**Prerequisites**: Docker ≥ 24, Docker Compose Plugin (`docker compose` command available)
 
-## 镜像层结构
+```bash
+# 1. Copy and fill in paths
+cp .env.example .env
+# Edit .env: set the host machine's data / reference genome / results directories
 
+# 2. Build the image (first time ~10–20 minutes; cached on subsequent runs)
+docker compose --progress=plain build
+
+# 3. Start the persistent container
+docker compose up -d
+# Submit an analysis job
+docker compose exec analysis \
+    python /app/src/scripts/run_analysis.py --steps 1-19
+# Enter the container shell
+docker compose exec analysis bash
+
+# One-shot run (removed after completion)
+docker compose --profile run run --rm analysis-run \
+    python /app/src/scripts/run_analysis.py --steps 1-19
+
+# 4. Start JupyterLab to browse results step by step
+docker compose --profile jupyter up jupyter
+#    Open http://localhost:8888 in your browser
 ```
+
+The Web UI is also auto-started in the persistent container and listens on port 9999 — see [docs/quickstart.md](docs/quickstart.md#web-ui-recommended).
+
+## Design decisions
+
+| Item | Decision |
+|------|------|
+| Base image | `continuumio/miniconda3` |
+| Bioinformatics tools | conda (bioconda + conda-forge), consistent with the server environment |
+| Python dependencies | conda env `meth` (Python 3.10.14) + pip |
+| GPU | Not enabled |
+| Reference genome | Mounted externally, not bundled |
+| `data` / `temp` / `result` | Mounted externally, not bundled |
+| Jupyter | Independent service in docker-compose, sharing volumes with the analysis container |
+
+## Image layer structure
+
+```text
 continuumio/miniconda3
-  ├─ [conda] mamba（求解加速）
+  ├─ [conda] mamba (solver acceleration)
   ├─ [mamba] create -n meth python=3.10.14    ~400 MB
-  ├─ [mamba] bioconda 生信工具                 ~800 MB
+  ├─ [mamba] bioconda bioinformatics tools     ~800 MB
   │          fastp / bwameth / samtools /
   │          bedtools / methyldackel / umi_tools / pysam
   ├─ [pip]   requirements.txt + jupyterlab    ~500 MB
   └─ [COPY]  src/                              ~10 MB
-             （data / temp / result 运行时挂载）
+             (data / temp / result mounted at runtime)
 ```
 
----
+## Tool installation method
 
-## 工具安装方式
+### conda (bioconda + conda-forge)
 
-### conda（bioconda + conda-forge）
-
-| 工具 | 版本 | 用途 |
+| Tool | Version | Purpose |
 |------|------|------|
-| fastp | 0.23.4 | 质控 trimming |
-| bwameth | latest | 亚硫酸盐比对 |
-| samtools | latest | BAM 处理 |
-| bedtools | latest | 区域过滤 |
-| methyldackel | latest | 甲基化提取 |
-| umi_tools | latest | UMI 去重 |
-| pysam | 0.22.0 | Python BAM 读取 |
+| fastp | 0.23.4 | Quality control + trimming |
+| bwameth | latest | Bisulfite alignment |
+| samtools | latest | BAM processing |
+| bedtools | latest | Region filtering |
+| methyldackel | latest | Methylation extraction |
+| umi_tools | latest | UMI-aware deduplication |
+| pysam | 0.22.0 | Python BAM reader |
 
-### pip（conda env 内）
+### pip (inside the conda env)
 
+```text
+jupyterlab ipykernel   # Jupyter environment
+-r requirements.txt    # Project Python dependencies
 ```
-jupyterlab ipykernel   # Jupyter 环境
--r requirements.txt    # 项目 Python 依赖
-```
 
----
+## Mounted volumes
 
-## 挂载卷规划
+| Host path (example) | Container path | Read-only | Description |
+| --- | --- | --- | --- |
+| `./data` | `/app/data` | yes | panel BED, sample Excel, candidate regions |
+| `./config.toml` | `/app/config.toml` | yes | Project configuration |
+| `/data/meth/OC_tissue` | `/mnt/OC_tissue` | yes | Tissue bedGraphs |
+| `/data/meth/OC_plasma` | `/mnt/OC_plasma` | yes | Plasma BAMs / bedGraphs |
+| `/data/meth/ref` | `/mnt/ref` | yes | hg38 + bwa-meth index |
+| `/data/meth/temp` | `/mnt/temp` | | Intermediate files |
+| `/data/meth/result` | `/mnt/result` | | Analysis results |
 
-| 宿主机路径（示例）       | 容器内路径          | 只读 | 说明                      |
-| ----------------------- | ------------------- | ---- | ------------------------- |
-| `./data`                | `/app/data`         | 是   | panel BED、样本 Excel、候选区域 |
-| `./config.toml`         | `/app/config.toml`  | 是   | 项目配置                  |
-| `/data/meth/OC_tissue`  | `/mnt/OC_tissue`    | 是   | 组织 bedGraph             |
-| `/data/meth/OC_plasma`  | `/mnt/OC_plasma`    | 是   | 血浆 BAM / bedGraph       |
-| `/data/meth/ref`        | `/mnt/ref`          | 是   | hg38 + bwa-meth 索引      |
-| `/data/meth/temp`       | `/mnt/temp`         |      | 中间文件                  |
-| `/data/meth/result`     | `/mnt/result`       |      | 分析结果                  |
-
-`config.toml` 中路径需改为容器内路径，例如：
+Update paths in `config.toml` (or use `config.docker.toml`) to the container-internal paths, for example:
 
 ```toml
-> tissue_dir = "/mnt/OC_tissue"
-> plasma_dir = "/mnt/OC_plasma"
-> reference_genome = "/mnt/ref/hg38.fa"
-> [directories]
-> temp_dir   = "/mnt/temp"
-> result_dir = "/mnt/result"
-> ```
+tissue_dir         = "/mnt/OC_tissue"
+plasma_dir         = "/mnt/OC_plasma"
+reference_genome   = "/mnt/ref/hg38.fa"
 
----
+[directories]
+temp_dir   = "/mnt/temp"
+result_dir = "/mnt/result"
+```
 
-## 端口
+## Ports
 
-| 端口 | 服务 |
+| Port | Service |
 |------|------|
 | 8888 | JupyterLab |
+| 9999 | Web UI (FastAPI) |
 
----
-
-## docker-compose 服务规划
+## docker-compose service plan
 
 ```yaml
 services:
-  analysis:          # 全流程分析（python run_analysis.py）
+  analysis:          # Full pipeline (python run_analysis.py)
     build: .
     volumes: [data, config, OC_tissue, OC_plasma, ref, temp, result]
     command: python /app/src/scripts/run_analysis.py --steps 1-19
 
-  jupyter:           # 分步查看结果
+  jupyter:           # Step-by-step result inspection
     build: .
     ports: ["8888:8888"]
     volumes: [data, config, OC_tissue, OC_plasma, ref, temp, result, notebooks]
     command: jupyter lab --ip=0.0.0.0 --no-browser --allow-root
 ```
 
----
+## Environment variables
 
-## 环境变量
+| Variable | Default | Description |
+|------|------|------|
+| `NCBI_API_KEY` | *(empty)* | Raises the PubMed rate limit from 3 to 10 req/s (optional) |
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `NCBI_API_KEY` | *(空)* | PubMed 速率提升（可选） |
+## File inventory (to be created)
 
----
-
-## 文件清单（待创建）
-
-```
+```text
 meth/
-├── Dockerfile            # 镜像构建
-├── docker-compose.yml    # 一键启动（analysis + jupyter）
-├── .dockerignore         # 排除 data/ temp/ result/ __pycache__
-├── DOCKER.md             # 本文件
-└── notebooks/            # Jupyter 分步分析 notebook
+├── Dockerfile            # Image build
+├── docker-compose.yml    # One-command launch (analysis + jupyter)
+├── .dockerignore         # Excludes data/, temp/, result/, __pycache__
+├── DOCKER.md             # This file
+└── notebooks/            # Jupyter step-by-step analysis notebooks
     ├── 01_qc.ipynb
     ├── ...
     └── 19_report.ipynb

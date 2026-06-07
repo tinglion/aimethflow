@@ -246,7 +246,7 @@ ewas_atlas = true
 # Whether to query PubMed: "{gene} plasma methylation cancer"
 pubmed_search = true
 # NCBI API key (optional; increases rate limit from 3 to 10 req/s when provided; can be left empty)
-ncbi_api_key = "4abb0ffcf184c006f41fde521b7f7266cb09"
+ncbi_api_key = ""
 # Maximum number of PubMed results to return per gene
 pubmed_max_hits = 20
 

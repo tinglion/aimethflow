@@ -556,6 +556,122 @@ def _parse_xena_matrix(xena_gz: str, probes_needed: set) -> pd.DataFrame:
 #  Main validation function
 # ─────────────────────────────────────────────────────────────
 
+def compute_blood_filtered_panel(result_dir: str, external_dir: str,
+                                 threshold: float = BLOOD_THRESHOLD) -> dict:
+    """Step 14a — standalone blood-baseline filter.
+
+    Reads ``panel_cpg.csv``, lifts each panel site hg38 → hg19, matches to a
+    GPL13534 cg probe, looks up GSE40279 (n=656 whole-blood samples) mean β,
+    and writes ``panel_cpg_blood_filtered.csv`` with sites whose
+    ``blood_mean_beta ≥ threshold`` removed. Sites without a matched 450K
+    probe are retained as-is (no blood-baseline evidence available).
+
+    Uses the same parse helpers as Step 19 ``run_external_validation`` so the
+    output is bit-identical regardless of which step writes it.
+
+    Returns a summary dict (empty if a critical input is missing).
+    """
+    panel_path = os.path.join(result_dir, "panel_cpg.csv")
+    if not os.path.exists(panel_path):
+        logger.error(f"[blood_filter] panel_cpg.csv not found: {panel_path} "
+                     "— run --step feature_analysis first")
+        return {}
+
+    panel_df       = pd.read_csv(panel_path)
+    panel_features = list(panel_df["feature"].astype(str))
+    n_total        = len(panel_features)
+    logger.info(f"[blood_filter] panel sites: {n_total}")
+
+    # ── 1. GPL13534 probe map (hg19) ────────────────────────────────────
+    gpl_cache = _download_gpl13534(external_dir)
+    probe_map = _build_probe_map(gpl_cache) if gpl_cache else {}
+    if not probe_map:
+        logger.warning("[blood_filter] No GPL13534 probe map — cannot evaluate "
+                       "blood baseline; panel_cpg_blood_filtered.csv NOT written")
+        return {"n_total": n_total, "n_matched": 0, "n_removed": 0,
+                "n_retained": n_total}
+
+    # ── 2. Liftover hg38 → hg19, match to cg probes ─────────────────────
+    chain_path = os.path.join(external_dir, "hg38ToHg19.over.chain.gz")
+    if not os.path.exists(chain_path):
+        logger.warning(f"[blood_filter] chain file not found: {chain_path} "
+                       "— skipping (no filtered panel written)")
+        return {"n_total": n_total, "n_matched": 0, "n_removed": 0,
+                "n_retained": n_total}
+
+    chain_blocks    = _parse_chain(chain_path)
+    feature_to_probe = _match_probes(panel_features, chain_blocks, probe_map)
+    matched_probes  = {cg for cg in feature_to_probe.values() if cg}
+    n_matched       = len(matched_probes)
+    logger.info(f"[blood_filter] panel sites matched to a 450K probe: {n_matched}/{n_total}")
+
+    if not matched_probes:
+        logger.warning("[blood_filter] no panel sites matched to a 450K probe "
+                       "— filtered panel not written")
+        return {"n_total": n_total, "n_matched": 0, "n_removed": 0,
+                "n_retained": n_total}
+
+    # ── 3. Blood baseline lookup (GSE40279) ─────────────────────────────
+    gse_path = os.path.join(external_dir, "GSE40279_series_matrix.txt.gz")
+    if not os.path.exists(gse_path):
+        logger.warning(f"[blood_filter] GSE40279 not found: {gse_path} "
+                       "— filtered panel not written")
+        return {"n_total": n_total, "n_matched": n_matched,
+                "n_removed": 0, "n_retained": n_total}
+
+    blood_df = _parse_series_matrix(gse_path, matched_probes)
+    if blood_df.empty:
+        logger.warning("[blood_filter] GSE40279 returned no matching probes "
+                       "— filtered panel not written")
+        return {"n_total": n_total, "n_matched": n_matched,
+                "n_removed": 0, "n_retained": n_total}
+
+    # ── 4. Compute blood_mean_beta per site, identify fails ─────────────
+    blood_fail_sites = set()
+    blood_rows       = []
+    for feat in panel_features:
+        cg = feature_to_probe.get(feat)
+        if cg and cg in blood_df.index:
+            betas = blood_df.loc[cg].dropna().values
+            if len(betas) > 0:
+                mean_beta = round(float(np.mean(betas)), 4)
+                passed    = mean_beta < threshold
+                if not passed:
+                    blood_fail_sites.add(feat)
+                blood_rows.append({"feature": feat, "cg_probe": cg,
+                                   "blood_mean_beta": mean_beta,
+                                   "blood_pass": passed})
+                continue
+        blood_rows.append({"feature": feat, "cg_probe": cg or "",
+                           "blood_mean_beta": None, "blood_pass": None})
+
+    # ── 5. Write filtered panel + summary ───────────────────────────────
+    filtered_df    = panel_df[~panel_df["feature"].astype(str).isin(blood_fail_sites)].copy()
+    filtered_path  = os.path.join(result_dir, "panel_cpg_blood_filtered.csv")
+    filtered_df.to_csv(filtered_path, index=False)
+
+    summary_df   = pd.DataFrame(blood_rows)
+    summary_path = os.path.join(result_dir, "panel_cpg_blood_summary.csv")
+    summary_df.to_csv(summary_path, index=False)
+
+    n_removed  = len(blood_fail_sites)
+    n_retained = len(filtered_df)
+    logger.info(
+        f"[blood_filter] threshold={threshold}: {n_removed} site(s) removed, "
+        f"{n_retained}/{n_total} retained → {os.path.basename(filtered_path)}"
+    )
+    if blood_fail_sites:
+        logger.info(f"[blood_filter] removed sites: {sorted(blood_fail_sites)}")
+
+    return {
+        "n_total":    n_total,
+        "n_matched":  n_matched,
+        "n_removed":  n_removed,
+        "n_retained": n_retained,
+        "threshold":  threshold,
+    }
+
+
 def run_external_validation(result_dir: str, data_dir: str, external_dir: str):
     """
     Full P3 cross-validation pipeline.
