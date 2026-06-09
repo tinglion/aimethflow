@@ -11,6 +11,9 @@ x-analysis-volumes: &analysis-volumes
     - ${DATA_DIR:?请在 .env 中设置 DATA_DIR}:/mnt/data:ro
     - ${TEMP_DIR:?请在 .env 中设置 TEMP_DIR}:/mnt/temp
     - ${RESULT_DIR:?请在 .env 中设置 RESULT_DIR}:/mnt/result
+    # ── 受限算法包（pre-publication only；放 aimethflow_core-*.whl 即可）─────
+    # 详见 DOCKER.md → "Protected core via mounted wheel"
+    - ./private:/private:ro
   environment:
     - NCBI_API_KEY=${NCBI_API_KEY:-}
 

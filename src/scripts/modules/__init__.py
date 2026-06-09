@@ -19,8 +19,15 @@ from .methylation_utils import (
     visualize_results
 )
 from .report_utils import generate_report
-from .feature_utils import build_feature_matrix, select_features
-from .classifier_utils import run_classifiers
+
+# NOTE: `feature_utils`, `classifier_utils`, and (sibling) `external_validate`
+# are intentionally NOT re-exported here. They live in the private companion
+# package `aimethflow-core` during the pre-publication phase. Callers that
+# need them must import the full path (e.g. `from scripts.modules.feature_utils
+# import build_feature_matrix`), which triggers the stub shim's transparent
+# substitution. Top-level re-exports here would force every user of the
+# `scripts.modules` package to depend on `aimethflow-core`, breaking the
+# public-only access path for Steps 1-13, 16-18, 20.
 
 __all__ = [
     "detect_file_type",
@@ -43,7 +50,4 @@ __all__ = [
     "perform_diff_analysis",
     "visualize_results",
     "generate_report",
-    "build_feature_matrix",
-    "select_features",
-    "run_classifiers",
 ]

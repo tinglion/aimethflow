@@ -4,12 +4,20 @@ End-to-end targeted bisulfite sequencing pipeline for ovarian-cancer early-diagn
 
 ## Status — pre-publication
 
-The 3 modules `feature_utils` (5-stage feature selection), `classifier_utils` (11-model nested CV with cfDNA + CA-125 fusion), and `external_validate` (GSE40279 blood-baseline filter) are protected pending publication of the AIMethFlow paper in *iMeta* (2026) and the corresponding Chinese patent application. They are distributed as a private companion package `aimethflow-core`.
+The 3 modules `feature_utils` (5-stage feature selection), `classifier_utils` (11-model nested CV with cfDNA + CA-125 fusion), and `external_validate` (GSE40279 blood-baseline filter) are temporarily held in a separate companion package `aimethflow-core` pending publication of the AIMethFlow paper in *iMeta* (2026) and the corresponding Chinese patent application.
 
-- **Reviewers** receive access to `aimethflow-core` via the corresponding author during peer review (see `LICENSE`).
-- **All other pipeline steps (1-13, 16-18, 20)** run with the public code only.
-- **Steps 14, 15, and 19** require `pip install aimethflow-core` (private). Without it, importing those modules raises an `ImportError` with the access instructions.
-- On paper acceptance, `aimethflow-core` will be merged back into this repository under MIT.
+**Public-only access** runs Steps 1-13, 16-18, 20 end-to-end. The pipeline imports cleanly; `--list-steps` works; UMI dedup, methylation extraction, differential analysis, visualisation, subtype classification, temporal validation, and report generation all work without any private dependency. Attempting Step 14 / 15 / 19 raises a clean `ImportError` with the reviewer-access path.
+
+**Steps 14 / 15 / 19** require the `aimethflow-core` package. iMeta-assigned reviewers obtain it from the corresponding author via one of two paths:
+
+| Path | Best for | How |
+|---|---|---|
+| **A. Private GitHub collaborator** | Reviewers running locally via conda (want to step into the code) | Corresponding author adds reviewer's GitHub username as collaborator on the private `aimethflow-core` repo. Reviewer: `git clone <private-url> && pip install -e .[ml]` |
+| **B. Docker wheel mount** | Reviewers running the containerised stack | Corresponding author sends a single bytecode-only `.whl` (~48 KB). Reviewer drops it into `./private/` next to `docker-compose.yml`; the container auto-installs on startup |
+
+The public stubs at `src/scripts/modules/feature_utils.py`, `src/scripts/modules/classifier_utils.py`, and `src/scripts/external_validate.py` transparently substitute the real implementations at import time once either path is set up — no code change in this repository is needed.
+
+**On paper acceptance**, `aimethflow-core` will be merged back into this repository under MIT, the private companion archived, and this Status section retired. The protection during peer review is temporal — the algorithms are guaranteed open at publication.
 
 ## Analysis goals
 

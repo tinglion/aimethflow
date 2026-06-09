@@ -30,6 +30,24 @@ pip install -e ".[ml]" -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 `[ml]` = xgboost + lightgbm; `[jupyter]` = jupyterlab + ipykernel; `[dev]` = testing tools.
 
+### 1a. Protected core (optional, required for Steps 14 / 15 / 19)
+
+Steps 14 (feature selection), 15 (diagnostic classifiers), and 19 (external cross-validation) depend on the `aimethflow-core` package, temporarily held in a private companion GitHub repository during the pre-publication phase.
+
+**For local conda development (this guide):** iMeta-assigned reviewers receive collaborator access to the private repository from the corresponding author and install editable:
+
+```bash
+git clone https://github.com/<user>/aimethflow-core.git
+cd aimethflow-core
+pip install -e .[ml]
+```
+
+After installation the public stubs transparently substitute the real implementations at import time — no further configuration needed.
+
+**For Docker deployments:** the wheel-mount path is documented in [../DOCKER.md](../DOCKER.md) → *Protected core via mounted wheel*. Docker users do NOT need GitHub collaborator access.
+
+**Without `aimethflow-core`**: Steps 1-13, 16-18, and 20 still work end-to-end; attempting Step 14 / 15 / 19 raises an `ImportError` pointing to the corresponding author for access. See the *Status — pre-publication* section in [../README.md](../README.md) for details.
+
 ## 2. Reference genome index (first run only)
 
 ```bash

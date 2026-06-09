@@ -42,7 +42,13 @@ RUN mkdir -p src/scripts src/utils src/methylation \
 # ── 应用代码（editable 安装已通过 .pth 文件指向 /app/src，复制真实源码即可）──
 COPY src/ ./src/
 
+# ── 启动脚本：检测 /private/*.whl，自动安装 aimethflow-core（受限算法包）──
+# 见 DOCKER.md → "Protected core via mounted wheel"
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
 ENV PATH="/opt/conda/envs/meth/bin:$PATH"
 ENV PYTHONPATH=/app/src
 
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["bash"]

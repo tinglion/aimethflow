@@ -33,6 +33,31 @@ docker compose --profile jupyter up jupyter
 
 The Web UI is also auto-started in the persistent container and listens on port 9999 — see [docs/quickstart.md](docs/quickstart.md#web-ui-recommended).
 
+## Protected core via mounted wheel (pre-publication only)
+
+Steps 14 (feature selection), 15 (diagnostic classifiers), and 19 (external validation) depend on the `aimethflow-core` package, temporarily held private pending iMeta 2026 publication. See the *Status — pre-publication* section in [README.md](README.md) for context.
+
+The container ships with stubs for these 3 modules. The pipeline imports cleanly and Steps 1-13, 16-18, 20 run end-to-end without any extra setup. Attempting Step 14 / 15 / 19 without the core installed raises a clean `ImportError`.
+
+To enable the full pipeline, iMeta-assigned reviewers receive a single bytecode-only wheel `aimethflow_core-<version>-py310-none-any.whl` (~48 KB) from the corresponding author through the iMeta editorial system. Setup:
+
+```bash
+# 1. Place the wheel in a directory called `private/` next to docker-compose.yml
+mkdir -p private
+cp ~/Downloads/aimethflow_core-0.1.0-py310-none-any.whl private/
+
+# 2. (Re-)start the container; the entrypoint auto-installs the wheel on boot
+docker compose up -d
+# Or for an already-running container:
+docker compose restart analysis
+```
+
+On startup `docker-entrypoint.sh` checks for `/private/aimethflow_core-*.whl` (mounted from `./private/` on the host), pip-installs it if found, and exec's the original command. Subsequent restarts skip the install if the package is already present.
+
+Without the wheel mounted, the container still starts and runs the public pipeline normally — the entrypoint logs a one-line notice that Steps 14, 15, 19 are unavailable.
+
+The `private/` directory is gitignored. Do not commit the wheel.
+
 ## Design decisions
 
 | Item | Decision |

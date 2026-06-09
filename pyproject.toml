@@ -10,7 +10,9 @@ readme = "README.md"
 requires-python = ">=3.10,<3.11"
 license = {text = "MIT"}
 authors = [
-  {name = "甲基化分析团队"}
+  {name = "Ting Liu",  email = "lt.leuting@gmail.com"},
+  {name = "Qian Hu",   email = "crist.qian.hu@gmail.com"},
+  {name = "Hui Xu",    email = "444394@qq.com"},
 ]
 keywords = ["methylation", "bioinformatics", "sequencing", "DNA"]
 classifiers = [
@@ -44,11 +46,12 @@ ml = [
   "xgboost>=2.0.0",
   "lightgbm>=4.0.0",
 ]
-# Protected core algorithms (Steps 14, 15, 19) — private during pre-publication
-# Reviewers receive access to `aimethflow-core` via the corresponding author.
-core = [
-  "aimethflow-core>=0.1.0",
-]
+# Protected core algorithms (Steps 14, 15, 19) — private during pre-publication.
+# The `aimethflow-core` package is NOT distributed via PyPI. It is delivered as a
+# single bytecode-only wheel (~48 KB) to authorised reviewers via the corresponding
+# author through the iMeta editorial system. Install with:
+#     pip install aimethflow_core-<version>-py310-none-any.whl
+# See the "Status — pre-publication" section in README.md for details.
 # Jupyter 查看结果
 jupyter = [
   "jupyterlab>=4.0.0",
