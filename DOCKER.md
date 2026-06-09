@@ -42,9 +42,8 @@ The container ships with stubs for these 3 modules. The pipeline imports cleanly
 To enable the full pipeline, iMeta-assigned reviewers receive a single bytecode-only wheel `aimethflow_core-<version>-py310-none-any.whl` (~48 KB) from the corresponding author through the iMeta editorial system. Setup:
 
 ```bash
-# 1. Place the wheel in a directory called `private/` next to docker-compose.yml
-mkdir -p private
-cp ~/Downloads/aimethflow_core-0.1.0-py310-none-any.whl private/
+# 1. Drop the wheel into the docs/ directory (next to README.md, installation.md, ...)
+cp ~/Downloads/aimethflow_core-0.1.0-py310-none-any.whl docs/
 
 # 2. (Re-)start the container; the entrypoint auto-installs the wheel on boot
 docker compose up -d
@@ -52,11 +51,11 @@ docker compose up -d
 docker compose restart analysis
 ```
 
-On startup `docker-entrypoint.sh` checks for `/private/aimethflow_core-*.whl` (mounted from `./private/` on the host), pip-installs it if found, and exec's the original command. Subsequent restarts skip the install if the package is already present.
+On startup `docker-entrypoint.sh` checks for `/docs/aimethflow_core-*.whl` (mounted read-only from `./docs/` on the host), pip-installs it if found, and exec's the original command. Subsequent restarts skip the install if the package is already present.
 
 Without the wheel mounted, the container still starts and runs the public pipeline normally — the entrypoint logs a one-line notice that Steps 14, 15, 19 are unavailable.
 
-The `private/` directory is gitignored. Do not commit the wheel.
+The `docs/` directory is gitignored (only the English documentation files listed in `git ls-files docs/` are tracked). The wheel will NOT be committed.
 
 ## Design decisions
 

@@ -53,5 +53,3 @@ docs
 .claude
 config.toml
 MIGRATION_NOTES.md
-# Reviewer's mounted protected-core wheel — never commit this
-private/
