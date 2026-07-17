@@ -698,6 +698,7 @@ outputs: <code>classifier_summary.csv</code>, <code>classifier_predictions.csv</
     # ── Section 12: Temporal Split Validation (Step 17, plasma only) ──
     tv_sum_path  = os.path.join(result_dir, "temporal_validation_summary.csv")
     tv_pred_path = os.path.join(result_dir, "temporal_validation_predictions.csv")
+    tv_roc_src   = _copy_img(os.path.join(result_dir, "temporal_roc_curve.png"), imgs_dir)
     tv_records   = _read_csv_safe(tv_sum_path)
 
     if tv_records is not None:
@@ -794,6 +795,15 @@ outputs: <code>classifier_summary.csv</code>, <code>classifier_predictions.csv</
             low_ca_html = ""
             clf_data["temporal_validation_lowca125"] = None
 
+        tv_roc_block = (
+            f"<div style=\"margin-top:14px\"><h3>Validation ROC Curves</h3>"
+            f"{_img_tag(tv_roc_src, 'Temporal Validation ROC')}"
+            f"<p style=\"color:#666;font-size:.83em\">"
+            f"Same colour / linestyle scheme as the Step 15 CV ROC: solid = cfDNA-only model, "
+            f"dotted = the same model fused with CA-125, dashed grey = CA-125 baseline alone. "
+            f"AUC point estimate with 95% bootstrap CI in brackets where available.</p></div>"
+        ) if tv_roc_src else ""
+
         sec12_html = f"""
 <div class="section">
 <h2>Step 17. Temporal Split Validation (plasma mode)</h2>
@@ -808,10 +818,12 @@ outputs: <code>classifier_summary.csv</code>, <code>classifier_predictions.csv</
       <th>AUC</th><th>Accuracy</th><th>Sensitivity</th><th>Specificity</th></tr>
   {tv_rows}
 </table>
+{tv_roc_block}
 {low_ca_html}
 <p style="color:#666;font-size:.83em">
   Outputs: <code>temporal_validation_summary.csv</code>,
-  <code>temporal_validation_predictions.csv</code>
+  <code>temporal_validation_predictions.csv</code>,
+  <code>temporal_roc_curve.png</code>
 </p>
 </div>"""
         clf_data["temporal_validation"] = tv_records

@@ -46,6 +46,12 @@ docker compose exec analysis \
 # Web UI: http://<server-ip>:9999
 ```
 
+```bash
+docker pull
+docker tag aimethflow:v1.0.0 aimethflow:latest
+docker compose up -d                                        # persistent container
+```
+
 See [DOCKER.md](DOCKER.md) for the full Docker reference, or [docs/installation.md](docs/installation.md) for Conda / local-development setup.
 
 ## Documentation

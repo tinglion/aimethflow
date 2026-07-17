@@ -46,6 +46,77 @@ from scripts.modules.classifier_utils import (
 )
 
 
+def _save_temporal_roc_plot(results, result_dir, cutoff, n_train, n_validation):
+    """Plot the temporal-validation ROC curves; same colour / linestyle scheme as
+    the Step 15 _save_roc_plot so the two figures can be compared at a glance.
+
+    cfDNA-only models = solid; *+CA125 fusion = dotted (same base colour);
+    CA-125 baseline = dashed grey.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from sklearn.metrics import roc_curve
+    matplotlib.rcParams.update({"font.family": "DejaVu Sans"})
+
+    colors = {
+        "LR":     "#2196F3",
+        "SVM":    "#4CAF50",
+        "RF":     "#FF5722",
+        "XGB":    "#9C27B0",
+        "LGBM":   "#FF9800",
+        "CA-125": "#555555",
+    }
+
+    def _style(clf_name):
+        if clf_name == "CA-125":
+            return colors["CA-125"], "--", 1.5
+        if clf_name.endswith("+CA125"):
+            base = clf_name.split("+", 1)[0]
+            return colors.get(base, "gray"), ":", 2.5
+        return colors.get(clf_name, "gray"), "-", 2
+
+    fig, ax = plt.subplots(figsize=(8, 7))
+    for clf_name, res in results.items():
+        y_true = res.get("y_true")
+        y_prob = res.get("y_prob")
+        if y_true is None or y_prob is None or len(y_true) < 2:
+            continue
+        if len(set(y_true)) < 2:
+            continue
+        fpr, tpr, _ = roc_curve(y_true, y_prob)
+        ci = res.get("ci", {}) or {}
+        auc_ci = ci.get("auc", (None, None))
+        auc_val = res.get("auc")
+        if auc_val is None:
+            continue
+        if auc_ci[0] is not None and auc_ci[1] is not None:
+            lbl = f"{clf_name} (AUC={auc_val:.3f} [{auc_ci[0]:.3f}–{auc_ci[1]:.3f}])"
+        else:
+            lbl = f"{clf_name} (AUC={auc_val:.3f})"
+        c, ls, lw = _style(clf_name)
+        ax.plot(fpr, tpr, label=lbl, color=c, lw=lw, linestyle=ls)
+
+    ax.plot([0, 1], [0, 1], "k--", lw=1, alpha=0.5)
+    ax.set_xlabel("False Positive Rate (1 − Specificity)")
+    ax.set_ylabel("True Positive Rate (Sensitivity)")
+    ax.set_title(f"Temporal Validation ROC (train n={n_train} before {cutoff.date()}; "
+                 f"validation n={n_validation} on/after)")
+    n_curves = len(results)
+    ax.legend(loc="lower right",
+              fontsize=8 if n_curves > 6 else 9,
+              ncol=2 if n_curves > 7 else 1)
+    ax.grid(alpha=0.3)
+    ax.set_xlim([-0.02, 1.02])
+    ax.set_ylim([-0.02, 1.02])
+
+    roc_path = os.path.join(result_dir, "temporal_roc_curve.png")
+    fig.savefig(roc_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    logger.info(f"[temporal] ROC curve saved: {roc_path}")
+    return roc_path
+
+
 def run_temporal_validation(workdir, result_dir, config, benign_samples, malignant_samples,
                             borderline_samples=None):
     """
@@ -488,6 +559,9 @@ def run_temporal_validation(workdir, result_dir, config, benign_samples, maligna
     pred_path = os.path.join(result_dir, "temporal_validation_predictions.csv")
     pred_df.to_csv(pred_path, index=False)
     logger.info(f"[temporal] Predictions saved: {pred_path}")
+
+    # 9b. Save ROC curve for the validation set — same visual scheme as Step 15
+    _save_temporal_roc_plot(results, result_dir, CUTOFF, len(train_idx), len(test_idx))
 
     # 10. Save summary
     def _r(v, n=4):

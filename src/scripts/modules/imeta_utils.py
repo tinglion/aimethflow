@@ -8,7 +8,7 @@ Module organisation:
     I/O helpers           _read_csv, _read_config, _savefig, _mpl
     Pipeline context      _PipelineContext, _load_context — cohort metadata read once
     DeLong inference      _fastdelong_cov, _delong_formal, _delong_bootstrap
-    Figure builders       _fig3_roc, _fig4_clf_comparison, _fig5_temporal,
+    Figure builders       _fig3_combined, _fig5_temporal,
                           _fig2b_panel_annotation, _fig6b_blood_dist
     Public API            generate_imeta_figures, build_imeta_section
 """
@@ -443,96 +443,7 @@ def _delong_bootstrap(clf_pred_path: str, out_csv_path: str,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Figure 3 — Multi-classifier ROC (two panels: cfDNA-only vs fusion)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _plot_roc_panel(ax, df, models: Iterable[str], baseline: Optional[str] = None,
-                    n_boot: int = BOOTSTRAP_N) -> int:
-    """Plot ROC curves for the requested models on the given axis.
-
-    ``baseline`` is plotted with a dashed style to distinguish it from the model
-    group (used for CA-125 alone). Returns the number of curves drawn.
-    """
-    from sklearn.metrics import roc_curve, auc as sk_auc
-
-    plotted = 0
-    rng = np.random.default_rng(DEFAULT_SEED)
-
-    def _curve_with_ci(clf, sub, dashed: bool):
-        nonlocal plotted
-        y_true = (sub["true_label"] == "malignant").astype(int).values
-        y_prob = sub["prob_malignant"].astype(float).values
-        fpr, tpr, _ = roc_curve(y_true, y_prob)
-        auc_val = sk_auc(fpr, tpr)
-
-        boot = []
-        for _ in range(n_boot):
-            idx = rng.integers(0, len(y_true), len(y_true))
-            if len(np.unique(y_true[idx])) < 2:
-                continue
-            f, t, _ = roc_curve(y_true[idx], y_prob[idx])
-            boot.append(sk_auc(f, t))
-        ci_lo, ci_hi = (np.percentile(boot, [2.5, 97.5]) if boot
-                        else (float("nan"), float("nan")))
-
-        style = "--" if dashed else "-"
-        ax.plot(fpr, tpr,
-                color=CLF_COLORS.get(clf, "#444"),
-                lw=2, linestyle=style,
-                label=f"{clf}  AUC={auc_val:.3f} ({ci_lo:.3f}–{ci_hi:.3f})")
-        plotted += 1
-
-    for clf in models:
-        sub = df[df["classifier"] == clf]
-        if not sub.empty:
-            _curve_with_ci(clf, sub, dashed=False)
-
-    if baseline is not None:
-        sub = df[df["classifier"] == baseline]
-        if not sub.empty:
-            _curve_with_ci(baseline, sub, dashed=True)
-
-    return plotted
-
-
-def _fig3_roc(clf_pred_path: str, out_path: str, ctx: _PipelineContext) -> Optional[bool]:
-    plt = _mpl()
-    df = _read_csv(clf_pred_path)
-    if df is None:
-        return None
-
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6), sharey=True)
-
-    n_left  = _plot_roc_panel(axes[0], df, CFDNA_ONLY,    baseline=CA125_ALONE)
-    n_right = _plot_roc_panel(axes[1], df, FUSION_MODELS, baseline=CA125_ALONE)
-
-    if n_left == 0 and n_right == 0:
-        plt.close(fig)
-        return None
-
-    for ax, title in zip(axes,
-                         [f"A. cfDNA-only models + CA-125 baseline",
-                          f"B. cfDNA + CA-125 fusion models + CA-125 baseline"]):
-        ax.plot([0, 1], [0, 1], "k:", lw=1, alpha=0.4)
-        ax.set_xlim([0, 1]); ax.set_ylim([0, 1.02])
-        ax.set_xlabel("1 − Specificity (False Positive Rate)", fontsize=11)
-        ax.set_title(title, fontsize=11, fontweight="bold")
-        ax.legend(loc="lower right", fontsize=8.5, framealpha=0.9)
-        ax.grid(alpha=0.25)
-    axes[0].set_ylabel("Sensitivity (True Positive Rate)", fontsize=11)
-
-    fig.suptitle(
-        f"Figure 3 — Binary Classification ROC ({ctx.cv_caption()}; "
-        f"95% CI from {BOOTSTRAP_N}-resample bootstrap)",
-        fontsize=12, fontweight="bold", y=1.02,
-    )
-    fig.tight_layout()
-    _savefig(fig, out_path)
-    return True
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Figure 4 — Eleven-model metric comparison (cfDNA-only vs CA-125+fusion)
+# Figure 3 — Binary classification performance (merged: ROC + headline metrics)
 # ─────────────────────────────────────────────────────────────────────────────
 
 _METRIC_SPEC = [
@@ -542,61 +453,118 @@ _METRIC_SPEC = [
     ("specificity", "spec_ci95_lo", "spec_ci95_hi", "Specificity"),
 ]
 
+def _fig3_combined(clf_pred_path: str, clf_sum_path: str, out_path: str,
+                   ctx: _PipelineContext) -> Optional[bool]:
+    """Merged version of the previous Figure 3 (ROC) + Figure 4 (bar chart).
 
-def _plot_metric_panel(ax, df, models: Iterable[str], title: str) -> int:
-    """Grouped bar chart of (AUC, Accuracy, Sensitivity, Specificity) per model."""
-    clfs = [c for c in models if c in df["classifier"].values]
-    if not clfs:
-        return 0
+    Left panel — ROC curves for all eleven models on a single axis with line-style
+    distinction: cfDNA-only solid, CA-125 alone dashed black, fusion (cfDNA +
+    CA-125) dotted in the cfDNA base colour.
 
-    x = np.arange(len(_METRIC_SPEC))
-    n = len(clfs)
-    width = 0.9 / n
-    offsets = np.linspace(-(n - 1) / 2, (n - 1) / 2, n) * width
-
-    for i, clf in enumerate(clfs):
-        row = df[df["classifier"] == clf].iloc[0]
-        vals = [float(row.get(m, 0))  for m, *_ in _METRIC_SPEC]
-        lo   = [float(row.get(l, v))  for (m, l, h, _), v in zip(_METRIC_SPEC, vals)]
-        hi   = [float(row.get(h, v))  for (m, l, h, _), v in zip(_METRIC_SPEC, vals)]
-        yerr = [[v - lo_i for v, lo_i in zip(vals, lo)],
-                [hi_i - v for v, hi_i in zip(vals, hi)]]
-        ax.bar(x + offsets[i], vals, width, yerr=yerr,
-               color=CLF_COLORS.get(clf, "#777"), alpha=0.85, capsize=2.5,
-               label=clf, error_kw={"elinewidth": 1.0, "ecolor": "#555"})
-
-    ax.set_xticks(x)
-    ax.set_xticklabels([m[-1] for m in _METRIC_SPEC], fontsize=11)
-    ax.set_ylim([0, 1.15])
-    ax.axhline(0.5, color="#bbb", lw=1, ls="--", alpha=0.6)
-    ax.set_title(title, fontsize=11, fontweight="bold")
-    ax.legend(loc="upper right", fontsize=8, ncol=min(n, 3))
-    ax.grid(axis="y", alpha=0.2)
-    return len(clfs)
-
-
-def _fig4_clf_comparison(clf_sum_path: str, out_path: str,
-                         ctx: _PipelineContext) -> Optional[bool]:
+    Right panel — grouped bar chart of the four headline metrics (AUC, Accuracy,
+    Sensitivity, Specificity) for the same eleven models with 95% bootstrap CIs.
+    Fusion bars are drawn with a `//` hatch so they remain distinguishable from
+    their cfDNA-only counterpart of the same base colour.
+    """
     plt = _mpl()
-    df = _read_csv(clf_sum_path)
-    if df is None:
+    pred_df = _read_csv(clf_pred_path)
+    sum_df  = _read_csv(clf_sum_path)
+    if pred_df is None or sum_df is None:
         return None
 
-    fig, axes = plt.subplots(1, 2, figsize=(15, 5), sharey=True)
-    n_left  = _plot_metric_panel(axes[0], df, CFDNA_ONLY,
-                                 title="A. cfDNA-only models")
-    n_right = _plot_metric_panel(axes[1], df, [CA125_ALONE] + FUSION_MODELS,
-                                 title="B. CA-125 baseline + cfDNA + CA-125 fusion")
+    fig, (ax_roc, ax_bar) = plt.subplots(1, 2, figsize=(16, 6.5))
 
-    if n_left == 0 and n_right == 0:
+    # ── Left panel: ROC for all 11 models on one axis ──
+    from sklearn.metrics import roc_curve, auc as sk_auc
+    rng = np.random.default_rng(DEFAULT_SEED)
+
+    def _style(clf):
+        if clf == CA125_ALONE:
+            return CLF_COLORS[CA125_ALONE], "--", 1.5
+        if clf.endswith("+CA125"):
+            return CLF_COLORS[clf], ":", 2.2
+        return CLF_COLORS[clf], "-", 2.0
+
+    plotted = 0
+    for clf in ALL_MODELS:
+        sub = pred_df[pred_df["classifier"] == clf]
+        if sub.empty:
+            continue
+        y_true = (sub["true_label"] == "malignant").astype(int).values
+        y_prob = sub["prob_malignant"].astype(float).values
+        if len(set(y_true)) < 2:
+            continue
+        fpr, tpr, _ = roc_curve(y_true, y_prob)
+        auc_val = sk_auc(fpr, tpr)
+        boot = []
+        for _ in range(BOOTSTRAP_N):
+            idx = rng.integers(0, len(y_true), len(y_true))
+            if len(np.unique(y_true[idx])) < 2:
+                continue
+            f, t, _ = roc_curve(y_true[idx], y_prob[idx])
+            boot.append(sk_auc(f, t))
+        ci_lo, ci_hi = (np.percentile(boot, [2.5, 97.5]) if boot
+                        else (float("nan"), float("nan")))
+        c, ls, lw = _style(clf)
+        ax_roc.plot(fpr, tpr, color=c, lw=lw, linestyle=ls,
+                    label=f"{clf}  AUC={auc_val:.3f} ({ci_lo:.3f}–{ci_hi:.3f})")
+        plotted += 1
+
+    if plotted == 0:
         plt.close(fig)
         return None
 
-    axes[0].set_ylabel("Score", fontsize=11)
+    ax_roc.plot([0, 1], [0, 1], "k:", lw=1, alpha=0.4)
+    ax_roc.set_xlim([0, 1]); ax_roc.set_ylim([0, 1.02])
+    ax_roc.set_xlabel("1 − Specificity (False Positive Rate)", fontsize=11)
+    ax_roc.set_ylabel("Sensitivity (True Positive Rate)", fontsize=11)
+    ax_roc.set_title("A. ROC curves (all eleven models)",
+                     fontsize=11, fontweight="bold")
+    ax_roc.legend(loc="lower right", fontsize=7.5, framealpha=0.92, ncol=1)
+    ax_roc.grid(alpha=0.25)
+
+    # ── Right panel: grouped bar chart of headline metrics ──
+    clfs_present = [c for c in ALL_MODELS if c in sum_df["classifier"].values]
+    if not clfs_present:
+        plt.close(fig)
+        return None
+
+    x = np.arange(len(_METRIC_SPEC))
+    n = len(clfs_present)
+    width = 0.9 / n
+    offsets = np.linspace(-(n - 1) / 2, (n - 1) / 2, n) * width
+
+    for i, clf in enumerate(clfs_present):
+        row = sum_df[sum_df["classifier"] == clf].iloc[0]
+        vals = [float(row.get(m, 0)) for m, *_ in _METRIC_SPEC]
+        lo = [float(row.get(l, v)) for (m, l, h, _), v in zip(_METRIC_SPEC, vals)]
+        hi = [float(row.get(h, v)) for (m, l, h, _), v in zip(_METRIC_SPEC, vals)]
+        yerr = [[v - lo_i for v, lo_i in zip(vals, lo)],
+                [hi_i - v for v, hi_i in zip(vals, hi)]]
+        is_fusion = clf.endswith("+CA125")
+        ax_bar.bar(x + offsets[i], vals, width, yerr=yerr,
+                   color=CLF_COLORS.get(clf, "#777"),
+                   alpha=0.85, capsize=1.5,
+                   label=clf,
+                   hatch="//" if is_fusion else None,
+                   edgecolor="#222" if is_fusion else "none",
+                   linewidth=0.4,
+                   error_kw={"elinewidth": 0.8, "ecolor": "#555"})
+
+    ax_bar.set_xticks(x)
+    ax_bar.set_xticklabels([m[-1] for m in _METRIC_SPEC], fontsize=11)
+    ax_bar.set_ylim([0, 1.15])
+    ax_bar.axhline(0.5, color="#bbb", lw=1, ls="--", alpha=0.6)
+    ax_bar.set_title("B. Headline metrics (95% bootstrap CI)",
+                     fontsize=11, fontweight="bold")
+    ax_bar.set_ylabel("Score", fontsize=11)
+    ax_bar.legend(loc="upper right", fontsize=7.5, ncol=3, framealpha=0.9)
+    ax_bar.grid(axis="y", alpha=0.2)
+
     fig.suptitle(
-        f"Figure 4 — Classifier Performance ({ctx.cv_caption()}; "
-        f"95% bootstrap CI)",
-        fontsize=12, fontweight="bold", y=1.02,
+        f"Figure 3 — Binary Classification Performance "
+        f"({ctx.cv_caption()}; 95% bootstrap CI on AUC and metrics)",
+        fontsize=12.5, fontweight="bold", y=1.02,
     )
     fig.tight_layout()
     _savefig(fig, out_path)
@@ -1309,10 +1277,8 @@ def generate_imeta_figures(result_dir: str, report_dir: str) -> dict:
     ext_val  = os.path.join(result_dir, "external_validation.csv")
 
     figs = [
-        ("fig3_roc",    _fig3_roc,
-         (clf_pred,                       os.path.join(imgs_dir, "imeta_fig3_roc.png"),       ctx)),
-        ("fig4_clf",    _fig4_clf_comparison,
-         (clf_sum,                        os.path.join(imgs_dir, "imeta_fig4_clf.png"),       ctx)),
+        ("fig3_combined", _fig3_combined,
+         (clf_pred, clf_sum,              os.path.join(imgs_dir, "imeta_fig3_combined.png"),  ctx)),
         ("fig4b_delta", _fig4b_fusion_delta,
          (clf_sum,                        os.path.join(imgs_dir, "imeta_fig4b_delta.png"),    ctx)),
         ("fig4c_gain",  _fig4c_spec_gain,
@@ -1618,17 +1584,14 @@ def build_imeta_section(result_dir: str, imgs_dir: str) -> str:
         + _src("panel_annotation.csv", "Step 18 — annotate")
     )
     fig3_cap = (
-        f"ROC curves for the eleven evaluated models under {cv_n}. "
-        f"Panel A: five cfDNA-only classifiers (LR, SVM, RF, XGB, LGBM) with CA-125 alone as dashed baseline. "
-        f"Panel B: five cfDNA + CA-125 fusion models with the same CA-125 dashed baseline. "
-        f"AUC and 95% CIs from {BOOTSTRAP_N:,}-resample bootstrap."
-        + _src("classifier_predictions.csv", "Step 15 — classify")
-    )
-    fig4_cap = (
-        f"AUC, accuracy, sensitivity, and specificity for each classifier ({cv_n}). "
-        f"Panel A: cfDNA-only models; Panel B: CA-125 baseline + cfDNA + CA-125 fusion models. "
-        f"Error bars = 95% bootstrap CI ({BOOTSTRAP_N:,} resamples)."
-        + _src("classifier_summary.csv", "Step 15 — classify")
+        f"Combined binary-classification performance for the eleven evaluated models under {cv_n}. "
+        f"Panel A (left): ROC curves on a single axis with line-style distinction — "
+        f"cfDNA-only classifiers (LR, SVM, RF, XGB, LGBM) drawn solid, CA-125 alone as dashed black baseline, "
+        f"and cfDNA + CA-125 fusion models drawn dotted in the cfDNA base colour. "
+        f"Panel B (right): grouped bar chart of the four headline metrics (AUC, Accuracy, Sensitivity, Specificity) "
+        f"for the same eleven models; fusion bars use a `/` hatch to remain distinguishable from their cfDNA-only "
+        f"counterpart of the same base colour. AUC and metric CIs from {BOOTSTRAP_N:,}-resample bootstrap."
+        + _src("classifier_predictions.csv + classifier_summary.csv", "Step 15 — classify")
     )
     fig4b_cap = (
         f"Paired marginal value of CA-125 fusion for each base classifier ({cv_n}). "
@@ -1691,8 +1654,7 @@ def build_imeta_section(result_dir: str, imgs_dir: str) -> str:
   <table style="width:100%;margin-top:6px;font-size:.95em">
     <tr><th style="text-align:left">Figure</th><th style="text-align:left">Source CSV</th><th style="text-align:left">Pipeline step</th></tr>
     <tr><td>Figure 2B</td><td><code>panel_annotation.csv</code></td><td>Step 18 — annotate</td></tr>
-    <tr><td>Figure 3</td><td><code>classifier_predictions.csv</code></td><td>Step 15 — classify</td></tr>
-    <tr><td>Figure 4</td><td><code>classifier_summary.csv</code></td><td>Step 15 — classify</td></tr>
+    <tr><td>Figure 3</td><td><code>classifier_predictions.csv</code> + <code>classifier_summary.csv</code></td><td>Step 15 — classify</td></tr>
     <tr><td>Figure 4B</td><td><code>classifier_summary.csv</code></td><td>Step 15 — classify</td></tr>
     <tr><td>Figure 4C</td><td><code>classifier_summary.csv</code></td><td>Step 15 — classify</td></tr>
     <tr><td>Figure 4D + full DeLong tables</td><td><code>imeta_delong_test.csv</code>, <code>imeta_delong_formal.csv</code></td><td>Step 20 — derived from classifier_predictions.csv (Step 15)</td></tr>
@@ -1716,11 +1678,8 @@ def build_imeta_section(result_dir: str, imgs_dir: str) -> str:
 <h3>Figure 2B — Panel CpG Site Annotation</h3>
 {_img_block("fig2b_panel", "Panel Annotation", "Figure 2B", fig2b_cap)}
 
-<h3 style="margin-top:22px">Figure 3 — Binary Classification ROC Curves (eleven-model comparison)</h3>
-{_img_block("fig3_roc", "ROC Curves", "Figure 3", fig3_cap)}
-
-<h3 style="margin-top:22px">Figure 4 — Classifier Performance Comparison</h3>
-{_img_block("fig4_clf", "Classifier Comparison", "Figure 4", fig4_cap)}
+<h3 style="margin-top:22px">Figure 3 — Binary Classification Performance (ROC + headline metrics, eleven-model comparison)</h3>
+{_img_block("fig3_combined", "Binary Classification Performance", "Figure 3", fig3_cap)}
 
 <h3 style="margin-top:22px">Figure 4B — Marginal Value of CA-125 Fusion (paired Δ per base classifier)</h3>
 {_img_block("fig4b_delta", "Fusion vs cfDNA-only paired delta", "Figure 4B", fig4b_cap)}

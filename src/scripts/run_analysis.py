@@ -473,7 +473,7 @@ def main():
         fastq_files = state.get("fastq_files", [])
         bam_files_input = []
         methylation_files_input = []
-        if not fastq_files and (not single_step or single_step in _STEPS_NEED_FASTQ):
+        if not fastq_files and (not args.step or args.step in _STEPS_NEED_FASTQ):
             logger.error("No input files provided and no fastq_files recorded in workdir state")
             return
 
