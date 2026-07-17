@@ -1,0 +1,286 @@
+# AIMethFlow configuration file
+# Project name
+name = "AIMethFlow"
+version = "1.0.0"
+
+# Data directory configuration
+[data]
+# Root data directory
+root_dir = "/mnt"
+# Tissue sample data directory
+tissue_dir = "/mnt/OC_tissue"
+# Plasma sample data directory
+plasma_dir = "/mnt/OC_plasma"
+# Sample info Excel file path
+sample_info_excel = "ovarian_fq_series_samples_v4.xlsx"
+# Plasma sample collection-date Excel (used by Step 17 temporal_validate; columns: case_id, datetime as YYYYMMDD)
+plasma_exp_excel = "/mnt/data/plasma_exp.xlsx"
+# Probe panel BED file path
+probe_panel_bed = "panel_B10308.bed"
+# probe_panel_bed = "panel_P10001.bed"
+# Candidate regions file path
+candidate_regions = "OC_tissue_88_regions.hg38.txt"
+
+# Directory configuration
+[directories]
+# Temporary file directory
+temp_dir = "/mnt/temp"
+# Results file directory
+result_dir = "/mnt/result"
+# Log file directory
+log_dir = "/mnt/result/logs"
+# Reference data file directory
+data_dir = "/mnt/data"
+
+# FastQ analysis configuration
+[fastq]
+# Progress display interval (number of reads processed)
+progress_interval = 1000000
+# Sampling size
+sample_size = 1000
+# Random seed
+random_seed = 42
+
+# Methylation extraction configuration
+[extraction]
+# Minimum methylation quality score
+min_quality = 20
+# Minimum coverage depth
+min_depth = 10
+# Reference genome path
+reference_genome = "/mnt/ref/hg38.fa"
+
+# Differential methylation analysis configuration
+[diff_methylation]
+# Methylation difference threshold
+threshold = 0.2
+# Statistical significance level
+p_value = 0.05
+# Minimum coverage depth
+min_depth = 20
+
+# Visualization configuration
+[visualization]
+# Plot types: density, scatter, heatmap
+plot_types = ["density", "scatter", "heatmap"]
+# Figure width
+fig_width = 12
+# Figure height
+fig_height = 8
+# DPI
+dpi = 300
+# Font size
+font_size = 12
+
+# Methylation data filtering configuration
+[filtering]
+# Repeat element BED file path
+repeat_bed = "/mnt/ref/hg38.repeat.bed"
+# Promoter region BED file path
+promoter_bed = "/mnt/ref/hg38_upstream_2k_st.bed.gz"
+# Minimum depth
+min_depth = 5
+# Maximum depth
+max_depth = 50
+
+# Tissue sample targeted methylation analysis configuration
+[tissue]
+# Aligner: "bismark" / "bwameth" (configured independently from [plasma] aligner)
+aligner = "bwameth"
+# Sheet name in sample info Excel (used for benign/malignant grouping)
+excel_sheet = "tissue"
+
+# Plasma cfDNA targeted methylation analysis configuration
+[plasma]
+# Aligner: "bismark" (accurate, slow — use for initial validation or when OT/OB directionality report is needed)
+#          "bwameth" (3–5x faster, recommended for batch analysis of 100+ samples)
+aligner = "bwameth"
+# Sheet name in sample info Excel (used for benign/malignant grouping)
+excel_sheet = "plasma"
+# UMI settings (R2 5' end 6N)
+umi_length = 6
+umi_location = "read2"
+# Trimming parameters
+trim_front1 = 12        # R1 5' trimmed bases (low-complexity oligonucleotide)
+trim_front2 = 12        # R2 5' trimmed bases (oligonucleotide after UMI extraction)
+trim_tail2 = 5          # R2 3' trimmed bases (poly-C bias; adjust based on M-bias plot)
+min_length = 35         # Minimum read length after filtering
+min_quality = 20        # Minimum base quality Q value
+# Alignment parameters
+non_directional = false # Single-strand library directionality (adjust after M-bias confirmation)
+# MethylDackel extract positional bias correction
+# Format: "R1_5,R1_3,R2_5,R2_3" — number of bases to SKIP (trim) from each read end
+# Options:
+#   "auto"    — read from mbias_auto_trim.json written by --step mbias (recommended)
+#   "0,0,0,0" — no clipping (safe default when mbias has not been run)
+#   explicit  — e.g. "0,0,0,39"; always used as-is, mbias_auto_trim.json is ignored
+#
+# Format note: MethylDackel mbias outputs INCLUSION POSITIONS (--OT a,b,c,d),
+# not skip counts. The pipeline converts them automatically:
+#   5' skip = position directly  (e.g. R2_start=17 → skip 17)
+#   3' skip = read_len - pos - 1 (e.g. R2_end=110, read_len=150 → skip 39)
+# Read length is detected from the BAM and stored in mbias_auto_trim.json.
+nOT = "auto"            # OT strand (e.g. --OT 0,0,0,110 + read_len=150 → nOT "0,0,0,39")
+nOB = "auto"            # OB strand (e.g. --OB 0,0,17,0 → nOB "0,0,17,0")
+# Percentile used when aggregating trim suggestions across samples (default 95).
+# Lower = more inclusive (fewer bases trimmed); higher = more conservative.
+# Use 50 for median (least affected by outliers), 100 for max (most conservative).
+mbias_trim_percentile = 50
+# Alignment quality filter
+min_mapq = 40
+# Region coverage depth filter
+min_cpg_per_region = 3
+min_reads_per_region = 5
+# Methylated read threshold (Strategy B, consistent with tissue)
+methylated_read_threshold = 0.60
+low_confidence_threshold = 0.40
+# Differential analysis thresholds
+diff_p_value = 0.05
+diff_delta_beta = 0.10
+
+# Parallel thread/process configuration (all multi-threading settings managed here)
+[threads]
+# fastp QC thread count
+fastp = 8
+# bwameth/bwa-mem alignment thread count
+bwameth = 8
+# samtools sort thread count (-@ parameter; actual threads used = sort_threads + 1)
+samtools_sort = 4
+# samtools sort per-thread memory limit
+samtools_sort_mem = "8G"
+# MethylDackel thread count (mbias / extract)
+methyldackel = 4
+# umi_tools dedup does not support multi-threading; this setting is reserved
+umi_tools = 1
+
+# Tool path configuration
+[tools]
+# bin directory of the conda meth environment (PATH does not include conda env in non-interactive bash; must be specified explicitly)
+conda_env_bin = "/opt/conda/envs/meth/bin"
+# umi_tools fallback path (if not available in meth env, fall back to base env)
+umi_tools_fallback = "/opt/conda/envs/meth/bin/umi_tools"
+
+# Intermediate file cleanup strategy (whether to delete outputs from the previous step after each step completes)
+# All retained by default to reduce re-run cost; enable as needed when disk space is tight
+[cleanup]
+# After dedup completes, delete sorted BAM from align step (*.bwameth_pe.sorted.bam)
+delete_after_dedup = false
+# After target completes, delete dedup-generated BAM (*.dedup.bam)
+delete_after_target = false
+
+# Machine learning classifier configuration (Step 14 feature selection + Step 15 diagnostic classification)
+[ml]
+# Feature selection mode: "union" (union of LASSO and RF, default) / "lasso" / "rf"
+feature_selection_mode = "union"
+# Minimum coverage threshold: DMC sites are retained only if covered in >= this fraction of samples (0–1)
+min_feature_coverage = 0.5
+# Sample-level Wilcoxon pre-filtering threshold (applied before LASSO/RF to filter spuriously high |Δβ| sites from merged bedGraph comparison)
+# diff_methylation.txt reflects merged-group bedGraph comparison; within-group noise is averaged out, inflating |Δβ|.
+# A secondary filter using individual-sample Mann-Whitney U test is applied here.
+sample_wilcox_p   = 0.05   # p-value threshold (non-88-region sites, standard) 0.05
+sample_delta_beta = 0.10   # Sample-level |Δβ| threshold (non-88-region sites, standard)
+sample_wilcox_p_88   = 0.05   # p-value threshold (sites within 88 tissue candidate regions, relaxed prior)
+sample_delta_beta_88 = 0.1   # |Δβ| threshold (sites within 88 tissue candidate regions, relaxed prior)
+# Maximum number of input features for the classifier (0 = no limit; recommend ~n_samples/10 to prevent overfitting)
+# 120 samples → recommend 10–20; when limit is exceeded, retain top-N by combined LASSO+RF score
+max_features_clf = 20
+# Classifier cross-validation strategy for Step 15 (classify)
+# 0 = Leave-One-Out CV (maximally data-efficient; slow on large cohorts)
+# k > 0 = stratified k-fold CV (faster; k=5 recommended for n≥50)
+cv_folds = 5
+# LASSO (L1 logistic) cross-validation folds (inner CV within each outer fold)
+lasso_cv_folds = 5
+# Random forest number of trees (used for both feature selection and classification)
+rf_n_estimators = 500
+# RF minimum feature importance threshold (0 = retain all features with importance > 0)
+rf_min_importance = 0.0
+# Logistic regression regularization parameter C (larger = weaker regularization)
+lr_C = 1.0
+# SVM regularization parameter C
+svm_C = 1.0
+# XGBoost parameters
+xgb_n_estimators = 200
+xgb_max_depth = 4
+xgb_learning_rate = 0.1
+# LightGBM parameters
+lgbm_n_estimators = 200
+lgbm_max_depth = 4
+lgbm_learning_rate = 0.1
+# Sample outlier detection parameters
+# Minimum sample coverage: triggers a coverage anomaly flag if the fraction of CpG sites with coverage < this value
+outlier_coverage_min = 0.30
+# PCA within-group distance z-score threshold: exceeding this value triggers a PCA outlier flag
+outlier_pca_z = 2.5
+# Minimum fraction of samples with >=10x coverage for a panel site (sites below this are forcibly removed from the final panel)
+min_10x_coverage_rate = 0.80
+# Confirmed excluded sample IDs (fill in after reviewing outlier_report.csv)
+exclude_samples = ['B10018', 'B10268']
+include_ca125_baseline = true   # set false to skip CA-125 + all *+CA125 fusion models
+ca125_threshold        = 35.0   # clinical cutoff (U/mL) for CA-125 hard predictions
+# Subtype classifier (Step 16) viability thresholds:
+# Step 16 is SKIPPED with a clear message in the log + report when the cohort is too small
+# to support meaningful multi-class LOO-CV. Tune these to match your cohort size policy.
+subtype_min_samples_total     = 10  # hard floor — below this, Step 16 will not train and writes subtype_skip.json
+subtype_min_samples_per_class = 5   # classes below this trigger a per-class reliability warning
+subtype_warn_samples_total    = 20  # below this (but ≥ min), Step 16 trains but logs an "indicative-only" warning
+# One-vs-Rest binary classifier (Step 16, RF + SVM OvR) per-class minimum:
+# For each subtype, the OvR binary problem requires at least this many positive AND
+# this many negative samples to be trained. Subtypes failing this check are skipped
+# with a clear log message; if NO subtype passes, the entire OvR step writes ovr_skip.json.
+ovr_min_samples_per_class     = 5
+
+# Site annotation configuration (Step 17)
+[annotation]
+# Upstream/downstream window (bp) centered on each CpG site for EWAS Catalog lookup
+ewas_window = 500
+# Ensembl gene overlap lookup window (bp)
+gene_window = 2000
+# API call interval (seconds) to avoid rate limiting
+api_delay = 0.25
+# HTTP request timeout (seconds)
+api_timeout = 15
+# Local hg38 CpG island BED file path (leave empty to auto-download from UCSC)
+cpgi_bed = ""
+# Whether to query EWAS Atlas (CNCB NGDC) for positional associations
+ewas_atlas = true
+# Whether to query PubMed: "{gene} plasma methylation cancer"
+pubmed_search = true
+# NCBI API key (optional; increases rate limit from 3 to 10 req/s when provided; can be left empty)
+ncbi_api_key = ""
+# Maximum number of PubMed results to return per gene
+pubmed_max_hits = 20
+
+# Temporal validation configuration (Step 17 — plasma mode only)
+[temporal_validate]
+# Samples collected before this date go to the train set; on/after → validation set
+cutoff_date = "2024-01-01"
+# Feature selection mode:
+#   true  (default) — re-run Wilcoxon+LASSO∪RF on training-period samples only (leakage-free;
+#                     validation samples never seen during feature selection)
+#   false           — use top-N features from feature_selection_freq.csv written by classify step
+#                     (minor temporal leakage: validation-period samples contributed to that table)
+reselect_features = true
+# Number of top features to retain when reselect_features = false
+top_n_features = 20
+# When true, borderline-category samples in the validation period are added to the
+# validation set as benign (y=0) to supplement the typically small benign validation
+# group.  They are loaded from their bedGraph files at runtime and never affect the
+# train set or feature selection.  true_label in predictions CSV is "borderline" so
+# they can be distinguished from confirmed benign samples.
+borderline_as_benign = false
+# Re-evaluate the same 11 models on the validation subset of patients with CA-125 below this threshold (U/mL).
+# Clinical rationale: CA-125 ≥ 105 patients are typically clinically obvious (advanced disease, large
+# tumour burden), so the cfDNA panel adds the most value in the CA-125 < 105 subset where CA-125 alone
+# is least discriminative. Output: temporal_validation_summary_lowca125.csv. Set to 0 or negative to disable.
+low_ca125_threshold = 105.0
+
+# Logging configuration
+[logging]
+# Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+level = "INFO"
+# Log format
+format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+# Whether to save to file
+save_to_file = true
+# Whether to output to console
+console_output = true

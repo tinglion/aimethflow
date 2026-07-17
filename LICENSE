@@ -1,0 +1,47 @@
+MIT License
+
+Copyright (c) 2026
+    Super String Force (Beijing) Technology Co., Ltd.
+    Beijing Hospital
+    Ting Liu, Qian Hu, Hui Xu
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+
+==================================================================
+Note on aimethflow-core (pre-publication phase only)
+==================================================================
+
+Steps 14, 15, and 19 of the pipeline depend on the companion package
+`aimethflow-core`, which is held in a private repository pending publication
+of the AIMethFlow paper in iMeta (anticipated 2026) and a corresponding
+Chinese patent application. `aimethflow-core` is distributed to iMeta-assigned
+peer reviewers under a separate Pre-Publication License (see the
+`aimethflow-core` repository's `LICENSE` for terms).
+
+Upon paper acceptance, `aimethflow-core` will be merged into this repository
+and the merged codebase will continue to be governed by the MIT License above.
+At that point this note will be retired.
+
+The MIT grant above covers everything currently in this repository — the
+stub modules at `src/scripts/modules/feature_utils.py`,
+`src/scripts/modules/classifier_utils.py`, and `src/scripts/external_validate.py`
+are MIT-licensed; only the real implementations they substitute for (held in
+`aimethflow-core`) are governed by the separate Pre-Publication License during
+peer review.
