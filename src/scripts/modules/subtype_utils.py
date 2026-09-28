@@ -1116,7 +1116,7 @@ def run_subtype_temporal_validation(result_dir, config):
 
     Reads data/plasma_exp.xlsx (columns: case_id, datetime) joined with sample_info_excel
     to map case_id → sample_id.
-    Splits at 2024-07-01: datetime < cutoff → train; datetime >= cutoff → validation.
+    Splits at 2024-01-01: datetime < cutoff → train; datetime >= cutoff → validation.
     Trains RF and SVM once on the train set, evaluates on the validation set.
 
     Outputs:
@@ -1129,7 +1129,7 @@ def run_subtype_temporal_validation(result_dir, config):
     from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
 
     tv_cfg = (config or {}).get("temporal_validate", {})
-    CUTOFF = pd.Timestamp(tv_cfg.get("cutoff_date", "2024-07-01"))
+    CUTOFF = pd.Timestamp(tv_cfg.get("cutoff_date", "2024-01-01"))
 
     # 1-2. Build {sample_id: collection_date} via plasma_exp.xlsx + sample_info_excel bridge
     date_map = _build_sample_date_map()

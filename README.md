@@ -4,15 +4,15 @@ End-to-end targeted bisulfite sequencing pipeline for ovarian-cancer early-diagn
 
 ## Status — pre-publication
 
-The 3 modules `feature_utils` (5-stage feature selection), `classifier_utils` (11-model nested CV with cfDNA + CA-125 fusion), and `external_validate` (GSE40279 blood-baseline filter) are temporarily held in a separate companion package `aimethflow-core` pending publication of the AIMethFlow paper in *iMeta* (2026) and the corresponding Chinese patent application.
+The 3 modules `feature_utils` (5-stage feature selection), `classifier_utils` (11-model nested CV with cfDNA + CA-125 fusion), and `external_validate` (GSE40279 blood-baseline filter) are temporarily held in a separate companion package `aimethflow-core` pending peer review and publication of the AIMethFlow paper and the corresponding Chinese patent application.
 
 **Public-only access** runs Steps 1-13, 16-18, 20 end-to-end. The pipeline imports cleanly; `--list-steps` works; UMI dedup, methylation extraction, differential analysis, visualisation, subtype classification, temporal validation, and report generation all work without any private dependency. Attempting Step 14 / 15 / 19 raises a clean `ImportError` with the reviewer-access path.
 
-**Steps 14 / 15 / 19** require the `aimethflow-core` package. iMeta-assigned reviewers obtain it from the corresponding author via one of two paths:
+**Steps 14 / 15 / 19** require the `aimethflow-core` package. Journal-assigned reviewers obtain it from the corresponding author via one of two paths:
 
 | Path | Best for | How |
 |---|---|---|
-| **A. Private GitHub collaborator** | Reviewers running locally via conda (want to step into the code) | Corresponding author adds reviewer's GitHub username as collaborator on the private `aimethflow-core` repo. Reviewer: `git clone <private-url> && pip install -e .[ml]` |
+| **A. Private GitHub collaborator** | Reviewers running locally via conda (want to step into the code) | The corresponding author adds the reviewer's GitHub username as a collaborator on the private `aimethflow-core` repo. Reviewer: `git clone <private-url> && pip install -e .[ml]` |
 | **B. Docker wheel mount** | Reviewers running the containerised stack | Corresponding author sends a single bytecode-only `.whl` (~48 KB). Reviewer drops it into `./private/` next to `docker-compose.yml`; the container auto-installs on startup |
 
 The public stubs at `src/scripts/modules/feature_utils.py`, `src/scripts/modules/classifier_utils.py`, and `src/scripts/external_validate.py` transparently substitute the real implementations at import time once either path is set up — no code change in this repository is needed.
@@ -23,7 +23,7 @@ The public stubs at `src/scripts/modules/feature_utils.py`, `src/scripts/modules
 
 - Detect differential methylation at CpG sites associated with ovarian cancer in plasma cell-free DNA (cfDNA)
 - Data-driven discovery of candidate sites (individual-sample bedGraph direct aggregation; 88 candidate regions used as soft prior weighting)
-- Train benign/malignant binary classification models (LR / SVM / RF / XGB / LGBM, Nested LOO-CV evaluation, feature selection performed within each fold's training set)
+- Train benign/malignant binary classification models (LR / SVM / RF / XGB / LGBM, leakage-free nested cross-validation — stratified 5-fold outer loop with a 5-fold inner loop, feature selection performed within each fold's training set)
 - Subtype multi-classification of malignant + borderline samples (high-grade serous carcinoma / endometrioid carcinoma / clear cell carcinoma / low-grade serous carcinoma / mucinous)
 
 ## Key features
@@ -54,6 +54,16 @@ docker compose up -d                                        # persistent contain
 
 See [DOCKER.md](DOCKER.md) for the full Docker reference, or [docs/installation.md](docs/installation.md) for Conda / local-development setup.
 
+## Optional external reference data (Step 19)
+
+Step 19 (external validation against the GSE40279 whole-blood baseline and TCGA-OV tumour tissue) requires **4 reference files (~1.4 GB total)** placed in `data/external/`. Fetch them once with:
+
+```bash
+bash download_external_data.sh                # writes into data/external/
+```
+
+or download manually per the source table in [docs/pipeline.md → Required files](docs/pipeline.md#required-files-place-in-dataexternal). Steps 1–18 and 20 run without these files; only Step 19 depends on them.
+
 ## Documentation
 
 | Topic | Where |
@@ -83,6 +93,9 @@ See [DOCKER.md](DOCKER.md) for the full Docker reference, or [docs/installation.
     │   ├── run_analysis.py         # Main CLI entry point
     │   ├── webui.py                # FastAPI Web UI (port 9999)
     │   ├── external_validate.py    # Step 19 public-dataset cross-validation
+    │   ├── prepare_external_matrix.py        # Build feature_matrix.npz for an external cohort
+    │   ├── run_external_cohort.py            # Step 19b standalone CLI (same module as the step)
+    │   ├── run_leakage_demo.py               # Step 15b standalone CLI (same module as the step)
     │   ├── quantify_umi_rescue.py            # UMI-rescue BAM-wide audit + plot
     │   ├── quantify_panel_umi_rescue_bam.py  # Per-CpG local UMI-rescue audit
     │   └── modules/
@@ -90,8 +103,10 @@ See [DOCKER.md](DOCKER.md) for the full Docker reference, or [docs/installation.
     │       ├── fastq_utils.py               # fastp preprocessing
     │       ├── feature_utils.py             # Feature analysis (Step 14) + outlier (Step 13)
     │       ├── classifier_utils.py          # Diagnostic classification (Step 15)
+    │       ├── leakage_demo.py              # Feature-selection leakage demo (Step 15b)
     │       ├── subtype_utils.py             # Subtype + temporal validation (Steps 16/17)
     │       ├── annotation_utils.py          # Site annotation (Step 18)
+    │       ├── external_cohort.py           # Independent external cohort re-run (Step 19b)
     │       └── report_utils.py              # Report generation (Step 20)
     ├── test/
     └── utils/                      # Config + logger helpers

@@ -69,11 +69,13 @@ STEPS = [
     ("blood_filter",      "Step 14a Blood-baseline filter (GSE40279)", "D · QC + Features"),
     ("fs_benchmark",      "Step 14b Feature selection ablation",      "D · QC + Features"),
     ("classify",          "Step 15  Diagnostic classification",       "E · Classification"),
+    ("leakage_demo",      "Step 15b Feature-selection leakage demo",  "E · Classification"),
     ("final_model",       "Step 15c Train production models (full cohort)", "E · Classification"),
     ("subtype_classify",  "Step 16  Subtype classification",          "E · Classification"),
     ("temporal_validate", "Step 17  Temporal split validation",       "E · Classification"),
     ("annotate",          "Step 18  Site annotation",                 "E · Classification"),
-    ("external_validate", "Step 19  External validation",             "F · Output"),
+    ("external_validate", "Step 19  Panel cross-reference (public refs)", "F · Output"),
+    ("external_cohort",   "Step 19b Independent external cohort re-run", "F · Output"),
     ("report",            "Step 20  HTML + JSON report",              "F · Output"),
 ]
 _STEP_KEYS = {s[0] for s in STEPS}

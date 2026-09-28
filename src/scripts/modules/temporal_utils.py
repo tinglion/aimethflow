@@ -2,7 +2,7 @@
 """
 temporal_utils.py — Step 17: Temporal Prospective Validation.
 
-Train/test split by sample collection date (default cutoff: 2024-07-01).
+Train/test split by sample collection date (default cutoff: 2024-01-01).
 Evaluates the same 11-model lineup as Step 15 (5 cfDNA-only + CA-125 alone +
 5 cfDNA + CA-125 fusion) under leakage-free conditions: feature selection,
 imputation, and CA-125 standardisation are all fitted exclusively on the
@@ -124,7 +124,7 @@ def run_temporal_validation(workdir, result_dir, config, benign_samples, maligna
 
     Reads data/plasma_exp.xlsx (columns: case_id, datetime) joined with sample_info_excel
     to map case_id → sample_id.
-    Splits at 2024-07-01: datetime < cutoff → train; datetime >= cutoff → validation.
+    Splits at 2024-01-01: datetime < cutoff → train; datetime >= cutoff → validation.
     Trains each classifier once on the train set and evaluates on the validation set
     using the pre-selected panel features (panel_cpg.csv).
 
@@ -134,7 +134,7 @@ def run_temporal_validation(workdir, result_dir, config, benign_samples, maligna
     """
 
     tv_cfg = (config or {}).get("temporal_validate", {})
-    CUTOFF = pd.Timestamp(tv_cfg.get("cutoff_date", "2024-07-01"))
+    CUTOFF = pd.Timestamp(tv_cfg.get("cutoff_date", "2024-01-01"))
     TOP_N  = int(tv_cfg.get("top_n_features", 20))
 
     # 1-2. Build {sample_id: collection_date} via plasma_exp.xlsx + sample_info_excel bridge

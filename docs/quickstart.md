@@ -101,8 +101,10 @@ run-analysis --mode plasma --step blood_filter     --workdir $WORKDIR
 run-analysis --mode plasma --step classify         --workdir $WORKDIR
 # Step 14b (optional): feature selection ablation — wilcoxon / lasso / rf / union AUC comparison
 run-analysis --mode plasma --step fs_benchmark     --workdir $WORKDIR
-# Step 15c (optional): CA-125 vs classifier AUC — requires 'ca125' column in sample Excel
-run-analysis --mode plasma --step ca125_compare    --workdir $WORKDIR
+# Step 15b (optional): leakage demo — naive vs in-fold selection ΔAUC, paired DeLong
+run-analysis --mode plasma --step leakage_demo     --workdir $WORKDIR
+# Step 15c (optional): train production models on the full cohort → result/$WORKDIR/model/
+run-analysis --mode plasma --step final_model      --workdir $WORKDIR
 run-analysis --mode plasma --step subtype_classify --workdir $WORKDIR
 
 # Step 17: temporal split validation (plasma only; requires data/plasma_exp.xlsx)
@@ -112,7 +114,9 @@ run-analysis --mode plasma --step temporal_validate --workdir $WORKDIR
 run-analysis --mode plasma --step annotate          --workdir $WORKDIR
 # Step 19 (optional): cross-validate against public datasets (requires data/external/)
 run-analysis --mode plasma --step external_validate --workdir $WORKDIR
-# Step 20 (last): generate report — auto-embeds annotation + external-validation sections
+# Step 19b (optional): re-run Step 15 on independent cohorts listed in [external_cohort] dirs
+run-analysis --mode plasma --step external_cohort   --workdir $WORKDIR
+# Step 20 (last): generate report — auto-embeds the Step 18 / 19 / 15b / 19b sections
 run-analysis --mode plasma --step report            --workdir $WORKDIR
 
 # Show all steps and current progress
@@ -171,11 +175,13 @@ $PY src/scripts/run_analysis.py --mode plasma --step feature_analysis --workdir 
 $PY src/scripts/run_analysis.py --mode plasma --step blood_filter     --workdir $WORKDIR
 $PY src/scripts/run_analysis.py --mode plasma --step classify         --workdir $WORKDIR
 $PY src/scripts/run_analysis.py --mode plasma --step fs_benchmark     --workdir $WORKDIR
-$PY src/scripts/run_analysis.py --mode plasma --step ca125_compare    --workdir $WORKDIR
+$PY src/scripts/run_analysis.py --mode plasma --step leakage_demo     --workdir $WORKDIR
+$PY src/scripts/run_analysis.py --mode plasma --step final_model      --workdir $WORKDIR
 $PY src/scripts/run_analysis.py --mode plasma --step subtype_classify --workdir $WORKDIR
 $PY src/scripts/run_analysis.py --mode plasma --step temporal_validate --workdir $WORKDIR
 $PY src/scripts/run_analysis.py --mode plasma --step annotate        --workdir $WORKDIR
 $PY src/scripts/run_analysis.py --mode plasma --step external_validate --workdir $WORKDIR
+$PY src/scripts/run_analysis.py --mode plasma --step external_cohort   --workdir $WORKDIR
 $PY src/scripts/run_analysis.py --mode plasma --step report          --workdir $WORKDIR
 
 echo "=== Done! Report: result/analysis_report.html ==="

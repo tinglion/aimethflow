@@ -47,10 +47,13 @@ Steps:
   blood_filter       14a  Drop panel sites with GSE40279 whole-blood mean β ≥ 0.10
   fs_benchmark       14b  Feature selection ablation: wilcoxon/lasso/rf/union AUC table
   classify           15   Diagnostic classifiers LOO-CV: LR / SVM / RF / XGBoost / LightGBM
+  leakage_demo       15b  Leakage demo: naive vs in-fold selection ΔAUC (paired DeLong)
+  final_model        15c  Train production models on the full cohort (no CV holdout)
   subtype_classify   16   Subtype multi-class LOO-CV: RF + SVM OvR
-  temporal_validate  17   Temporal split validation (plasma only): train <2024-07-01, test >=2024-07-01
+  temporal_validate  17   Temporal split validation (plasma only): train <2024-01-01, test >=2024-01-01
   annotate           18   Site annotation (Ensembl + EWAS Catalog+Atlas + CpG island + PubMed)
   external_validate  19   Cross-validation: GSE40279 blood baseline + TCGA-OV tumour signal
+  external_cohort    19b  Independent external cohort re-run (config [external_cohort] dirs)
   report             20   Generate HTML + JSON report (all optional sections auto-embedded)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
@@ -192,11 +195,13 @@ PIPELINE_STEPS = [
     ("blood_filter",       "14a", "Blood-baseline filter: drop panel sites with GSE40279 mean β ≥ 0.10", "feature_analysis"),
     ("fs_benchmark",       "14b", "Feature selection ablation: wilcoxon/lasso/rf/union AUC table", "feature_analysis"),
     ("classify",           "15",  "Classifiers LOO-CV: LR / SVM / RF / XGBoost / LightGBM",       "feature_analysis"),
+    ("leakage_demo",       "15b", "Leakage demo: naive vs in-fold selection ΔAUC, paired DeLong", "feature_analysis"),
     ("final_model",        "15c", "Train production models on the full cohort (no CV holdout); save artefacts to result/<wd>/model/ for inference / WebUI diagnosis page", "classify"),
     ("subtype_classify",   "16",  "Subtype LOO-CV (malignant+borderline): RF + SVM OvR",          "classify"),
     ("temporal_validate",  "17",  "Temporal split validation (plasma only): train/test by date",  "classify"),
     ("annotate",           "18",  "Site annotation: gene / CpG island / EWAS Catalog+Atlas",      "feature_analysis"),
     ("external_validate",  "19",  "Cross-validation: GSE40279 blood baseline + TCGA-OV signal",   "feature_analysis"),
+    ("external_cohort",    "19b", "Independent external cohort re-run (config [external_cohort] dirs)", "classify"),
     ("report",             "20",  "HTML + JSON report (annotation + ext-validate auto-embedded)",  "diff"),
 ]
 STEP_KEYS = [s[0] for s in PIPELINE_STEPS]
@@ -225,6 +230,44 @@ def _save_state(workdir, state):
     existing.update(state)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(existing, f, ensure_ascii=False, indent=2)
+
+
+def _filter_to_cohort(bam_files, mode):
+    """Restrict BAM files to the benign/malignant analytical cohort.
+
+    ``bam_files`` (deduplicated/target BAMs) may include borderline samples
+    and stray BAMs left over from other runs in the same working directory,
+    which is not yet filtered against the Excel sample manifest at this
+    point in the pipeline (grouping happens later, in Step 9-11). Cohort
+    QC figures such as the fragment-size distribution must be scoped to
+    exactly the benign+malignant cohort, matching the Sample QC / PCA
+    figure — otherwise the reported sample count silently drifts from the
+    true cohort size. Falls back to the unfiltered list if the manifest
+    can't be read.
+    """
+    try:
+        from methylation.sample_grouping import parse_sample_info
+        info = parse_sample_info(category=mode)
+        cohort_ids = set()
+        for grp in ("benign", "malignant"):
+            for r1 in info.get(grp, {}).get("R1", []):
+                cohort_ids.add(os.path.basename(r1).split(".")[0])
+        if not cohort_ids:
+            logger.warning("[cohort_filter] Empty manifest — using unfiltered BAM list")
+            return bam_files
+    except Exception as exc:
+        logger.warning(f"[cohort_filter] Could not read sample manifest ({exc}) — "
+                       f"using unfiltered BAM list")
+        return bam_files
+
+    filtered = [f for f in bam_files
+                if os.path.basename(f).split(".")[0] in cohort_ids]
+    dropped = len(bam_files) - len(filtered)
+    if dropped:
+        logger.info(f"[cohort_filter] {len(filtered)}/{len(bam_files)} BAMs in "
+                    f"benign+malignant cohort ({dropped} borderline/non-manifest "
+                    f"BAMs excluded)")
+    return filtered
 
 
 def _run_ref_index(cfg):
@@ -623,7 +666,8 @@ def main():
                 logger.info("  → M-bias SVGs saved to workdir — review R2 3' bias before extract")
             else:
                 logger.warning("7.5. Skipping M-bias check (reference genome not found)")
-            plot_fragment_size(mbias_input, result_dir, config=config)
+            cohort_input = _filter_to_cohort(mbias_input, mode)
+            plot_fragment_size(cohort_input, result_dir, config=config)
         else:
             logger.warning("7.5. Skipping M-bias check (no BAM available)")
 
@@ -999,6 +1043,31 @@ def main():
                 return
 
     # =========================================================
+    # Step 15b: leakage_demo — quantify feature-selection leakage
+    #
+    # Re-runs the same classifiers over the same CV partitions under protocols
+    # that differ only in what feature selection / imputation / scaling are
+    # allowed to see. Turns the pipeline's central methodological claim —
+    # in-fold isolation prevents AUC inflation — from a citation into a
+    # measurement. Analysis-only: writes its own tables and figure and changes
+    # nothing the other steps consume.
+    # =========================================================
+    if _should_run("leakage_demo", False):
+        if benign_samples and malignant_samples:
+            logger.info("━━ Step 15b: Feature-selection leakage demonstration ━━")
+            from scripts.modules.leakage_demo import run_leakage_demo
+            run_leakage_demo(
+                workdir, result_dir, config, benign_samples, malignant_samples,
+                n_boot=config.get("ml", {}).get("leakage_n_boot", 1000),
+            )
+            _save_state(workdir, {"completed_steps": state.get("completed_steps", []) + ["leakage_demo"]})
+            logger.info(f"  → Leakage tables + figure saved to {result_dir}/leakage_demo*")
+        else:
+            logger.error("leakage_demo requires benign_samples and malignant_samples")
+            if single_step:
+                return
+
+    # =========================================================
     # Step 15c: final_model — train production models on the full cohort
     #
     # Step 15 (classify) evaluates models with cross-validation; here we re-fit
@@ -1090,6 +1159,28 @@ def main():
             _save_state(workdir, {"completed_steps": state.get("completed_steps", []) + ["external_validate"]})
             logger.info(f"  → External validation saved: {os.path.join(result_dir, 'external_validation.csv')}")
             logger.info("  → Run --step report to embed Section 13 into the HTML report")
+
+    # =========================================================
+    # Step 19b: external_cohort — independent external cohort re-run
+    #
+    # Step 19 cross-references the panel against public reference datasets; it
+    # is not an independent cohort. This step is: it re-runs the production
+    # Step 15 unmodified on one or more external cohorts listed in
+    # [external_cohort] dirs, each prepared by prepare_external_matrix.py, and
+    # writes a side-by-side summary into this result directory. What it
+    # validates is the framework, not the panel — no public cohort shares our
+    # probe set.
+    # =========================================================
+    if _should_run("external_cohort", False):
+        logger.info("━━ Step 19b: Independent external cohort re-run ━━")
+        from scripts.modules.external_cohort import run_external_cohorts
+        summary_df = run_external_cohorts(workdir, result_dir, config)
+        if summary_df is not None and not summary_df.empty:
+            _save_state(workdir, {"completed_steps": state.get("completed_steps", []) + ["external_cohort"]})
+            logger.info(f"  → {os.path.join(result_dir, 'external_cohort_summary.csv')}")
+            logger.info("  → Run --step report to embed Section 15 into the HTML report")
+        elif single_step:
+            return
 
     # =========================================================
     # Step 20: report

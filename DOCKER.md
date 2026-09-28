@@ -35,11 +35,11 @@ The Web UI is also auto-started in the persistent container and listens on port 
 
 ## Protected core via mounted wheel (pre-publication only)
 
-Steps 14 (feature selection), 15 (diagnostic classifiers), and 19 (external validation) depend on the `aimethflow-core` package, temporarily held private pending iMeta 2026 publication. See the *Status — pre-publication* section in [README.md](README.md) for context.
+Steps 14 (feature selection), 15 (diagnostic classifiers), and 19 (external validation) depend on the `aimethflow-core` package, temporarily held private pending peer review and publication. See the *Status — pre-publication* section in [README.md](README.md) for context.
 
 The container ships with stubs for these 3 modules. The pipeline imports cleanly and Steps 1-13, 16-18, 20 run end-to-end without any extra setup. Attempting Step 14 / 15 / 19 without the core installed raises a clean `ImportError`.
 
-To enable the full pipeline, iMeta-assigned reviewers receive a single bytecode-only wheel `aimethflow_core-<version>-py310-none-any.whl` (~48 KB) from the corresponding author through the iMeta editorial system. Setup:
+To enable the full pipeline, journal-assigned reviewers receive a single bytecode-only wheel `aimethflow_core-<version>-py310-none-any.whl` (~48 KB) from the corresponding author through the journal's editorial system. Setup:
 
 ```bash
 # 1. Drop the wheel into the docs/ directory (next to README.md, installation.md, ...)

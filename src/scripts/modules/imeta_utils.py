@@ -1,4 +1,4 @@
-"""imeta_utils.py — auto-generate iMeta publication figures and statistical tables.
+"""imeta_utils.py — auto-generate manuscript publication figures and statistical tables.
 
 Called during Step 20 (report). All public entry points are optional: missing input
 files log a warning and the figure / table is silently skipped.
@@ -8,6 +8,7 @@ Module organisation:
     I/O helpers           _read_csv, _read_config, _savefig, _mpl
     Pipeline context      _PipelineContext, _load_context — cohort metadata read once
     DeLong inference      _fastdelong_cov, _delong_formal, _delong_bootstrap
+    Operating point       _mcnemar_operating — paired sensitivity / specificity
     Figure builders       _fig3_combined, _fig5_temporal,
                           _fig2b_panel_annotation, _fig6b_blood_dist
     Public API            generate_imeta_figures, build_imeta_section
@@ -439,6 +440,102 @@ def _delong_bootstrap(clf_pred_path: str, out_csv_path: str,
 
     df_out = pd.DataFrame(rows)
     df_out.to_csv(out_csv_path, index=False, encoding="utf-8")
+    return df_out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# McNemar — paired operating-point comparison (sensitivity / specificity)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# DeLong tests the ROC curve as a whole and is threshold-free. It therefore
+# cannot speak to sensitivity or specificity, which are properties of one
+# operating point. Those are paired binary outcomes on the same samples, so the
+# correct test is McNemar's on the discordant pairs. The exact binomial form is
+# used rather than the chi-square approximation because the discordant counts
+# here are small (5-18), where the approximation is unreliable.
+#
+# Reported for every comparison attempted, significant or not: cherry-picking
+# the operating point after seeing the result is precisely the kind of inflation
+# this pipeline exists to measure.
+
+def _mcnemar_operating(clf_pred_path: str, out_csv_path: str,
+                       models: Optional[Iterable[str]] = None):
+    """Exact McNemar tests on the classification operating point.
+
+    Compares CA-125 alone against each fusion model, and each cfDNA-only model
+    against its own fusion counterpart, separately within the benign stratum
+    (specificity) and the malignant stratum (sensitivity).
+    """
+    import pandas as pd
+    from scipy import stats
+
+    df = _read_csv(clf_pred_path)
+    if df is None or "predicted" not in df.columns:
+        return None
+
+    wanted = list(models or ALL_MODELS)
+    by_clf = {}
+    for clf in wanted:
+        sub = df[df["classifier"] == clf]
+        if sub.empty:
+            continue
+        by_clf[clf] = {
+            r["sample_id"]: (r["true_label"], r["predicted"])
+            for _, r in sub.iterrows()
+        }
+    if CA125_ALONE not in by_clf:
+        logger.warning("[mcnemar] %s absent from predictions — skipping",
+                       CA125_ALONE)
+        return None
+
+    # (reference, comparator) pairs: the incumbent marker against each fusion
+    # model, then each cfDNA-only model against the fusion that extends it.
+    pairs = [(CA125_ALONE, f) for f in FUSION_MODELS]
+    pairs += [(m, f"{m}+CA125") for m in CFDNA_ONLY]
+
+    strata = [("specificity", "benign"), ("sensitivity", "malignant")]
+
+    rows = []
+    for ref, cmp_ in pairs:
+        if ref not in by_clf or cmp_ not in by_clf:
+            continue
+        A, B = by_clf[ref], by_clf[cmp_]
+        for metric, label in strata:
+            ids = [s for s in A if s in B and A[s][0] == label]
+            if not ids:
+                continue
+            # b10: reference correct, comparator wrong; b01: the reverse.
+            b10 = sum(1 for s in ids if A[s][1] == label and B[s][1] != label)
+            b01 = sum(1 for s in ids if A[s][1] != label and B[s][1] == label)
+            n_disc = b10 + b01
+            p = (float(stats.binomtest(min(b10, b01), n_disc, 0.5).pvalue)
+                 if n_disc else float("nan"))
+            rate_ref = sum(1 for s in ids if A[s][1] == label) / len(ids)
+            rate_cmp = sum(1 for s in ids if B[s][1] == label) / len(ids)
+            rows.append({
+                "reference":       ref,
+                "comparator":      cmp_,
+                "metric":          metric,
+                "stratum":         label,
+                "n":               len(ids),
+                "rate_reference":  round(rate_ref, 4),
+                "rate_comparator": round(rate_cmp, 4),
+                "delta":           round(rate_cmp - rate_ref, 4),
+                "discordant_ref_only": b10,
+                "discordant_cmp_only": b01,
+                "p_mcnemar_exact": round(p, 4) if np.isfinite(p) else "NA",
+                "significant":     "Yes" if (np.isfinite(p) and p < 0.05) else "No",
+            })
+
+    if not rows:
+        return None
+
+    df_out = pd.DataFrame(rows)
+    df_out.to_csv(out_csv_path, index=False, encoding="utf-8")
+    logger.info(
+        "[mcnemar] %d operating-point tests → %s",
+        len(rows), os.path.basename(out_csv_path),
+    )
     return df_out
 
 
@@ -1230,7 +1327,10 @@ def _fig6b_blood_dist(ext_val_path: str, out_path: str,
     ax.set_ylim([-1, 1])
     ax.set_xlim([-0.02, 1.02])
     ax.set_yticks([])
-    ax.set_xlabel("Whole-blood mean β (GSE40279, n = 729 samples)", fontsize=12)
+    # 656 = the sample columns actually present in GSE40279_series_matrix.txt.gz,
+    # and the published cohort size in Hannum et al. 2013. Every other reference to
+    # this dataset in the codebase, the docs and the manuscript says 656.
+    ax.set_xlabel("Whole-blood mean β (GSE40279, n = 656 samples)", fontsize=12)
     panel_n = ctx.panel_size if ctx.panel_size > 0 else "?"
     ax.set_title(
         f"Figure 6B — Blood Methylation Baseline: "
@@ -1260,7 +1360,7 @@ def _fig6b_blood_dist(ext_val_path: str, out_path: str,
 # ─────────────────────────────────────────────────────────────────────────────
 
 def generate_imeta_figures(result_dir: str, report_dir: str) -> dict:
-    """Generate all auto-computable iMeta figures + DeLong tables.
+    """Generate all auto-computable publication figures + DeLong tables.
 
     Returns ``{key: abs_path}`` for successfully produced outputs.
     """
@@ -1278,19 +1378,19 @@ def generate_imeta_figures(result_dir: str, report_dir: str) -> dict:
 
     figs = [
         ("fig3_combined", _fig3_combined,
-         (clf_pred, clf_sum,              os.path.join(imgs_dir, "imeta_fig3_combined.png"),  ctx)),
+         (clf_pred, clf_sum,              os.path.join(imgs_dir, "pub_fig3_combined.png"),  ctx)),
         ("fig4b_delta", _fig4b_fusion_delta,
-         (clf_sum,                        os.path.join(imgs_dir, "imeta_fig4b_delta.png"),    ctx)),
+         (clf_sum,                        os.path.join(imgs_dir, "pub_fig4b_delta.png"),    ctx)),
         ("fig4c_gain",  _fig4c_spec_gain,
-         (clf_sum,                        os.path.join(imgs_dir, "imeta_fig4c_gain.png"),     ctx)),
+         (clf_sum,                        os.path.join(imgs_dir, "pub_fig4c_gain.png"),     ctx)),
         ("fig5_tv",     _fig5_temporal,
-         (tv_sum, tv_pred, clf_sum,       os.path.join(imgs_dir, "imeta_fig5_temporal.png"),  ctx)),
+         (tv_sum, tv_pred, clf_sum,       os.path.join(imgs_dir, "pub_fig5_temporal.png"),  ctx)),
         ("fig5b_regime", _fig5b_two_regime,
-         (clf_sum, tv_sum,                os.path.join(imgs_dir, "imeta_fig5b_regime.png"),   ctx)),
+         (clf_sum, tv_sum,                os.path.join(imgs_dir, "pub_fig5b_regime.png"),   ctx)),
         ("fig2b_panel", _fig2b_panel_annotation,
-         (annot,                          os.path.join(imgs_dir, "imeta_fig2b_panel.png"),    ctx)),
+         (annot,                          os.path.join(imgs_dir, "pub_fig2b_panel.png"),    ctx)),
         ("fig6b_blood", _fig6b_blood_dist,
-         (ext_val,                        os.path.join(imgs_dir, "imeta_fig6b_blood.png"),    ctx)),
+         (ext_val,                        os.path.join(imgs_dir, "pub_fig6b_blood.png"),    ctx)),
     ]
 
     out = {"_ctx": ctx}
@@ -1304,9 +1404,11 @@ def generate_imeta_figures(result_dir: str, report_dir: str) -> dict:
             logger.warning("[imeta] %s failed: %s", key, exc, exc_info=False)
 
     # DeLong tables (all 11 models — covers cfDNA vs CA-125 vs fusion comparisons)
+    # plus the paired operating-point tests DeLong cannot provide.
     for key, fn, fname in [
-        ("delong_csv",        _delong_bootstrap, "imeta_delong_test.csv"),
-        ("delong_formal_csv", _delong_formal,    "imeta_delong_formal.csv"),
+        ("delong_csv",        _delong_bootstrap,  "pub_delong_test.csv"),
+        ("delong_formal_csv", _delong_formal,     "pub_delong_formal.csv"),
+        ("mcnemar_csv",       _mcnemar_operating, "pub_mcnemar_operating.csv"),
     ]:
         path = os.path.join(result_dir, fname)
         try:
@@ -1317,7 +1419,7 @@ def generate_imeta_figures(result_dir: str, report_dir: str) -> dict:
             logger.warning("[imeta] %s failed: %s", key, exc)
 
     # Forest plot of 15 focused pairwise AUC comparisons (reads the CSVs just written)
-    forest_path = os.path.join(imgs_dir, "imeta_fig_delong_forest.png")
+    forest_path = os.path.join(imgs_dir, "pub_fig_delong_forest.png")
     try:
         if _fig_delong_forest(out.get("delong_csv", ""),
                               out.get("delong_formal_csv", ""),
@@ -1457,7 +1559,7 @@ def _delong_table_html(df_tbl, mode: str) -> str:
 
 
 def build_imeta_section(result_dir: str, imgs_dir: str) -> str:
-    """Generate iMeta figures + DeLong tables and return an HTML fragment.
+    """Generate publication figures + DeLong tables and return an HTML fragment.
 
     ``imgs_dir`` must be the report's ``imgs/`` subdirectory so that the
     rendered ``<img>`` tags use correct relative paths.
@@ -1490,7 +1592,7 @@ def build_imeta_section(result_dir: str, imgs_dir: str) -> str:
         f"with both the bootstrap p-value (p_boot) and the formal DeLong Z-test p-value "
         f"(p_DL). ✱ marks rows where either test is significant at α=0.05. "
         f"Full 55-row pairwise tables remain available as "
-        f"<code>imeta_delong_test.csv</code> and <code>imeta_delong_formal.csv</code>."
+        f"<code>pub_delong_test.csv</code> and <code>pub_delong_formal.csv</code>."
     )
     # ── Focused table: each model vs the CA-125 baseline ─────────────────
     boot_df_for_focus = _read_csv(fig_paths.get("delong_csv", ""))
@@ -1527,7 +1629,7 @@ def build_imeta_section(result_dir: str, imgs_dir: str) -> str:
 <p style="color:#666;font-size:.82em;margin-top:4px">
   Two-sided bootstrap permutation test with paired resampling ({DELONG_BOOT_N:,} resamples).
   All 11 model comparisons reported (cfDNA-only, CA-125, fusion). ✱ <em>p</em> &lt; 0.05.
-  Full table: <code>imeta_delong_test.csv</code>
+  Full table: <code>pub_delong_test.csv</code>
 </p>"""
         except Exception as exc:
             logger.warning("[imeta] bootstrap HTML: %s", exc)
@@ -1548,7 +1650,7 @@ def build_imeta_section(result_dir: str, imgs_dir: str) -> str:
 <p style="color:#666;font-size:.82em;margin-top:4px">
   Two-sided Z-test using the structural-component variance estimator of
   DeLong <em>et al.</em> (1988); placement-value covariance handles correlated
-  AUCs jointly. ✱ <em>p</em> &lt; 0.05. Full table: <code>imeta_delong_formal.csv</code>
+  AUCs jointly. ✱ <em>p</em> &lt; 0.05. Full table: <code>pub_delong_formal.csv</code>
 </p>"""
         except Exception as exc:
             logger.warning("[imeta] formal DeLong HTML: %s", exc)
@@ -1609,7 +1711,7 @@ def build_imeta_section(result_dir: str, imgs_dir: str) -> str:
     )
     # Append source annotation to the existing DeLong forest-plot caption.
     forest_cap = forest_cap + _src(
-        "imeta_delong_test.csv, imeta_delong_formal.csv",
+        "pub_delong_test.csv, pub_delong_formal.csv",
         "Step 20 — derived from classifier_predictions.csv (Step 15)",
     )
     fig5_cap = (
@@ -1657,7 +1759,7 @@ def build_imeta_section(result_dir: str, imgs_dir: str) -> str:
     <tr><td>Figure 3</td><td><code>classifier_predictions.csv</code> + <code>classifier_summary.csv</code></td><td>Step 15 — classify</td></tr>
     <tr><td>Figure 4B</td><td><code>classifier_summary.csv</code></td><td>Step 15 — classify</td></tr>
     <tr><td>Figure 4C</td><td><code>classifier_summary.csv</code></td><td>Step 15 — classify</td></tr>
-    <tr><td>Figure 4D + full DeLong tables</td><td><code>imeta_delong_test.csv</code>, <code>imeta_delong_formal.csv</code></td><td>Step 20 — derived from classifier_predictions.csv (Step 15)</td></tr>
+    <tr><td>Figure 4D + full DeLong tables</td><td><code>pub_delong_test.csv</code>, <code>pub_delong_formal.csv</code></td><td>Step 20 — derived from classifier_predictions.csv (Step 15)</td></tr>
     <tr><td>Figure 5</td><td><code>temporal_validation_summary.csv</code>, <code>temporal_validation_predictions.csv</code></td><td>Step 17 — temporal_validate</td></tr>
     <tr><td>Figure 5B</td><td><code>classifier_summary.csv</code> + <code>temporal_validation_summary.csv</code></td><td>Steps 15 + 17</td></tr>
     <tr><td>Figure 6B</td><td><code>external_validation.csv</code></td><td>Step 19 — external_validate</td></tr>
@@ -1665,13 +1767,13 @@ def build_imeta_section(result_dir: str, imgs_dir: str) -> str:
 </div>"""
 
     return f"""
-<!-- iMeta Publication Figures — auto-generated by Step 20 -->
+<!-- Publication figures — auto-generated by Step 20 -->
 <div class="section">
-<h2>Statistical &amp; Publication Figures (iMeta prep)</h2>
+<h2>Statistical &amp; Publication Figures (manuscript prep)</h2>
 <p style="color:#666;font-size:.85em">
   Auto-generated from result CSV files during Step 20 (report). {FIG_DPI} DPI PNG files:
-  <code>report/imgs/imeta_*.png</code>.
-  See <code>docs/iMeta_todo.md</code> for the full submission checklist.
+  <code>report/imgs/pub_*.png</code>.
+  See <code>docs/GPB/01_transfer_checklist.md</code> for the full submission checklist.
 </p>
 {section_index_html}
 

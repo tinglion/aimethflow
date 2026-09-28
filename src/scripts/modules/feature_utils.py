@@ -2,7 +2,8 @@
 
 The real implementation lives in the private companion package
 ``aimethflow-core``, which contains patent-pending core algorithms and is
-released only to peer reviewers during the iMeta 2026 publication phase.
+released only to journal-assigned peer reviewers during the pre-publication
+phase.
 
 Behaviour
 ---------
@@ -30,7 +31,7 @@ except ImportError as exc:  # pragma: no cover - environment-specific
         "AIMethFlow's feature_utils requires the protected core package "
         "`aimethflow-core`, which is private during the pre-publication phase.\n"
         "  - Peer reviewers: contact the corresponding author for access.\n"
-        "  - See: https://github.com/PLACEHOLDER/aimethflow#status"
+        "  - See: https://github.com/tinglion/aimethflow#status"
     ) from exc
 
 sys.modules[__name__] = _real

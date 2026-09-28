@@ -497,7 +497,8 @@ outputs: <code>panel_cpg.csv</code>, <code>feature_importance.csv</code></p>
             ca125_html = (
                 "<p style='color:#aaa;font-size:.85em;margin-top:10px'>"
                 "CA-125 comparison not available — add a <code>ca125</code> column to the "
-                "sample info Excel, then run <code>--step ca125_compare</code>.</p>"
+                "sample info Excel, set <code>[ml] include_ca125_baseline = true</code>, "
+                "then re-run <code>--step classify</code>.</p>"
             )
 
         _ci_note = (
@@ -810,8 +811,12 @@ outputs: <code>classifier_summary.csv</code>, <code>classifier_predictions.csv</
 <p style="color:#666;font-size:.85em">
   Prospective simulation: samples collected before <strong>{cutoff}</strong> form the train set;
   samples collected on/after that date form the held-out validation set.
-  Features: top-N sites by LOO-CV selection frequency (<code>feature_selection_freq.csv</code>),
-  fitted on train only — no information from the validation set leaks in.
+  Features: re-selected (Wilcoxon + LASSO &cup; RF) on the training-period samples only, so the
+  validation period contributes nothing to the feature space. This is the default,
+  <code>[temporal_validate] reselect_features = true</code>. Setting that key to
+  <code>false</code> instead reuses the top-N of <code>feature_selection_freq.csv</code>, which
+  is computed across all samples and therefore carries minor temporal leakage. Models are
+  fitted on the train split in either mode.
 </p>
 <table>
   <tr><th>Classifier</th><th>Train (n)</th><th>Validation (n)</th>

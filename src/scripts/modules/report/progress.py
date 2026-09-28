@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 def _build_pipeline_progress_section(temp_dir):
     """
-    Render a compact 22-step progress grid based on pipeline_state.json/completed_steps.
+    Render a compact progress grid based on pipeline_state.json/completed_steps.
     Returns an HTML <div class="section">...</div> block.
     """
     # Match PIPELINE_STEPS in run_analysis.py — keep numbers/labels in sync.
@@ -32,11 +32,13 @@ def _build_pipeline_progress_section(temp_dir):
         ("blood_filter",      "14a", "Blood-baseline filter"),
         ("fs_benchmark",      "14b", "FS ablation"),
         ("classify",          "15",  "Classifiers (LOO/CV)"),
-        ("ca125_compare",     "15c", "CA-125 vs cfDNA"),
+        ("leakage_demo",      "15b", "Leakage demo"),
+        ("final_model",       "15c", "Final model (cohort)"),
         ("subtype_classify",  "16",  "Subtype classifier"),
         ("temporal_validate", "17",  "Temporal split val."),
         ("annotate",          "18",  "Site annotation"),
-        ("external_validate", "19",  "External validation"),
+        ("external_validate", "19",  "Panel cross-reference"),
+        ("external_cohort",   "19b", "External cohort"),
         ("report",            "20",  "Report"),
     ]
 

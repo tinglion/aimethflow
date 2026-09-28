@@ -698,7 +698,7 @@ def run_annotation(result_dir, config):
     # (formatted xlsx). Failures are non-fatal — the pipeline still produces
     # the canonical CSV above.
     try:
-        s2_xlsx = _resolve_project_path("docs/iMeta_0.2/Table_S2_annotation.xlsx")
+        s2_xlsx = _resolve_project_path("docs/Table_S2_annotation.xlsx")
         if _save_annotation_as_xlsx(ann_df, s2_xlsx):
             logger.info(f"  Supplementary Table S2 saved: {s2_xlsx}")
     except Exception as exc:

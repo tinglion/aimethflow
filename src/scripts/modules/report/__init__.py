@@ -7,8 +7,10 @@ focused sub-modules:
     progress    — Step 1–20 pipeline progress chip grid
     outlier     — Step 13 sample-quality / outlier-detection section
     classifier  — Steps 14–17 (feature selection, classifiers, subtype, temporal)
+    leakage     — Step 15b feature-selection leakage demonstration section
     annotation  — Step 18 panel-CpG site annotation section
     external    — Step 19 public-dataset cross-validation section
+    cohort      — Step 19b independent external cohort re-run section
     main        — top-level `generate_report` entry point + final HTML assembly
 
 The public entry point is `generate_report(...)`. Existing call sites that
@@ -31,7 +33,9 @@ from scripts.modules.report.outlier     import _build_outlier_section           
 from scripts.modules.report.classifier  import (                                  # noqa: F401
     _build_classifier_section, _build_ovr_subsection,
 )
+from scripts.modules.report.leakage     import _build_leakage_section            # noqa: F401
 from scripts.modules.report.annotation  import _build_annotation_section         # noqa: F401
 from scripts.modules.report.external    import _build_external_validation_section  # noqa: F401
+from scripts.modules.report.cohort      import _build_external_cohort_section    # noqa: F401
 
 __all__ = ["generate_report"]

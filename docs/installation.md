@@ -34,7 +34,7 @@ pip install -e ".[ml]" -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 Steps 14 (feature selection), 15 (diagnostic classifiers), and 19 (external cross-validation) depend on the `aimethflow-core` package, temporarily held in a private companion GitHub repository during the pre-publication phase.
 
-**For local conda development (this guide):** iMeta-assigned reviewers receive collaborator access to the private repository from the corresponding author and install editable:
+**For local conda development (this guide):** journal-assigned reviewers receive collaborator access to the private repository from the corresponding author and install editable:
 
 ```bash
 git clone https://github.com/<user>/aimethflow-core.git
@@ -78,6 +78,16 @@ bwameth c2t index files (all required, total ~17 GB):
 | `data/plasma_exp.xlsx` | Plasma sample collection dates (columns: `case_id`, `datetime` in `YYYYMMDD` format); required for temporal split validation in Step 17 (plasma mode only) |
 | `/mnt/f/meth/hg38.repeat.bed` | hg38 repeat element BED |
 | `/mnt/f/meth/hg38_upstream_2k_st.bed.gz` | Promoter region BED |
+
+### 3a. External reference files (optional, Step 19 only)
+
+Step 19 (`external_validate`) cross-references panel CpGs against the GSE40279 whole-blood baseline and the TCGA-OV HumanMethylation450 tumour cohort. **4 reference files (~1.4 GB total) must live under `data/external/`**. Fetch them once with:
+
+```bash
+bash download_external_data.sh                # writes into data/external/
+```
+
+Manual sources and troubleshooting notes are in [pipeline.md → Required files](pipeline.md#required-files-place-in-dataexternal). All other pipeline steps run without these files — you can defer this setup until you actually want to run `--step external_validate`.
 
 ## Verification
 

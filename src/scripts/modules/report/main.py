@@ -34,6 +34,8 @@ from scripts.modules.report.classifier  import (
 )
 from scripts.modules.report.annotation  import _build_annotation_section
 from scripts.modules.report.external    import _build_external_validation_section
+from scripts.modules.report.leakage     import _build_leakage_section
+from scripts.modules.report.cohort      import _build_external_cohort_section
 
 logger = logging.getLogger(__name__)
 
@@ -396,13 +398,19 @@ def generate_report(
     # Section 14: public-dataset cross-validation (Step 19; silent if external_validation.csv absent)
     sec14_html, ext_val_data = _build_external_validation_section(result_dir)
     clf_data["external_validation"] = ext_val_data
+    # Section 12b: feature-selection leakage demonstration (Step 15b; placeholder if not run)
+    sec12b_html, leakage_data = _build_leakage_section(result_dir, imgs_dir)
+    clf_data["leakage_demo"] = leakage_data
+    # Section 15: independent external cohort re-run (Step 19b; placeholder if not run)
+    sec15_html, ext_cohort_data = _build_external_cohort_section(result_dir)
+    clf_data["external_cohort"] = ext_cohort_data
 
-    # iMeta publication figures (auto-generated; silently skipped if input CSVs absent)
+    # Publication figures (auto-generated; silently skipped if input CSVs absent)
     try:
         from scripts.modules.imeta_utils import build_imeta_section as _build_imeta
         sec_imeta_html = _build_imeta(result_dir, imgs_dir)
     except Exception as _imeta_exc:
-        logger.warning("iMeta figure generation skipped: %s", _imeta_exc)
+        logger.warning("Publication figure generation skipped: %s", _imeta_exc)
         sec_imeta_html = ""
 
     # QC table rows (paginated — see _pagination_widget below)
@@ -739,9 +747,13 @@ def generate_report(
 
 {sec12_html}
 
+{sec12b_html}
+
 {sec13_html}
 
 {sec14_html}
+
+{sec15_html}
 
 {sec_imeta_html}
 
