@@ -873,7 +873,7 @@ def _delong_pairwise_temporal(results, result_dir):
     Otherwise (typical case: all 22 val samples have CA-125) a single
     pairwise matrix covers all 11 models.
     """
-    from scripts.modules.imeta_utils import _fastdelong_cov
+    from scripts.modules.pub_figures import _fastdelong_cov
     from scipy import stats as _stats
 
     if not results:

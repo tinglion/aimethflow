@@ -1,9 +1,9 @@
-"""build_gpb_supplementary_tables.py — generate the GPB submission's missing
+"""build_supplementary_tables.py — generate the manuscript's missing
 Supplementary Tables (S3 Part B, S4, S5, S6) from existing result CSVs and
 append them as new sheets to docs/GPB/resources/supplementary_tables.xlsx.
 
 Run once from the project root:
-    python src/scripts/build_gpb_supplementary_tables.py
+    python src/scripts/build_supplementary_tables.py
 """
 
 import os

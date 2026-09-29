@@ -1,4 +1,4 @@
-"""imeta_utils.py — auto-generate manuscript publication figures and statistical tables.
+"""pub_figures.py — auto-generate manuscript publication figures and statistical tables.
 
 Called during Step 20 (report). All public entry points are optional: missing input
 files log a warning and the figure / table is silently skipped.
@@ -11,7 +11,7 @@ Module organisation:
     Operating point       _mcnemar_operating — paired sensitivity / specificity
     Figure builders       _fig3_combined, _fig5_temporal,
                           _fig2b_panel_annotation, _fig6b_blood_dist
-    Public API            generate_imeta_figures, build_imeta_section
+    Public API            generate_pub_figures, build_pub_section
 """
 
 import os
@@ -52,7 +52,7 @@ CLF_COLORS = {
 # Plot parameters
 BOOTSTRAP_N     = 1000
 DELONG_BOOT_N   = 2000
-FIG_DPI         = 300
+FIG_DPI         = 600
 FIG_FACECOLOR   = "white"
 DEFAULT_SEED    = 42
 
@@ -72,7 +72,7 @@ def _read_csv(path):
             return None
         return pd.read_csv(path, encoding="utf-8")
     except Exception as exc:
-        logger.warning("[imeta] read %s: %s", path, exc)
+        logger.warning("[pub] read %s: %s", path, exc)
         return None
 
 
@@ -658,11 +658,6 @@ def _fig3_combined(clf_pred_path: str, clf_sum_path: str, out_path: str,
     ax_bar.legend(loc="upper right", fontsize=7.5, ncol=3, framealpha=0.9)
     ax_bar.grid(axis="y", alpha=0.2)
 
-    fig.suptitle(
-        f"Figure 3 — Binary Classification Performance "
-        f"({ctx.cv_caption()}; 95% bootstrap CI on AUC and metrics)",
-        fontsize=12.5, fontweight="bold", y=1.02,
-    )
     fig.tight_layout()
     _savefig(fig, out_path)
     return True
@@ -1331,15 +1326,6 @@ def _fig6b_blood_dist(ext_val_path: str, out_path: str,
     # and the published cohort size in Hannum et al. 2013. Every other reference to
     # this dataset in the codebase, the docs and the manuscript says 656.
     ax.set_xlabel("Whole-blood mean β (GSE40279, n = 656 samples)", fontsize=12)
-    panel_n = ctx.panel_size if ctx.panel_size > 0 else "?"
-    ax.set_title(
-        f"Figure 6B — Blood Methylation Baseline: "
-        f"{len(matched)}/{panel_n} panel sites with matched 450K probe\n"
-        f"Blood-pass (β < {BLOOD_BETA_THRESHOLD}): {n_pass} sites   |   "
-        f"Blood-fail (β ≥ {BLOOD_BETA_THRESHOLD}): {n_fail} sites "
-        f"(potential leukocyte cfDNA confounders)",
-        fontsize=10, fontweight="bold",
-    )
 
     from matplotlib.patches import Patch
     import matplotlib.lines as mlines
@@ -1359,7 +1345,7 @@ def _fig6b_blood_dist(ext_val_path: str, out_path: str,
 # Main orchestrator
 # ─────────────────────────────────────────────────────────────────────────────
 
-def generate_imeta_figures(result_dir: str, report_dir: str) -> dict:
+def generate_pub_figures(result_dir: str, report_dir: str) -> dict:
     """Generate all auto-computable publication figures + DeLong tables.
 
     Returns ``{key: abs_path}`` for successfully produced outputs.
@@ -1399,9 +1385,9 @@ def generate_imeta_figures(result_dir: str, report_dir: str) -> dict:
         try:
             if fn(*args):
                 out[key] = out_path
-                logger.info("[imeta] %s → %s", key, os.path.basename(out_path))
+                logger.info("[pub] %s → %s", key, os.path.basename(out_path))
         except Exception as exc:
-            logger.warning("[imeta] %s failed: %s", key, exc, exc_info=False)
+            logger.warning("[pub] %s failed: %s", key, exc, exc_info=False)
 
     # DeLong tables (all 11 models — covers cfDNA vs CA-125 vs fusion comparisons)
     # plus the paired operating-point tests DeLong cannot provide.
@@ -1414,9 +1400,9 @@ def generate_imeta_figures(result_dir: str, report_dir: str) -> dict:
         try:
             if fn(clf_pred, path) is not None:
                 out[key] = path
-                logger.info("[imeta] %s → %s", key, fname)
+                logger.info("[pub] %s → %s", key, fname)
         except Exception as exc:
-            logger.warning("[imeta] %s failed: %s", key, exc)
+            logger.warning("[pub] %s failed: %s", key, exc)
 
     # Forest plot of 15 focused pairwise AUC comparisons (reads the CSVs just written)
     forest_path = os.path.join(imgs_dir, "pub_fig_delong_forest.png")
@@ -1425,10 +1411,10 @@ def generate_imeta_figures(result_dir: str, report_dir: str) -> dict:
                               out.get("delong_formal_csv", ""),
                               forest_path, ctx):
             out["fig_delong_forest"] = forest_path
-            logger.info("[imeta] fig_delong_forest → %s",
+            logger.info("[pub] fig_delong_forest → %s",
                         os.path.basename(forest_path))
     except Exception as exc:
-        logger.warning("[imeta] fig_delong_forest failed: %s", exc, exc_info=False)
+        logger.warning("[pub] fig_delong_forest failed: %s", exc, exc_info=False)
 
     return out
 
@@ -1558,14 +1544,14 @@ def _delong_table_html(df_tbl, mode: str) -> str:
     return rows
 
 
-def build_imeta_section(result_dir: str, imgs_dir: str) -> str:
+def build_pub_section(result_dir: str, imgs_dir: str) -> str:
     """Generate publication figures + DeLong tables and return an HTML fragment.
 
     ``imgs_dir`` must be the report's ``imgs/`` subdirectory so that the
     rendered ``<img>`` tags use correct relative paths.
     """
     report_dir = os.path.dirname(imgs_dir)
-    fig_paths  = generate_imeta_figures(result_dir, report_dir)
+    fig_paths  = generate_pub_figures(result_dir, report_dir)
     ctx        = fig_paths.get("_ctx") or _load_context(result_dir)
 
     def _img_block(key: str, alt: str, fig_label: str, caption: str) -> str:
@@ -1632,7 +1618,7 @@ def build_imeta_section(result_dir: str, imgs_dir: str) -> str:
   Full table: <code>pub_delong_test.csv</code>
 </p>"""
         except Exception as exc:
-            logger.warning("[imeta] bootstrap HTML: %s", exc)
+            logger.warning("[pub] bootstrap HTML: %s", exc)
 
     formal_tbl_html = ""
     dfp = fig_paths.get("delong_formal_csv")
@@ -1653,7 +1639,7 @@ def build_imeta_section(result_dir: str, imgs_dir: str) -> str:
   AUCs jointly. ✱ <em>p</em> &lt; 0.05. Full table: <code>pub_delong_formal.csv</code>
 </p>"""
         except Exception as exc:
-            logger.warning("[imeta] formal DeLong HTML: %s", exc)
+            logger.warning("[pub] formal DeLong HTML: %s", exc)
 
     if boot_tbl_html or formal_tbl_html:
         delong_formal_html = f"""

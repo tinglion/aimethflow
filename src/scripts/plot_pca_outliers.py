@@ -75,7 +75,7 @@ def plot_pca_outliers(result_dir: str, out_path: Optional[str] = None):
                 for sid, label in zip(sample_ids, y)}
 
     # ── plot ─────────────────────────────────────────────────────────────────
-    fig, ax = plt.subplots(figsize=(6, 5))
+    fig, ax = plt.subplots(figsize=(8, 6.5))
 
     for i, sid in enumerate(sample_ids):
         grp     = group_of[sid]
@@ -115,7 +115,7 @@ def plot_pca_outliers(result_dir: str, out_path: Optional[str] = None):
 
     if out_path is None:
         out_path = os.path.join(result_dir, "pca_outliers.png")
-    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    fig.savefig(out_path, dpi=600, bbox_inches="tight")
     plt.close(fig)
     print(f"[done] saved → {out_path}")
     print(f"       PC1={var[0]:.1f}%  PC2={var[1]:.1f}%  "

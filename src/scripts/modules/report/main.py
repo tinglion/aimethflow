@@ -407,11 +407,11 @@ def generate_report(
 
     # Publication figures (auto-generated; silently skipped if input CSVs absent)
     try:
-        from scripts.modules.imeta_utils import build_imeta_section as _build_imeta
-        sec_imeta_html = _build_imeta(result_dir, imgs_dir)
-    except Exception as _imeta_exc:
-        logger.warning("Publication figure generation skipped: %s", _imeta_exc)
-        sec_imeta_html = ""
+        from scripts.modules.pub_figures import build_pub_section as _build_pub
+        sec_pub_html = _build_pub(result_dir, imgs_dir)
+    except Exception as _pub_exc:
+        logger.warning("Publication figure generation skipped: %s", _pub_exc)
+        sec_pub_html = ""
 
     # QC table rows (paginated — see _pagination_widget below)
     qc_rows = ""
@@ -755,7 +755,7 @@ def generate_report(
 
 {sec15_html}
 
-{sec_imeta_html}
+{sec_pub_html}
 
 <!-- Step 20. Results Interpretation -->
 <div class="section">

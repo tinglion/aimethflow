@@ -110,6 +110,32 @@ def _result_dir() -> Path:
         return ROOT / "result"
 
 
+def _external_cohort_readiness() -> Optional[str]:
+    """Return an error message if Step 19b's external cohorts aren't ready, else None."""
+    ext_cfg = _cfg().get("external_cohort", {}) or {}
+    dirs = list(ext_cfg.get("dirs", []) or [])
+    labels = list(ext_cfg.get("labels", []) or [])
+    if not dirs:
+        return ("No external cohorts configured. Prepare one with "
+                 "src/scripts/prepare_external_matrix.py, then list its result "
+                 "directory in config.toml [external_cohort] dirs.")
+
+    missing = []
+    for i, d in enumerate(dirs):
+        label = labels[i] if i < len(labels) and labels[i] else d
+        cohort_dir = (ROOT / d) if not os.path.isabs(d) else Path(d)
+        if not cohort_dir.is_dir():
+            missing.append(f"{label}: directory not found ({d})")
+        elif not (cohort_dir / "feature_matrix.npz").exists():
+            missing.append(f"{label}: feature_matrix.npz not built yet ({d})")
+
+    if missing:
+        return ("External cohort data not ready:\n- " + "\n- ".join(missing) +
+                 "\n\nRun src/scripts/prepare_external_matrix.py for each "
+                 "missing cohort first.")
+    return None
+
+
 def _latest_workdir() -> Optional[Path]:
     dirs = sorted(_temp_dir().glob("20[0-9]*"), reverse=True)
     return dirs[0] if dirs else None
@@ -189,6 +215,11 @@ def run_step(step: str, workdir: Optional[str] = None, mode: str = "plasma"):
         raise HTTPException(400, f"Unknown step: {step}")
     if mode not in ("plasma", "tissue"):
         raise HTTPException(400, f"Invalid mode: {mode!r} — must be 'plasma' or 'tissue'")
+
+    if step == "external_cohort":
+        err = _external_cohort_readiness()
+        if err:
+            raise HTTPException(409, err)
 
     wd = workdir or str(_latest_workdir() or "")
     cmd = [

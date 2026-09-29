@@ -205,7 +205,7 @@ def compare_panel_effect(primary_dir, panel_dir):
     """
     import numpy as np
     from scipy import stats as _stats
-    from scripts.modules.imeta_utils import _fastdelong_cov
+    from scripts.modules.pub_figures import _fastdelong_cov
 
     a_all, b_all = _paired_probs(primary_dir), _paired_probs(panel_dir)
     # groupby returns classifiers alphabetically; restore the benchmark's order.

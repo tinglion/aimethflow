@@ -274,6 +274,56 @@ borderline_as_benign = false
 # is least discriminative. Output: temporal_validation_summary_lowca125.csv. Set to 0 or negative to disable.
 low_ca125_threshold = 105.0
 
+# Independent external cohort re-run (Step 19b — external_cohort)
+#
+# Each entry in `dirs` is a result directory prepared by
+# src/scripts/prepare_external_matrix.py and must contain feature_matrix.npz.
+# Step 19b re-runs the production Step 15 unmodified in each of them and writes
+# external_cohort_summary.csv into the MAIN result directory, so the HTML report
+# can show internal and external cohorts side by side.
+#
+# Three internal-cohort bindings are neutralised per external run, and only
+# these three: CA-125 fusion is disabled (CA-125 is keyed by internal sample
+# IDs, so no external sample resolves to a value),
+# [ml] exclude_samples is cleared (those IDs belong to the internal cohort),
+# and no panel_cpg file exists externally, so selection runs over the full
+# feature pool confined to each training fold.
+#
+# This validates the FRAMEWORK, not the 60-CpG panel: no public cohort shares
+# our probe set, so the panel itself cannot be transferred.
+#
+# An empty `dirs` list makes the step a no-op.
+[external_cohort]
+dirs      = ["result/external/ovaprint", "result/external/gse19711"]
+labels    = ["OvaPrint", "GSE19711"]   # display names, positional; falls back to the directory basename
+discovery = true   # also derive a panel de novo per cohort (Step 14) and report the
+                   # paired DeLong comparison against that cohort's full-matrix run
+
+# Sensitivity arms. Each entry is a second result directory built from the SAME
+# deposit by prepare_external_matrix.py under a different sample selection, run
+# through Step 15 and reported beside the primary arm under its own `arm` name.
+# `cohort` must match the cohort's display label (its `labels` entry, or the
+# directory basename when `labels` is empty).
+[[external_cohort.arms]]
+cohort = "OvaPrint"
+arm    = "hgsoc_matched"
+dir    = "result/external/ovaprint_hgsoc"
+
+[[external_cohort.arms]]
+cohort = "OvaPrint"
+arm    = "with_healthy_donors"
+dir    = "result/external/ovaprint_with_normals"
+
+[[external_cohort.arms]]
+cohort = "GSE19711"
+arm    = "all_cases"
+dir    = "result/external/gse19711_all_cases"
+
+[[external_cohort.arms]]
+cohort = "GSE19711"
+arm    = "balanced_batches"
+dir    = "result/external/gse19711_balanced"
+
 # Logging configuration
 [logging]
 # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL

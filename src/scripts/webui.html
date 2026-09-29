@@ -249,8 +249,11 @@
       if (wd) params.set('workdir', wd);
       params.set('mode', mode);
       const url = `${BASE}/api/run/${key}?${params.toString()}`;
-      const r = await fetch(url, { method: 'POST' }).then(r => r.json());
-      if (r.job_id) streamLogs(r.job_id);
+      const resp = await fetch(url, { method: 'POST' });
+      const r = await resp.json();
+      if (r.job_id) { streamLogs(r.job_id); return; }
+      document.getElementById('log-box').innerHTML =
+        `<span style="color:#c00">✗ ${escHtml(r.detail || 'Failed to start step')}</span>`;
     }
 
     function streamLogs(jobId) {

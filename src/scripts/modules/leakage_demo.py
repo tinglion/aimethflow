@@ -88,7 +88,7 @@ from scripts.modules.classifier_utils import (
     _impute_fit,
     _impute_transform,
 )
-from scripts.modules.imeta_utils import _fastdelong_cov
+from scripts.modules.pub_figures import _fastdelong_cov
 
 # arm -> what each preprocessing stage is allowed to see
 #   panel          : restrict to the cohort-defined deployment panel first

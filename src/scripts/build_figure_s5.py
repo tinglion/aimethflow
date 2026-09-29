@@ -14,7 +14,7 @@ import pandas as pd
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 OVAPRINT_CSV = os.path.join(PROJECT_ROOT, "result", "external", "ovaprint", "leakage_demo.csv")
 GSE19711_CSV = os.path.join(PROJECT_ROOT, "result", "external", "gse19711", "leakage_demo.csv")
-OUT_PATH = os.path.join(PROJECT_ROOT, "docs", "GPB", "resources", "figure_s5.png")
+OUT_PATH = os.path.join(PROJECT_ROOT, "docs", "GPB", "resources", "Figure S5.png")
 
 # Same palette and y-limits as Figure 4A (leakage_demo.py::_save_plot).
 ARM_COLORS = {"in_fold": "#4dac26", "naive_selection": "#e08214", "naive_full": "#d6604d"}
@@ -86,7 +86,7 @@ def main():
     fig.suptitle("Feature-selection leakage demonstration on external cohorts",
                  fontsize=13, y=1.02)
     fig.tight_layout(rect=[0, 0.06, 1, 1])
-    fig.savefig(OUT_PATH, dpi=300, bbox_inches="tight", facecolor="white")
+    fig.savefig(OUT_PATH, dpi=600, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     print(f"Saved: {OUT_PATH}")
 
